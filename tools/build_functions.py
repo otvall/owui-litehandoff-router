@@ -8,7 +8,6 @@ SOURCE = ROOT / 'src/lite_handoff_router'
 ENTRIES = {
     'router_preparation': 'Router Preparation',
     'lite_handoff_router': 'Lite Handoff Router',
-    'lite_delegate': 'Lite Delegate',
 }
 
 

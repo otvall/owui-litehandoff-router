@@ -3,6 +3,35 @@
 import json
 from uuid import uuid4
 
+from .runtime import require
+
+
+def delegate_tool(adapter, request, user, metadata, state):
+    """Build a request-local native Tool; no Workspace Tool upload is needed."""
+    async def lite_delegate(agent_id: str) -> str:
+        actor = await adapter.user(user.id)
+        current = require(request, metadata, actor.id)
+        if current is not state:
+            raise ValueError("Stale delegate request context")
+        return await delegate(adapter, request, actor, current, agent_id)
+
+    return {
+        "spec": {
+            "name": "lite_delegate",
+            "description": "Hand off this user request to an exact advertised Workspace Model ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {"agent_id": {
+                    "type": "string",
+                    "description": "Workspace Model ID from the current routing manifest.",
+                    "enum": list(state["registry"]),
+                }},
+                "required": ["agent_id"],
+            },
+        },
+        "callable": lite_delegate,
+    }
+
 
 def tool_image(message):
     content = message.get("content")

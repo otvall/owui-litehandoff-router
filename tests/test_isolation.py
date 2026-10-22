@@ -52,7 +52,7 @@ class IsolationTest(unittest.IsolatedAsyncioTestCase):
                 body = {"model": "router", "messages": [{"role": "user", "content": "task"}],
                         "tool_ids": ["b"], "skill_ids": ["forbidden-skill"], "tools": [],
                         "base_tool_ids": [], "base_skill_ids": ["client"], "params": {"function_calling": "legacy"}}
-                state = begin(request, body, metadata, "u", registry, [], ["base", "delegate"], [])
+                state = begin(request, body, metadata, "u", registry, [], ["base"], [])
                 fake_user_valves = {"id": "u", "valves": {"base_tool_ids": [], "skill_ids": ["foreign"]}}
                 await pipe.pipe(body, request, fake_user_valves, metadata)
                 self.assertTrue(adapter.calls[-1]["native"] == "native")

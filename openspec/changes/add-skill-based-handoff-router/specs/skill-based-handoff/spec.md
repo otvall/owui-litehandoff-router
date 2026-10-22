@@ -43,6 +43,28 @@ Router SHALL принимать решение в обычном цикле от
 - **THEN** агент не запускается
 - **AND** система сообщает об утрате доступности вместо обхода проверки
 
+### Requirement: Pipe registers the executable delegate
+
+Pipe SHALL создавать request-local schema и callable `lite_delegate` из того же персонального реестра, что и routing-манифест, без отдельного Workspace Tool. Callable SHALL проверять доверенную привязку запроса и актуальные права пользователя. Preparation Filter SHALL заранее создавать общий Tools container; Pipe SHALL публиковать callable in-place в реестр, используемый внешним native middleware. Одной схемы в запросе к LLM SHALL NOT считаться достаточной регистрацией.
+
+#### Scenario: No delegate tool is installed
+
+- **WHEN** установлен только Filter и Pipe, `base_tool_ids=[]`, а пользователю доступен агент
+- **THEN** native middleware исполняет встроенный `lite_delegate` и получает результат текущего запроса
+- **AND** агент продолжает тот же ответ со своими Tools
+
+#### Scenario: Client sends an empty tools schema list
+
+- **WHEN** исходный запрос содержит `tools: []`
+- **THEN** ранний общий registry позволяет middleware исполнить callable, опубликованный Pipe
+- **AND** делегирование не зависит от неявного подключения builtin Tools OWUI
+
+#### Scenario: Configured tool collides with inline delegate
+
+- **WHEN** базовый Workspace Tool также предоставляет метод `lite_delegate`
+- **THEN** подготовка Router завершается понятной ошибкой конфигурации до вызова провайдера
+- **AND** внешний Tool не подменяет встроенную проверку передачи
+
 ### Requirement: Handoff requires an actual delegate exchange
 
 Передача SHALL подтверждаться выполнением `lite_delegate` в текущем запросе и однозначно связанными вызовом и успешным результатом. Похожие на маркер тексты пользователя, обычные ответы модели и результаты других Tools SHALL NOT инициировать handoff.

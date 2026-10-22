@@ -30,7 +30,7 @@ class PreparationTest(unittest.IsolatedAsyncioTestCase):
              patch.object(router_preparation, "AGENTS", {"agent-a": "route-a"}):
             body = {"model": "router", "messages": [], "base_tool_ids": ["client"]}
             await instance.inlet(body, request, {"id": "u"})
-            self.assertEqual(require(request, body["metadata"], "u")["base_tool_ids"], ["lite_delegate"])
+            self.assertEqual(require(request, body["metadata"], "u")["base_tool_ids"], [])
             instance.valves.base_skill_ids = ["new-base"]
             next_body = {"model": "router", "messages": [], "metadata": {"message_id": "next"}}
             await instance.inlet(next_body, request, {"id": "u"})

@@ -1,4 +1,4 @@
-Build the independent Functions/Tool with `python tools/build_functions.py`.
+Build the two independent Functions with `python tools/build_functions.py`.
 No build-time downloads are performed.
 
 `acceptance_provider.py` is a deterministic provider, not an LLM evaluation.
@@ -24,6 +24,11 @@ that directory. Use only a disposable test instance. Checks drive real HTTP
 requests and native saved-chat processing, including parallel users, new turns,
 provider/context/resource errors and revocation between discovery and handoff.
 They briefly replace a test Valve/grant and restore it in `finally`.
+Setup removes the obsolete `lhr_delegate` fixture Tool and sets empty base Tool
+Valves. Snapshot the old installation before setup when testing an upgrade;
+snapshot/restore supports both versions, including the optional legacy Tool.
+Checks verify the inline callable's actual result and an explicit `tools: []`
+request, in addition to confirming that the separate delegate Tool is absent.
 
 To repeat offline acceptance, disconnect the container from its Docker network,
 run setup/checks, and reconnect it afterwards. The provider and MCP stay on

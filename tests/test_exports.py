@@ -18,6 +18,7 @@ class ExportsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             builder.build(folder)
             paths = sorted(Path(folder).glob("*.py"))
+            self.assertEqual([path.name for path in paths], ["lite_handoff_router.py", "router_preparation.py"])
             before = [hashlib.sha256(p.read_bytes()).hexdigest() for p in paths]
             builder.build(folder)
             self.assertEqual(before, [hashlib.sha256(p.read_bytes()).hexdigest() for p in paths])

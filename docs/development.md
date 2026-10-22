@@ -19,5 +19,5 @@ python3 -m venv .venv
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 ```
 
-Это установка пакета для разработки. Для сервера OWUI используются три
+Это установка пакета для разработки. Для сервера OWUI используются два
 самостоятельных файла `dist/`, которым этот пакет и checkout не нужны.

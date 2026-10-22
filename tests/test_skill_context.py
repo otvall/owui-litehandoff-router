@@ -18,7 +18,7 @@ class SkillContextTest(unittest.IsolatedAsyncioTestCase):
         source = [{"role": "user", "content": "Task <$foreign|Foreign>"}]
         body, metadata = {"model": "router", "messages": copy.deepcopy(source)}, {}
         registry = {"a": {"agent_id": "a", "skill_id": "route-a", "name": "Route A"}}
-        state = begin(request, body, metadata, "u", registry, [], ["delegate"], ["router-guide"])
+        state = begin(request, body, metadata, "u", registry, [], [], ["router-guide"])
         body["messages"].insert(0, {"role": "system", "content": "BROAD_FOREIGN_INSTRUCTIONS"})
         metadata.update(skill_ids=["foreign"], chat_context={"mentioned_skill_ids": ["foreign"], "skill_versions": {"foreign": "v0", "router-guide": "old"}})
         adapter = IsolatedAdapter()

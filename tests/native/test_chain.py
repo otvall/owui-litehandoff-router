@@ -18,7 +18,7 @@ PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0l
 
 
 class NativeChainTest(unittest.IsolatedAsyncioTestCase):
-    async def test_three_exports_delegate_agent_tool_and_final_same_message(self):
+    async def test_two_exports_inline_delegate_agent_tool_and_final_same_message(self):
         from fastapi import FastAPI
         from starlette.requests import Request
         from open_webui.config import DEFAULT_CONFIG
@@ -39,7 +39,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         await Config.seed_defaults(DEFAULT_CONFIG)
         await Config.upsert({"chat.context_compaction.enable": False})
         suffix = uuid4().hex[:10]
-        pipe_id, tool_id, delegate_id = "router_" + suffix, "lookup_" + suffix, "delegate_" + suffix
+        pipe_id, tool_id = "router_" + suffix, "lookup_" + suffix
         router_id, agent_id, skill_id = "entry-" + suffix, "agent-a-" + suffix, "route-a-" + suffix
         user = await Users.insert_new_user("user-" + suffix, "Native User", suffix + "@example.test", role="admin")
         app = FastAPI()
@@ -60,7 +60,6 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         set_function_module_in_cache(request, pipe_id, pipe_content, pipe, pipe_source)
 
         for identifier, content in (
-            (delegate_id, (ROOT / "dist/lite_delegate.py").read_text()),
             (tool_id, f'''class Tools:
     async def profile_lookup(self, query: str, __user__: dict, __messages__: list, __metadata__: dict) -> str:
         assert "INLET_A" in str(__messages__)
@@ -113,7 +112,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
 
         preparation, _, _, prep_source = await load_function_module_by_id("prep_" + suffix, (ROOT / "dist/router_preparation.py").read_text())
         prep_source.AGENTS = {agent_id: skill_id}
-        preparation.valves.base_tool_ids = [delegate_id]
+        self.assertEqual(preparation.valves.base_tool_ids, [])
         metadata = {"chat_id": "local:" + suffix, "message_id": "answer-" + suffix, "session_id": "test-session-" + suffix,
                     "params": {"function_calling": "native", "tool_approval_mode": "full"}, "files": [{"id": "user-file"}],
                     "variables": {"{{ticket}}": "T42"}}
@@ -180,6 +179,14 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([item for item in output if item.get("status") in {"failed", "incomplete", "rejected"}], output)
         self.assertTrue(any("TOOL_RESULT_42:" + user.id in str(item.get("output"))
                             for item in output if item.get("type") == "function_call_output"), output)
+        import json
+        delegate_call = next(item for item in output if item.get("type") == "function_call" and item["name"] == "lite_delegate")
+        self.assertEqual(delegate_call["status"], "completed")
+        delegate_result = next(item for item in output if item.get("type") == "function_call_output" and item.get("call_id") == delegate_call["call_id"])
+        marker = json.loads("".join(part.get("text", "") for part in delegate_result["output"]))
+        self.assertEqual(marker, request.scope["lite_handoff_router"]["pending"][0])
+        self.assertEqual(marker["agent_id"], agent_id)
+        self.assertEqual(marker["request_id"], request.scope["lite_handoff_router"]["request_id"])
         self.assertEqual(metadata["chat_id"], "local:" + suffix)
         self.assertEqual(metadata["message_id"], "answer-" + suffix)
         self.assertEqual(request.scope["lite_handoff_router"]["active_agent"], agent_id)
@@ -287,7 +294,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
 
         saved_tools = preparation.valves.base_tool_ids
         try:
-            preparation.valves.base_tool_ids = [delegate_id, "missing-required-tool-" + suffix]
+            preparation.valves.base_tool_ids = ["missing-required-tool-" + suffix]
             _, resource_ctx, resource_seen, resource_events = await next_turn("general question")
             self.assertEqual(resource_seen, [], resource_events)
             self.assertIn("Required model Tools unavailable", str(resource_events))

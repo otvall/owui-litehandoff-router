@@ -8,7 +8,7 @@
 
 ### Requirement: Router base capabilities come from administrative valves
 
-Система SHALL получать базовые Tools и Skills Router только из административных Valves `base_tool_ids` и `base_skill_ids`. Их подключение SHALL NOT требовать attachments в карточке Router или создавать в чате выбранные пользователем ресурсы. Клиентские параметры и UserValves SHALL NOT изменять этот набор.
+Система SHALL получать настраиваемые базовые Tools и Skills Router только из административных Valves `base_tool_ids` и `base_skill_ids`. Их подключение SHALL NOT требовать attachments в карточке Router или создавать в чате выбранные пользователем ресурсы. Клиентские параметры и UserValves SHALL NOT изменять этот набор. Встроенный `lite_delegate` SHALL добавляться Pipe отдельно при непустом персональном реестре; default обоих списков SHALL быть `[]`.
 
 #### Scenario: Empty router attachments still provide the configured base
 
@@ -165,10 +165,10 @@ Router SHALL получать базовые Tools и Skills из админис
 
 ### Requirement: Standalone offline installation on the supported version
 
-Комплект SHALL устанавливаться как один Filter, один Pipe и один Tool в OWUI v0.12.3. После установки эти файлы SHALL работать без импорта модулей данного репозитория и без доступа к интернету, используя заранее установленные зависимости и доступные внутри контура модели и сервисы.
+Комплект SHALL устанавливаться как один Filter и один Pipe со встроенным `lite_delegate` в OWUI v0.12.3. Отдельный Workspace Tool делегирования и его read-grant SHALL NOT требоваться. После установки эти файлы SHALL работать без импорта модулей данного репозитория и без доступа к интернету, используя заранее установленные зависимости и доступные внутри контура модели и сервисы.
 
 #### Scenario: Installation into an isolated OWUI instance
 
-- **WHEN** три установочных файла загружены в OWUI v0.12.3, а модели и ресурсы заранее настроены внутри контура
+- **WHEN** два установочных файла загружены в OWUI v0.12.3, а модели и ресурсы заранее настроены внутри контура
 - **THEN** самостоятельный ответ и handoff выполняются без внешних загрузок и отдельного сервиса оркестрации
-- **AND** отсутствие рабочего каталога этого репозитория на сервере не нарушает импорт Functions и Tool
+- **AND** отсутствие рабочего каталога этого репозитория на сервере не нарушает импорт Functions

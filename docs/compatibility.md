@@ -6,7 +6,7 @@
 для официального Docker-образа без metadata — штатная `open_webui.env.VERSION`.
 Оба варианта допускают только 0.12.3. Другие версии требуют отдельной проверки.
 
-Обычные тесты и тесты трёх самостоятельных exports:
+Обычные тесты и тесты двух самостоятельных exports:
 
 ```sh
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v

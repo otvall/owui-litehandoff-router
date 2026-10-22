@@ -44,7 +44,7 @@ class AtomicTest(unittest.IsolatedAsyncioTestCase):
         })))
         body = {"model": "router", "messages": [{"role": "user", "content": "task"}]}
         metadata = {"message_id": "message"}
-        state = begin(request, body, metadata, "u", {"a": {"agent_id": "a", "skill_id": "route-a", "name": "A"}}, [], ["base", "delegate"], [])
+        state = begin(request, body, metadata, "u", {"a": {"agent_id": "a", "skill_id": "route-a", "name": "A"}}, [], ["base"], [])
         pipe = lite_handoff_router.Pipe()
         pipe.valves.orchestrator_model_id = "llm"
         with patch.object(lite_handoff_router, "OWUIAdapter", return_value=adapter):

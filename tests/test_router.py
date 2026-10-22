@@ -37,14 +37,8 @@ class Adapter:
         async def base_helper():
             return "base works"
 
-        async def delegate(agent_id):
-            return "pending"
-
         return {
             "base_helper": {"tool_id": "base", "spec": {"name": "base_helper", "parameters": {}}, "callable": base_helper},
-            "lite_delegate": {"tool_id": "delegate", "spec": {"name": "lite_delegate", "parameters": {
-                "type": "object", "properties": {"agent_id": {"type": "string"}}, "required": ["agent_id"],
-            }}, "callable": delegate},
         }
 
     async def builtins(self, request, model, extra):
@@ -61,6 +55,20 @@ class Adapter:
 
 
 class RouterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_separate_delegate_tool_cannot_replace_the_inline_callable(self):
+        adapter = Adapter()
+        loaded = await adapter.tools(None, [], User(), {})
+        loaded["lite_delegate"] = {"spec": {"name": "lite_delegate"}, "callable": lambda: "untrusted"}
+
+        async def tools(*args):
+            return loaded
+        adapter.tools = tools
+        request = SimpleNamespace(scope={}, app=SimpleNamespace(state=SimpleNamespace(MODELS={"llm": {"owned_by": "openai"}})))
+        state = {"request_id": "request", "router_id": "router", "source": [], "registry": {"a": {"agent_id": "a", "skill_id": "route-a", "name": "A"}},
+                 "base_tool_ids": ["base"], "base_skill_ids": []}
+        with self.assertRaisesRegex(ValueError, "Reserved delegate Tool collision"):
+            await prepare_model(adapter, request, {}, User(), {}, state, "llm", {})
+
     async def test_personal_manifest_enum_and_empty_registry_do_not_mutate_shared_schema(self):
         adapter = Adapter()
         shared = await adapter.tools(None, [], User(), {})
@@ -74,7 +82,7 @@ class RouterTest(unittest.IsolatedAsyncioTestCase):
         async def prepare(agent, base_skills):
             registry = {agent: {"agent_id": agent, "skill_id": "route-" + agent, "name": agent, "description": "Purpose"}} if agent else {}
             state = {"request_id": "request", "router_id": "router", "source": [{"role": "user", "content": "Hello"}],
-                     "registry": registry, "base_tool_ids": ["base", "delegate"], "base_skill_ids": base_skills}
+                     "registry": registry, "base_tool_ids": ["base"], "base_skill_ids": base_skills}
             return await prepare_model(adapter, request, {}, User(), {}, state, "llm", {})
 
         one, two = await asyncio.gather(prepare("agent-a", []), prepare("agent-b", []))
@@ -82,7 +90,8 @@ class RouterTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tools["lite_delegate"]["spec"]["parameters"]["properties"]["agent_id"]["enum"], [agent])
             self.assertIn('"agent_id": "' + agent + '"', body["messages"][0]["content"])
             self.assertIn('"skill_id": "route-' + agent + '"', body["messages"][0]["content"])
-        self.assertNotIn("enum", shared["lite_delegate"]["spec"]["parameters"]["properties"]["agent_id"])
+        self.assertNotIn("lite_delegate", shared)
+        self.assertIsNot(one[1]["lite_delegate"]["spec"], two[1]["lite_delegate"]["spec"])
         body, tools = await prepare(None, ["base-skill"])
         self.assertNotIn("lite_delegate", tools)
         self.assertIn("base_helper", tools)
@@ -97,7 +106,7 @@ class RouterTest(unittest.IsolatedAsyncioTestCase):
         metadata = {}
         begin(request, body, metadata, "u", {"agent-a": {
             "agent_id": "agent-a", "skill_id": "route-a", "name": "Route", "description": "Profiled questions",
-        }}, [], ["base", "delegate"], [])
+        }}, [], ["base"], [])
         original = copy.deepcopy(body)
         adapter = Adapter()
         pipe = lite_handoff_router.Pipe()

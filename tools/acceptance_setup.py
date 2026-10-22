@@ -85,8 +85,9 @@ def setup():
     function("lhr_router", "lite_handoff_router.py", "LHR Router Pipe")
     function("lhr_preparation", "router_preparation.py", "LHR Router Preparation")
     api("/api/v1/functions/id/lhr_router/valves/update", {"orchestrator_model_id": "router-llm"})
-    api("/api/v1/functions/id/lhr_preparation/valves/update", {"base_tool_ids": ["lhr_delegate"], "base_skill_ids": []})
-    tool("lhr_delegate", "LHR Delegate", (ROOT / "dist/lite_delegate.py").read_text(), "ab")
+    api("/api/v1/functions/id/lhr_preparation/valves/update", {"base_tool_ids": [], "base_skill_ids": []})
+    if any(item["id"] == "lhr_delegate" for item in api("/api/v1/tools/")):
+        api("/api/v1/tools/id/lhr_delegate/delete", method="DELETE")
     for letter in "ab":
         tool("lhr_lookup_" + letter, "LHR Lookup " + letter.upper(), f'''import json
 class Tools:
@@ -140,10 +141,12 @@ class Tools:
 def snapshot():
     functions = [api("/api/v1/functions/id/" + identifier) for identifier in ("lhr_router", "lhr_preparation")]
     private_json(ROOT / "installation-backup.json", {
-        "functions": functions, "tool": api("/api/v1/tools/id/lhr_delegate"),
+        "functions": functions,
+        "tool": (api("/api/v1/tools/id/lhr_delegate")
+                 if any(item["id"] == "lhr_delegate" for item in api("/api/v1/tools/")) else None),
         "valves": {item["id"]: api("/api/v1/functions/id/" + item["id"] + "/valves") for item in functions},
     })
-    print("Three exports and administrative Valves saved")
+    print("Functions, administrative Valves and optional legacy delegate Tool saved")
 
 
 def restore():
@@ -151,8 +154,12 @@ def restore():
     for item in backup["functions"]:
         api("/api/v1/functions/id/" + item["id"] + "/update", item)
         api("/api/v1/functions/id/" + item["id"] + "/valves/update", backup["valves"][item["id"]])
-    api("/api/v1/tools/id/lhr_delegate/update", backup["tool"])
-    print("Three exports and administrative Valves restored")
+    exists = any(item["id"] == "lhr_delegate" for item in api("/api/v1/tools/"))
+    if backup.get("tool"):
+        api("/api/v1/tools/id/lhr_delegate/update" if exists else "/api/v1/tools/create", backup["tool"])
+    elif exists:
+        api("/api/v1/tools/id/lhr_delegate/delete", method="DELETE")
+    print("Functions, administrative Valves and optional legacy delegate Tool restored")
 
 
 if __name__ == "__main__":

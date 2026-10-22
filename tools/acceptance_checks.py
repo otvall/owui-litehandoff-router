@@ -9,7 +9,7 @@ from uuid import uuid4
 from acceptance_setup import api, STATE, ROOT
 
 
-def turn(question, token=None, chat_id=None, parent=None):
+def turn(question, token=None, chat_id=None, parent=None, tools=None):
     user_id, answer_id = str(uuid4()), str(uuid4())
     form = {"model": "lhr-router", "stream": True, "session_id": "lhr-acceptance-" + uuid4().hex,
             "id": answer_id, "parent_id": parent, "messages": [{"role": "user", "content": question}],
@@ -17,6 +17,8 @@ def turn(question, token=None, chat_id=None, parent=None):
                              "content": question, "timestamp": int(time.time()), "models": ["lhr-router"]}}
     if chat_id:
         form["chat_id"] = chat_id
+    if tools is not None:
+        form["tools"] = tools
     started = api("/api/chat/completions", form, token=token)
     chat_id = started["chat_id"]
     for _ in range(300):
@@ -39,6 +41,11 @@ def completed(message, agent, actor):
     assert all(item.get("status") == "completed" for item in output), output
     assert [item["name"] for item in calls(message)] == ["view_skill", "lite_delegate", "view_skill", "profile_lookup", f"lhr_{agent}_mcp_echo"]
     results = [item for item in output if item.get("type") == "function_call_output"]
+    handoff = next(item for item in calls(message) if item["name"] == "lite_delegate")
+    result = next(item for item in results if item["call_id"] == handoff["call_id"])
+    marker = json.loads("".join(part.get("text", "") for part in result["output"]))
+    assert marker["__lite_delegate__"] == "v2" and marker["agent_id"] == f"agent-{agent}-lhr"
+    assert marker["request_id"] and marker["nonce"]
     assert actor in str(results[-1]["output"]), results[-1]
     assert actor in str(results[-2]["output"]), results[-2]
     assert any(item.get("description") == "Передача: LHR Agent " + agent.upper() for item in message.get("statusHistory", []))
@@ -47,6 +54,9 @@ def completed(message, agent, actor):
 def check():
     state = json.loads(STATE.read_text())
     result = {}
+    assert not any(item["id"] == "lhr_delegate" for item in api("/api/v1/tools/"))
+    assert api("/api/v1/functions/id/lhr_preparation/valves")["base_tool_ids"] == []
+    result["no_workspace_delegate_tool"] = True
     with ThreadPoolExecutor(2) as pool:
         pending = {letter: pool.submit(turn, "profile " + letter + " parallel acceptance", state["users"][letter]["token"])
                    for letter in "ab"}
@@ -59,6 +69,9 @@ def check():
     _, _, message = turn("profile b requested by A", a["token"])
     completed(message, "a", a["id"])
     result["personal_registry"] = True
+    _, _, message = turn("profile a explicit empty tools", a["token"], tools=[])
+    completed(message, "a", a["id"])
+    result["explicit_empty_tools"] = True
 
     chat_id, answer_id, message = turn("profile a sequential acceptance")
     completed(message, "a", api("/api/v1/auths/")["id"])
@@ -83,7 +96,7 @@ def check():
 
     valves = api("/api/v1/functions/id/lhr_preparation/valves")
     try:
-        api("/api/v1/functions/id/lhr_preparation/valves/update", {**valves, "base_tool_ids": ["lhr_delegate", "lhr_missing_required"]})
+        api("/api/v1/functions/id/lhr_preparation/valves/update", {**valves, "base_tool_ids": ["lhr_missing_required"]})
         _, _, message = turn("missing resource acceptance", a["token"])
         assert "Required model Tools unavailable" in str(message.get("error")), message
         assert not calls(message)

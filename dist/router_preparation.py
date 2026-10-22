@@ -221,7 +221,7 @@ class Filter:
 
     class Valves(BaseModel):
         priority: int = 0
-        base_tool_ids: list[str] = Field(default_factory=lambda: ['lite_delegate'])
+        base_tool_ids: list[str] = Field(default_factory=list)
         base_skill_ids: list[str] = Field(default_factory=list)
 
     def __init__(self):

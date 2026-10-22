@@ -2,6 +2,8 @@
 
 Дата: 2026-10-22. Область: штатный streaming Tool loop Open WebUI, без изменения OWUI и без собственного цикла исполнения Tools внутри Pipe.
 
+Историческое состояние исходников в этом отчёте — коммит `92fc3c9`, до переноса delegate. В дальнейшем inline delegate реализован и проверен с сохранением текущего Filter; результаты приведены в [acceptance.md](acceptance.md#перенос-lite_delegate-внутрь-pipe). Удаление самого Filter по-прежнему не реализовано.
+
 **Вывод:** разместить реализацию delegate callable внутри Pipe технически можно. Однако простое перемещение `begin()` из Filter в `Pipe.pipe()` не сохраняет общий контракт. В штатной UI-ветке внешний loop и Pipe получают разные словари metadata. Если до вызова Pipe не появился общий `tools` registry, поздняя регистрация только в `__metadata__` или `request.state.metadata` не достигает registry внешнего loop. Это следует из исходников и подтверждено узкой HTTP-пробой основного агента. Регистрация callable внутри Pipe при уже существующем общем registry также подтверждена этой пробой; полная эквивалентность Router/Agent продукта одним Pipe не проверена.
 
 Исследовательский агент выполнил чтение исходников и статическую сверку wheel. HTTP-пробу выполнил **основной агент**, её результаты вынесены в раздел 6. Проба использует scripted SSE вместо настоящей LLM; она не является проверкой переработанного Lite Handoff Router или полной браузерной приёмкой.
@@ -106,7 +108,7 @@ Endpoint формирует `metadata['params']['function_calling']` из reques
 | [`entrypoints/router_preparation.py`](../src/lite_handoff_router/entrypoints/router_preparation.py), строки 21–29 | Выполняет discovery и `begin()` на Filter inlet. |
 | [`runtime.py`](../src/lite_handoff_router/runtime.py), строки 14–43 | Создаёт доверенный scope state; сохраняет корневую per-model metadata в `scope['lite_handoff_metadata']`; заранее создаёт Tools container; сохраняет source; удаляет selected tool/skill IDs; задаёт native для последующих стадий. |
 | [`runtime.py`](../src/lite_handoff_router/runtime.py), строки 47–80 | Проверяет receipt против server scope; публикует инструменты in-place в Tools container корневой metadata и синхронизирует metadata. |
-| [`entrypoints/lite_delegate.py`](../src/lite_handoff_router/entrypoints/lite_delegate.py), строки 8–17 | Предоставляет callable, который проверяет server binding и выполняет протокол pending handoff. |
+| `entrypoints/lite_delegate.py` из коммита `92fc3c9`, строки 8–17 | Предоставляет callable, который проверяет server binding и выполняет протокол pending handoff; позднее отдельный entrypoint удалён. |
 | [`model_execution.py`](../src/lite_handoff_router/model_execution.py), строки 53–81, 95–115 | Загружает исполняемые capabilities; сегодня требует отдельно загруженный `lite_delegate` среди base Tools; ограничивает `agent_id`; строит schemas и registry; защищает reserved Tools от подмены inlet. |
 | [`entrypoints/lite_handoff_router.py`](../src/lite_handoff_router/entrypoints/lite_handoff_router.py), строки 20–53 | Требует подготовленный state, сохраняет continuation source, выбирает подтверждённую цель, готовит модель, публикует registry и возвращает provider response внешнему loop. |
 

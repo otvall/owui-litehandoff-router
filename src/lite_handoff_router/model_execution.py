@@ -7,6 +7,7 @@ from .skills import READERS, manifest, prepare_skill_scope, scoped_reader
 from .capabilities import load_capabilities
 from .binding import bind_tool_context
 from .history import router_projection, agent_projection
+from .protocol import delegate_tool
 
 ENVELOPE = frozenset({"stream", "stream_options", "files"})
 
@@ -56,9 +57,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     for instruction in mcp_instructions:
         draft["messages"].insert(0, {"role": "system", "content": instruction})
     if state["registry"] and not target:
-        if "lite_delegate" not in tools:
-            raise ValueError("base_tool_ids must contain a Tool providing lite_delegate")
-        tools["lite_delegate"]["spec"]["parameters"]["properties"]["agent_id"]["enum"] = list(state["registry"])
+        if "lite_delegate" in tools:
+            raise ValueError("Reserved delegate Tool collision: lite_delegate; remove the separate delegate Tool from base_tool_ids")
+        tools["lite_delegate"] = delegate_tool(adapter, request, user, metadata, state)
     else:
         tools.pop("lite_delegate", None)
     if skill_ids:

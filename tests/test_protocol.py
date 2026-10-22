@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from lite_handoff_router.protocol import confirmed_target, delegate
+from lite_handoff_router.protocol import confirmed_target, delegate, delegate_tool
 from tests.test_preparation import Directory
 from tests.test_router import Adapter, User
 from lite_handoff_router.entrypoints import lite_handoff_router
@@ -66,13 +66,28 @@ class ProtocolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.state["pending"], [])
         self.assertIsNone(self.state["active_agent"])
 
+    async def test_inline_callable_checks_enum_and_cannot_survive_a_new_request_binding(self):
+        request = SimpleNamespace(scope={}, app=self.request.app)
+        metadata = {"message_id": "first"}
+        body = {"model": "router", "messages": []}
+        state = begin(request, body, metadata, "u", self.state["registry"], [], [], [])
+        tool = delegate_tool(Directory(), request, self.user, metadata, state)
+        with self.assertRaisesRegex(ValueError, "exact Workspace Model ID"):
+            await tool["callable"](agent_id="route-a")
+        self.assertEqual(state["pending"], [])
+        result = json.loads(await tool["callable"](agent_id="a"))
+        self.assertEqual(result, state["pending"][0])
+        begin(request, body, {"message_id": "second"}, "u", state["registry"], [], [], [])
+        with self.assertRaisesRegex(ValueError, "stale"):
+            await tool["callable"](agent_id="a")
+
     async def test_pipe_selects_only_after_successful_exchange(self):
         request = SimpleNamespace(scope={}, state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(
             MODELS={"llm": {"owned_by": "openai"}, "a": {"owned_by": "openai"}}
         )))
         metadata = {}
         initial = {"model": "router", "messages": [{"role": "user", "content": "question"}]}
-        state = begin(request, initial, metadata, "u", {"a": {"agent_id": "a", "skill_id": "route-a", "name": "A"}}, [], ["base", "delegate"], [])
+        state = begin(request, initial, metadata, "u", {"a": {"agent_id": "a", "skill_id": "route-a", "name": "A"}}, [], ["base"], [])
         result = await delegate(Directory(), self.request, self.user, state, "a")
         continuation = {**initial, "messages": initial["messages"] + [
             {"role": "assistant", "tool_calls": [call("lite_delegate", "d", {"agent_id": "a"})]},
