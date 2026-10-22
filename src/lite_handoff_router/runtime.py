@@ -7,11 +7,14 @@ cannot establish the server binding in a different HTTP request.
 from copy import deepcopy
 from uuid import uuid4
 
+from .parallel_state import group_state
+
 SCOPE_KEY = "lite_handoff_router"
 RECEIPT = "lite_router"
 
 
-def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids):
+def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids,
+          *, max_parallel_tasks=4, parallel_timeout_seconds=300):
     state = {
         "request_id": uuid4().hex, "user_id": user_id,
         "chat_id": metadata.get("chat_id"), "message_id": metadata.get("message_id"),
@@ -24,6 +27,7 @@ def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, ski
         "user_boundary": next((i for i in range(len(body.get("messages", [])) - 1, -1, -1)
                                if body["messages"][i].get("role") == "user"), -1),
         "generation": 0, "audit": [],
+        "parallel": group_state(max_parallel_tasks, parallel_timeout_seconds),
     }
     request.scope[SCOPE_KEY] = state
     request.scope["lite_handoff_metadata"] = metadata

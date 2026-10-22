@@ -7,17 +7,20 @@ from .binding import bind_tool_context
 READERS = frozenset({"view_skill", "read_skill_file", "grep_skill_files"})
 
 
-async def scoped_reader(adapter, tool, allowed_ids, user, messages):
+async def scoped_reader(adapter, tool, allowed_ids, user, messages, check_scope=None):
     allowed = frozenset(allowed_ids)
 
     async def check(arguments):
         skill_id = arguments.get("id")
         if not isinstance(skill_id, str) or skill_id not in allowed:
             raise ValueError("Skill is outside the current model scope")
-        # Preserve native authorization, also refusing inactive owner-readable skills.
-        await adapter.skill(skill_id, user)
+        if check_scope is not None:
+            await check_scope(skill_id)
+        else:
+            await adapter.skill(skill_id, user)
 
-    return await bind_tool_context(adapter, tool, messages, check=check)
+    return await bind_tool_context(adapter, tool, messages, check=check,
+                                   pinned={"__user__": user.model_dump()})
 
 
 def prepare_skill_scope(metadata, state, model_id, skill_ids):

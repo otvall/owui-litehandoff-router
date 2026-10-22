@@ -17,6 +17,10 @@ TRACE = Path(__file__).resolve().parent / "mcp-trace.jsonl"
 async def mcp_echo(value: str, ctx: Context) -> str:
     actor = ctx.request_context.request.headers.get("x-execution-user", "")
     record = {"value": value, "actor": actor}
+    authorization = ctx.request_context.request.headers.get("authorization", "")
+    if authorization.startswith("Bearer resource-fixture-"):
+        record["oauth_matches_actor"] = authorization == "Bearer resource-fixture-" + actor
+        assert record["oauth_matches_actor"]
     with TRACE.open("a") as trace:
         trace.write(json.dumps(record) + "\n")
     return json.dumps(record)

@@ -26,7 +26,11 @@ class NativeRegistryTest(unittest.IsolatedAsyncioTestCase):
         await Groups.add_users_to_group(child.id, [one.id])
         await Groups.add_users_to_group(ga.id, [multi.id])
         await Groups.add_users_to_group(gb.id, [two.id, multi.id])
-        models, catalog = {"router": {"pipe": {"type": "pipe", "id": "router"}}}, {}
+        router_id = "router-" + suffix
+        router = await Models.insert_new_model(ModelForm(id=router_id, name=router_id, params={}, meta={}), owner.id)
+        models, catalog = {router_id: {"id": router_id, "pipe": {"type": "pipe"}, "info": router.model_dump()}}, {}
+        for actor in (one, two, multi, individual):
+            await AccessGrants.grant_access("model", router_id, "user", actor.id, "read")
         grants = []
         for letter, group in (("a", ga), ("b", gb)):
             model_id, base_id, skill_id = (f"{prefix}-{letter}-{suffix}" for prefix in ("agent", "base", "route"))
@@ -36,23 +40,22 @@ class NativeRegistryTest(unittest.IsolatedAsyncioTestCase):
                 await AccessGrants.grant_access("model", identifier, "group", group.id, "read")
                 grants.append(("model", identifier, "group", group.id, "read"))
             await Skills.insert_new_skill(owner.id, SkillForm(id=skill_id, name=skill_id, description="Route.", content="Instructions", meta={}))
-            await AccessGrants.grant_access("skill", skill_id, "group", group.id, "read")
             catalog[model_id] = skill_id
             if letter == "a":
-                for kind, identifier in (("model", model_id), ("model", base_id), ("skill", skill_id)):
+                for kind, identifier in (("model", model_id), ("model", base_id)):
                     await AccessGrants.grant_access(kind, identifier, "user", individual.id, "read")
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(MODELS=models)))
         adapter = OWUIAdapter()
 
         async def available(user):
-            entries, _ = await discover(adapter, request, user, catalog, "router")
+            entries, _ = await discover(adapter, request, user, catalog, router_id)
             return set(entries)
 
         a, b = list(catalog)
         actual = await asyncio.gather(*(available(user) for user in (one, two, multi, individual)))
         self.assertEqual(actual, [{a}, {b}, {a, b}, {a}])
-        snapshot, _ = await discover(adapter, request, one, catalog, "router")
-        state = {"request_id": "current", "active_agent": None, "pending": [], "registry": snapshot, "phase": "router"}
+        snapshot, _ = await discover(adapter, request, one, catalog, router_id)
+        state = {"request_id": "current", "router_id": router_id, "active_agent": None, "pending": [], "registry": snapshot, "phase": "router"}
         # A model grant alone cannot bypass a revoked base-model grant.
         await AccessGrants.revoke_access(*grants[0])
         with self.assertRaises(Exception):
@@ -62,7 +65,10 @@ class NativeRegistryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await available(one), set())
         self.assertEqual(await available(multi), {b})
         self.assertEqual(await available(individual), {a})
-        await AccessGrants.revoke_access("skill", catalog[a], "user", individual.id, "read")
+        with self.assertRaises(Exception):
+            await adapter.skill(catalog[a], individual)
+        self.assertEqual(await available(individual), {a})
+        await Skills.toggle_skill_by_id(catalog[a])
         self.assertEqual(await available(individual), set())
         await Models.toggle_model_by_id(b)
         self.assertEqual(await available(two), set())

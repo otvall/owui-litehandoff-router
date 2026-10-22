@@ -3,16 +3,18 @@
 import inspect
 
 
-async def bind_tool_context(adapter, tool, messages, check=None):
+async def bind_tool_context(adapter, tool, messages, check=None, pinned=None):
     function = tool["callable"]
     original = getattr(function, "__function__", function)
     extra = getattr(function, "__extra_params__", None)
     signature = inspect.signature(original)
-    if check is None and "__messages__" not in signature.parameters:
+    pinned = {key: value for key, value in (pinned or {}).items() if key in signature.parameters}
+    if check is None and not pinned and (messages is None or "__messages__" not in signature.parameters):
         return tool
 
     async def protected(*args, **kwargs):
-        if "__messages__" in signature.parameters:
+        kwargs.update(pinned)
+        if messages is not None and "__messages__" in signature.parameters:
             kwargs["__messages__"] = messages
         if check is not None:
             arguments = signature.bind_partial(*args, **kwargs).arguments
@@ -27,5 +29,6 @@ async def bind_tool_context(adapter, tool, messages, check=None):
     except (NameError, TypeError):
         protected.__annotations__ = getattr(original, "__annotations__", {})
     if extra is not None:
-        protected = await adapter.bind(protected, {**extra, "__messages__": messages})
+        context = {"__messages__": messages} if messages is not None else {}
+        protected = await adapter.bind(protected, {**extra, **pinned, **context})
     return {**tool, "callable": protected}

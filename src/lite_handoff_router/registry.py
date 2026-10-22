@@ -37,7 +37,8 @@ async def discover(adapter, request, user, catalog, router_id):
     ):
         raise ValueError("AGENTS must map exact Workspace Model IDs to routing Skill IDs")
     entries, diagnostics = {}, []
-    router = request.app.state.MODELS.get(router_id, {})
+    router = await adapter.model(request, router_id, user)
+    owner = await adapter.owner(router)
     for agent_id, skill_id in catalog.items():
         try:
             model = await adapter.model(request, agent_id, user)
@@ -46,7 +47,7 @@ async def discover(adapter, request, user, catalog, router_id):
                 == pipe_dispatcher(router, request.app.state.MODELS)
             ):
                 raise ValueError("Target resolves back to the Router Pipe")
-            skill = await adapter.skill(skill_id, user)
+            skill = await adapter.skill(skill_id, owner)
             entries[agent_id] = {
                 "agent_id": agent_id, "skill_id": skill_id,
                 "agent_name": model.get("info", {}).get("name") or model.get("name") or agent_id,

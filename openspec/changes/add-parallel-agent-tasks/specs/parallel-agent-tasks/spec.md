@@ -23,7 +23,7 @@ Router SHALL выбирать между самостоятельным отве
 
 ### Requirement: Both routing tools use the same permitted registry
 
-Манифест routing Skills и `enum` аргументов `agent_id` обоих инструментов SHALL происходить из одного реестра текущего пользователя. Перед стартом каждой задачи система SHALL повторно проверить пользователя, актуальный доступ, активность модели и пригодность её routing Skill.
+Манифест routing Skills и `enum` аргументов `agent_id` обоих инструментов SHALL происходить из одного реестра текущего пользователя. Перед стартом каждой задачи система SHALL повторно проверить доступ пользователя к активной модели. Пригодность routing Skill SHALL проверяться с правами владельца публичной Router-модели; отдельный read-grant пользователя на Skill SHALL NOT требоваться.
 
 #### Scenario: Users have different permitted agents
 
@@ -95,7 +95,7 @@ Pipe SHALL предоставлять согласованные schema и calla
 
 ### Requirement: Each worker owns its model settings and capabilities
 
-Каждый работник SHALL использовать актуальные промпт, параметры, обязательные Tools/MCP и Skills своей Workspace Model с личностью текущего пользователя. Router, другие работники и пользовательские настройки SHALL NOT добавлять или отключать его ресурсы. Недоступный обязательный ресурс SHALL приводить к ошибке задачи.
+Каждый работник SHALL использовать актуальные промпт, параметры и ресурсы своей Workspace Model. Доступ к настроенным Tools/MCP/Skills SHALL проверяться у её владельца без отдельных grants пользователя; личность исполнения, UserValves и пользовательская авторизация SHALL сохраняться по model-bound-resource-access. Router, другие работники и клиент SHALL NOT менять этот набор. Недоступный владельцу обязательный ресурс SHALL приводить к ошибке задачи.
 
 #### Scenario: Workers have different model configuration
 
@@ -103,11 +103,17 @@ Pipe SHALL предоставлять согласованные schema и calla
 - **THEN** каждый фактический вызов использует настройки своего агента, включая продолжения после Tools
 - **AND** рабочие инструкции и возможности другого агента отсутствуют
 
-#### Scenario: Model is allowed but an attached resource is unavailable
+#### Scenario: Model is allowed but the owner cannot load a resource
 
-- **WHEN** агенту недоступен обязательный Tool, Skill или MCP
+- **WHEN** модель разрешена пользователю, но её владельцу недоступен обязательный Tool, Skill или MCP
 - **THEN** его генерация не запускается с частично подготовленным набором
-- **AND** система не использует права администратора или владельца вместо прав пользователя
+- **AND** система не подставляет другого владельца или администратора
+
+#### Scenario: Worker resources lack direct user grants
+
+- **WHEN** пользователю разрешён агент, а его обязательные ресурсы доступны владельцу модели без grants пользователю
+- **THEN** работник использует свои Tools и Skills с отдельным состоянием задачи
+- **AND** локальные Tools получают пользователя чата и его UserValves
 
 ### Requirement: Worker inputs and runtime remain isolated
 
@@ -122,7 +128,7 @@ Pipe SHALL предоставлять согласованные schema и calla
 
 #### Scenario: Worker asks for another readable skill
 
-- **WHEN** A вызывает чтение, чтение файла или поиск для доступного пользователю Skill B вне набора A
+- **WHEN** A вызывает чтение, чтение файла или поиск для доступного пользователю или владельцу модели Skill B вне набора A
 - **THEN** содержимое не передаётся A, включая продолжения и обновление callable
 
 ### Requirement: Parallel execution waits for the whole group

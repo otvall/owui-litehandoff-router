@@ -23,8 +23,14 @@ class Adapter:
     async def user(self, user_id):
         return User()
 
+    async def owner(self, model):
+        return User()
+
+    async def tool_access(self, request, identifier, owner):
+        pass
+
     async def model(self, request, model_id, user):
-        return {"id": model_id, "info": {"params": {"system": "Router"}, "meta": {"toolIds": [], "skillIds": []}}}
+        return {"id": model_id, "info": {"params": {"system": "Router"}, "meta": {"toolIds": ["base"], "skillIds": []}}}
 
     async def prompt_and_params(self, body, model, user, metadata):
         body["messages"].insert(0, {"role": "system", "content": model["info"]["params"]["system"]})

@@ -55,6 +55,7 @@ class Tools:
             await Config.upsert({"tool_server.connections": []})
             with self.assertRaisesRegex(ValueError, "denied"):
                 await adapter.mcp_access("isolated-mcp", actor)
-            self.assertIsNone(await adapter.connect_mcp(request, "isolated-mcp", actor, {}))
+            with self.assertRaisesRegex(ValueError, "denied"):
+                await adapter.connect_mcp(request, "isolated-mcp", actor, {})
         finally:
             await Config.upsert({"tool_server.connections": previous})

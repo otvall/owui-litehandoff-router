@@ -4,6 +4,8 @@ import json
 from uuid import uuid4
 
 from .runtime import require
+from .parallel_state import control_generation, handoff_barrier
+from .resources import routing_owner
 
 
 def delegate_tool(adapter, request, user, metadata, state):
@@ -13,6 +15,7 @@ def delegate_tool(adapter, request, user, metadata, state):
         current = require(request, metadata, actor.id)
         if current is not state:
             raise ValueError("Stale delegate request context")
+        control_generation(current, "lite_delegate", {"agent_id": agent_id})
         return await delegate(adapter, request, actor, current, agent_id)
 
     return {
@@ -83,12 +86,14 @@ def completed_pairs(messages):
 
 
 async def delegate(adapter, request, user, state, agent_id):
+    handoff_barrier(state)
     if state["active_agent"]:
         raise ValueError("Nested delegation is disabled")
     if agent_id not in state["registry"]:
         raise ValueError("agent_id is not in the current permitted registry; use the exact Workspace Model ID")
     await adapter.model(request, agent_id, user)
-    await adapter.skill(state["registry"][agent_id]["skill_id"], user)
+    owner = await routing_owner(adapter, request, user, state["router_id"])
+    await adapter.skill(state["registry"][agent_id]["skill_id"], owner)
     pending = {"__lite_delegate__": "v2", "agent_id": agent_id, "request_id": state["request_id"], "nonce": uuid4().hex,
                "router_calls": list(state.get("audit") or [])}
     state["pending"].append(pending)

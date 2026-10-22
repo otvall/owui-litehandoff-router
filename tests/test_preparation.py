@@ -13,6 +13,9 @@ class Directory:
     async def user(self, user_id):
         return SimpleNamespace(id=user_id)
 
+    async def owner(self, model):
+        return SimpleNamespace(id="owner", model_dump=lambda: {"id": "owner", "role": "user"})
+
     async def model(self, request, model_id, user):
         return request.app.state.MODELS[model_id]
 
@@ -22,7 +25,7 @@ class Directory:
 
 class PreparationTest(unittest.IsolatedAsyncioTestCase):
     async def test_filter_reads_administrative_valves_each_request(self):
-        request = SimpleNamespace(scope={}, app=SimpleNamespace(state=SimpleNamespace(MODELS={
+        request = SimpleNamespace(scope={}, state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(MODELS={
             "router": {"pipe": {"id": "router-pipe"}}, "agent-a": {"id": "agent-a"},
         })))
         instance = router_preparation.Filter()

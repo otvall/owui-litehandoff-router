@@ -8,6 +8,8 @@ from .capabilities import load_capabilities
 from .binding import bind_tool_context
 from .history import router_projection, agent_projection
 from .protocol import delegate_tool
+from .parallel import parallel_tool, ROUTING_TOOLS, downstream_data
+from .resources import ResourceScope
 
 ENVELOPE = frozenset({"stream", "stream_options", "files"})
 
@@ -34,6 +36,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         llm_id = target
         inference = request.app.state.MODELS.get(target)
     model = await adapter.model(request, target or state["router_id"], user)
+    owner = await adapter.owner(model)
     selected = deepcopy(model)
     selected["owned_by"] = inference.get("owned_by")
     meta = model.get("info", {}).get("meta") or {}
@@ -41,44 +44,66 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     skill_ids = ids(meta.get("skillIds") or []) if target else ids(
         state["base_skill_ids"] + [entry["skill_id"] for entry in state["registry"].values()]
     )
+    resources = ResourceScope(adapter, request, user, model, owner, tool_ids, skill_ids, router=not target)
     prepare_skill_scope(metadata, state, model["id"], skill_ids)
     draft = {key: deepcopy(value) for key, value in body.items() if key in ENVELOPE}
     draft.update(model=llm_id, messages=[
         deepcopy(m) for m in state["source"] if m.get("role") != "system"
     ], metadata=metadata)
     draft = await adapter.prompt_and_params(draft, selected, user, metadata)
-    prompt = await manifest(adapter, skill_ids, user, None if target else state["registry"])
+    packet = await downstream_data(adapter, user, metadata, state) if target else None
+    if packet:
+        draft["files"] = deepcopy(metadata["files"])
+    prompt = await manifest(adapter, skill_ids, owner, None if target else state["registry"])
     if prompt:
         draft["messages"].insert(0, {"role": "system", "content": prompt})
     extra = injections(request, user, metadata, model, draft["messages"], events)
-    tools, mcp_instructions = await load_capabilities(adapter, request, tool_ids, user, extra)
+    tools, mcp_instructions = await load_capabilities(adapter, request, tool_ids, owner, extra)
     if READERS.intersection(tools):
         raise ValueError("Reserved Skill reader collision: " + ", ".join(sorted(READERS.intersection(tools))))
+    if "lite_parallel" in tools or "delegate_task" in tools:
+        raise ValueError("Reserved routing Tool collision: " + ", ".join(sorted(ROUTING_TOOLS.intersection(tools))))
     for instruction in mcp_instructions:
         draft["messages"].insert(0, {"role": "system", "content": instruction})
     if state["registry"] and not target:
         if "lite_delegate" in tools:
             raise ValueError("Reserved delegate Tool collision: lite_delegate; remove the separate delegate Tool from base_tool_ids")
         tools["lite_delegate"] = delegate_tool(adapter, request, user, metadata, state)
+        group = state.get("parallel") or {}
+        if group.get("max_tasks"):
+            reason = (await adapter.parallel_reason(request, metadata, user) if metadata.get("chat_id")
+                      else "Parallel tasks require a saved chat")
+            group["unavailable_reason"] = reason
+            if reason:
+                draft["messages"].insert(0, {"role": "system", "content": reason})
+            else:
+                tools["lite_parallel"] = parallel_tool(adapter, request, user, metadata, state, events)
     else:
-        tools.pop("lite_delegate", None)
+        for name in ROUTING_TOOLS:
+            tools.pop(name, None)
     if skill_ids:
-        builtins = await adapter.builtins(request, model, {**extra, "__skill_ids__": skill_ids})
+        builtins = await adapter.builtins(request, model, {
+            **extra, "__user__": owner.model_dump(), "__skill_ids__": skill_ids})
         for name in READERS:
             if name not in builtins:
                 raise ValueError("Required builtin Skill reader unavailable: " + name)
             if name in tools:
                 raise ValueError("Reserved Skill reader collision: " + name)
-            tools[name] = await scoped_reader(adapter, builtins[name], skill_ids, user, draft["messages"])
+            tools[name] = await scoped_reader(adapter, builtins[name], skill_ids, owner,
+                                               draft["messages"], check_scope=resources.skill)
     if target:
         history = agent_projection(state, target, set(tools), skill_ids)
     else:
         history = router_projection(state, set(tools), skill_ids)
     systems = [m for m in draft["messages"] if m.get("role") == "system"]
+    if packet:
+        # Preserve the actual current user message as the last question.
+        index = next((i for i in range(len(history) - 1, -1, -1) if history[i].get("role") == "user"), len(history))
+        history.insert(index, packet)
     draft["messages"][:] = systems + history
     draft["tools"] = [{"type": "function", "function": tool["spec"]} for tool in tools.values()]
     protected = {name: (tool["callable"], deepcopy(tool["spec"]))
-                 for name, tool in tools.items() if name in READERS or name == "lite_delegate"}
+                 for name, tool in tools.items() if name in READERS | ROUTING_TOOLS}
     metadata["tools"] = tools
     metadata["model_id"] = model["id"]
     metadata["model"] = deepcopy(model)
@@ -100,7 +125,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if not isinstance(tools, dict):
         raise ValueError("Destination inlet returned an invalid Tool registry")
     schemas = [schema.get("function") for schema in (draft.get("tools") or []) if isinstance(schema, dict)]
-    for name in READERS | {"lite_delegate"}:
+    for name in READERS | ROUTING_TOOLS:
         expected = protected.get(name)
         found = tools.get(name)
         public = [schema for schema in schemas if isinstance(schema, dict) and schema.get("name") == name]
@@ -111,6 +136,11 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
               or found.get("spec") != expected[1] or public != [expected[1]]):
             raise ValueError("Destination inlet replaced a protected Tool: " + name)
     for name, tool in list(tools.items()):
-        tools[name] = await bind_tool_context(adapter, tool, draft["messages"])
+        identifier = tool.get("tool_id")
+        check = None
+        if identifier and name not in READERS | ROUTING_TOOLS:
+            async def check(arguments, identifier=identifier):
+                await resources.tool(identifier)
+        tools[name] = await bind_tool_context(adapter, tool, draft["messages"], check=check)
     draft["tools"] = [{"type": "function", "function": tool["spec"]} for tool in tools.values()]
     return draft, tools

@@ -25,7 +25,9 @@ class McpSession:
 
     async def close(self):
         self.stop()
-        await self.task
+        # A request can stop while the MCP owner is awaiting a remote Tool.
+        # Cancel in that same owner task if graceful shutdown does not finish.
+        await asyncio.wait_for(self.task, 5)
 
     async def run(self, connect):
         client = None
@@ -94,7 +96,7 @@ async def load_capabilities(adapter, request, tool_ids, user, extra):
                 continue
             server_id = identifier.removeprefix("server:mcp:")
             await adapter.mcp_access(server_id, user)
-            key = (user.id, server_id)
+            key = (extra["__user__"]["id"], user.id, (extra.get("__model__") or {}).get("id"), server_id)
             session = sessions.get(key)
             if session is None or session.task.done():
                 async def connect(server_id=server_id):

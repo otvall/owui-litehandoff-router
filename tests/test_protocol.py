@@ -9,6 +9,7 @@ from tests.test_preparation import Directory
 from tests.test_router import Adapter, User
 from lite_handoff_router.entrypoints import lite_handoff_router
 from lite_handoff_router.runtime import begin
+from lite_handoff_router.observation import observe_response
 
 
 def call(name, call_id, args):
@@ -17,9 +18,9 @@ def call(name, call_id, args):
 
 class ProtocolTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.state = {"request_id": "r", "active_agent": None, "pending": [], "phase": "router",
+        self.state = {"request_id": "r", "router_id": "router", "active_agent": None, "pending": [], "phase": "router",
                       "registry": {"a": {"skill_id": "route-a"}, "b": {"skill_id": "route-b"}}}
-        self.request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(MODELS={"a": {}, "b": {}})))
+        self.request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(MODELS={"a": {}, "b": {}, "router": {}})))
         self.user = SimpleNamespace(id="u")
 
     async def exchange(self):
@@ -72,9 +73,13 @@ class ProtocolTest(unittest.IsolatedAsyncioTestCase):
         body = {"model": "router", "messages": []}
         state = begin(request, body, metadata, "u", self.state["registry"], [], [], [])
         tool = delegate_tool(Directory(), request, self.user, metadata, state)
+        observe_response({"choices": [{"message": {"tool_calls": [call("lite_delegate", "d0", {"agent_id": "route-a"})]}}]},
+                         state, {"kind": "router"})
         with self.assertRaisesRegex(ValueError, "exact Workspace Model ID"):
             await tool["callable"](agent_id="route-a")
         self.assertEqual(state["pending"], [])
+        observe_response({"choices": [{"message": {"tool_calls": [call("lite_delegate", "d1", {"agent_id": "a"})]}}]},
+                         state, {"kind": "router"})
         result = json.loads(await tool["callable"](agent_id="a"))
         self.assertEqual(result, state["pending"][0])
         begin(request, body, {"message_id": "second"}, "u", state["registry"], [], [], [])

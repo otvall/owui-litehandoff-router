@@ -38,7 +38,7 @@ class CapabilitiesTest(unittest.IsolatedAsyncioTestCase):
         result = await tools["internal_lookup"]["callable"](query="q", _name="ordinary-tool-argument")
         self.assertEqual(result, ("lookup", {"query": "q", "_name": "ordinary-tool-argument"}))
         # Repreparation preserves the same request session; permissions still rechecked.
-        await load_capabilities(adapter, request, ["server:mcp:internal"], user, {})
+        await load_capabilities(adapter, request, ["server:mcp:internal"], user, {"__user__": {"id": user.id}})
         self.assertEqual(len(request.scope["lite_handoff_mcp"]), 1)
         adapter.denied = True
         with self.assertRaisesRegex(ValueError, "denied"):

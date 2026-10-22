@@ -5,6 +5,9 @@ from lite_handoff_router.registry import discover
 
 
 class RegistryAdapter:
+    async def owner(self, model):
+        return SimpleNamespace(id="owner")
+
     async def model(self, request, model_id, user):
         model = request.app.state.MODELS.get(model_id)
         if not model or model.get("denied"):
