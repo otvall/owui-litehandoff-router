@@ -1,0 +1,162 @@
+{
+  "source": "open-webui==0.12.3 utils.misc.convert_output_to_messages(raw=True, flatten_tool_images=True)",
+  "output": [
+    {
+      "type": "function_call",
+      "call_id": "read",
+      "name": "view_skill",
+      "arguments": "{\"id\": \"route-a\"}",
+      "status": "completed"
+    },
+    {
+      "type": "function_call",
+      "call_id": "delegate",
+      "name": "lite_delegate",
+      "arguments": "{\"agent_id\": \"agent-a\"}",
+      "status": "completed"
+    },
+    {
+      "type": "function_call",
+      "call_id": "base",
+      "name": "lookup",
+      "arguments": "{\"q\": \"base\"}",
+      "status": "completed"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "read",
+      "output": [
+        {
+          "type": "input_text",
+          "text": "FULL_ROUTING_INSTRUCTIONS"
+        }
+      ],
+      "status": "completed"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "delegate",
+      "output": [
+        {
+          "type": "input_text",
+          "text": "{\"__lite_delegate__\": \"v2\", \"agent_id\": \"agent-a\", \"request_id\": \"past-request\", \"nonce\": \"past-server-receipt\", \"router_calls\": [{\"id\": \"read\", \"name\": \"view_skill\", \"arguments\": {\"id\": \"route-a\"}, \"generation\": 1, \"executor\": {\"kind\": \"router\"}}, {\"id\": \"delegate\", \"name\": \"lite_delegate\", \"arguments\": {\"agent_id\": \"agent-a\"}, \"generation\": 2, \"executor\": {\"kind\": \"router\"}}, {\"id\": \"base\", \"name\": \"lookup\", \"arguments\": {\"q\": \"base\"}, \"generation\": 2, \"executor\": {\"kind\": \"router\"}}]}"
+        }
+      ],
+      "status": "completed"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "base",
+      "output": [
+        {
+          "type": "input_text",
+          "text": "ROUTER_BASE_RESULT"
+        }
+      ],
+      "status": "completed"
+    },
+    {
+      "type": "function_call",
+      "call_id": "lookup",
+      "name": "lookup",
+      "arguments": "{\"q\": \"agent\"}",
+      "status": "completed"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "lookup",
+      "output": [
+        {
+          "type": "input_text",
+          "text": "AGENT_RESULT_42"
+        }
+      ],
+      "status": "completed"
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Visible A answer"
+        }
+      ],
+      "status": "completed"
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Old task"
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "read",
+          "type": "function",
+          "function": {
+            "name": "view_skill",
+            "arguments": "{\"id\": \"route-a\"}"
+          }
+        },
+        {
+          "id": "delegate",
+          "type": "function",
+          "function": {
+            "name": "lite_delegate",
+            "arguments": "{\"agent_id\": \"agent-a\"}"
+          }
+        },
+        {
+          "id": "base",
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "arguments": "{\"q\": \"base\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "read",
+      "content": "FULL_ROUTING_INSTRUCTIONS"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "delegate",
+      "content": "{\"__lite_delegate__\": \"v2\", \"agent_id\": \"agent-a\", \"request_id\": \"past-request\", \"nonce\": \"past-server-receipt\", \"router_calls\": [{\"id\": \"read\", \"name\": \"view_skill\", \"arguments\": {\"id\": \"route-a\"}, \"generation\": 1, \"executor\": {\"kind\": \"router\"}}, {\"id\": \"delegate\", \"name\": \"lite_delegate\", \"arguments\": {\"agent_id\": \"agent-a\"}, \"generation\": 2, \"executor\": {\"kind\": \"router\"}}, {\"id\": \"base\", \"name\": \"lookup\", \"arguments\": {\"q\": \"base\"}, \"generation\": 2, \"executor\": {\"kind\": \"router\"}}]}"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "base",
+      "content": "ROUTER_BASE_RESULT"
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "lookup",
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "arguments": "{\"q\": \"agent\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "lookup",
+      "content": "AGENT_RESULT_42"
+    },
+    {
+      "role": "assistant",
+      "content": "Visible A answer"
+    }
+  ]
+}
