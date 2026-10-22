@@ -269,8 +269,15 @@ def control_generation(state, name, arguments):
     if state.get('active_agent') or state.get('worker'):
         raise ValueError('Nested delegation is disabled')
     calls = [c for c in state.get('audit', []) if c.get('generation') == state.get('generation')]
-    if len(calls) != 1 or calls[0].get('name') != name or calls[0].get('executor') != {'kind': 'router'} or (calls[0].get('arguments') != arguments):
+    if not calls:
+        raise ValueError('Cannot verify ' + name + ': no Tool calls were observed in its actual generation')
+    if len(calls) != 1:
         raise ValueError(name + ' must be the only Tool call in its actual generation')
+    if calls[0].get('name') != name or calls[0].get('executor') != {'kind': 'router'}:
+        raise ValueError(name + ' does not match the observed Router Tool call')
+    observed = calls[0].get('arguments')
+    if not isinstance(observed, dict) or {key: value for key, value in observed.items() if key in arguments} != arguments:
+        raise ValueError(name + ' arguments do not match the observed Tool call')
 
 def handoff_barrier(state):
     status = (state.get('parallel') or {}).get('status', 'idle')
@@ -381,7 +388,7 @@ def delegate_tool(adapter, request, user, metadata, state):
             raise ValueError('Stale delegate request context')
         control_generation(current, 'lite_delegate', {'agent_id': agent_id})
         return await delegate(adapter, request, actor, current, agent_id)
-    return {'spec': {'name': 'lite_delegate', 'description': 'Hand off this user request to an exact advertised Workspace Model ID.', 'parameters': {'type': 'object', 'properties': {'agent_id': {'type': 'string', 'description': 'Workspace Model ID from the current routing manifest.', 'enum': list(state['registry'])}}, 'required': ['agent_id']}}, 'callable': lite_delegate}
+    return {'spec': {'name': 'lite_delegate', 'description': "Hand off this user request and its current chat to an exact advertised Workspace Model ID. Call alone. Pass only agent_id; do not pass task or rewrite the user's request.", 'parameters': {'type': 'object', 'additionalProperties': False, 'properties': {'agent_id': {'type': 'string', 'description': 'Workspace Model ID from the current routing manifest.', 'enum': list(state['registry'])}}, 'required': ['agent_id']}}, 'callable': lite_delegate}
 
 def tool_image(message):
     content = message.get('content')

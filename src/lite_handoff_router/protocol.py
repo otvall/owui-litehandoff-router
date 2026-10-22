@@ -21,9 +21,13 @@ def delegate_tool(adapter, request, user, metadata, state):
     return {
         "spec": {
             "name": "lite_delegate",
-            "description": "Hand off this user request to an exact advertised Workspace Model ID.",
+            "description": (
+                "Hand off this user request and its current chat to an exact advertised Workspace Model ID. "
+                "Call alone. Pass only agent_id; do not pass task or rewrite the user's request."
+            ),
             "parameters": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {"agent_id": {
                     "type": "string",
                     "description": "Workspace Model ID from the current routing manifest.",

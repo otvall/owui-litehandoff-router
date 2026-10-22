@@ -14,10 +14,19 @@ def control_generation(state, name, arguments):
     if state.get("active_agent") or state.get("worker"):
         raise ValueError("Nested delegation is disabled")
     calls = [c for c in state.get("audit", []) if c.get("generation") == state.get("generation")]
-    if (len(calls) != 1 or calls[0].get("name") != name
-            or calls[0].get("executor") != {"kind": "router"}
-            or calls[0].get("arguments") != arguments):
+    if not calls:
+        raise ValueError("Cannot verify " + name + ": no Tool calls were observed in its actual generation")
+    if len(calls) != 1:
         raise ValueError(name + " must be the only Tool call in its actual generation")
+    if calls[0].get("name") != name or calls[0].get("executor") != {"kind": "router"}:
+        raise ValueError(name + " does not match the observed Router Tool call")
+    observed = calls[0].get("arguments")
+    # OWUI execute_tool_call drops properties outside the Tool schema before
+    # calling us. Compare that same projection, preserving nested values and
+    # the unmodified provider arguments in the audit trail.
+    if (not isinstance(observed, dict)
+            or {key: value for key, value in observed.items() if key in arguments} != arguments):
+        raise ValueError(name + " arguments do not match the observed Tool call")
 
 
 def handoff_barrier(state):
