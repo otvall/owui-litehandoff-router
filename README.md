@@ -25,5 +25,5 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/python tools/run_native_tests.py
 ```
 
-Активный план и критерии приёмки находятся в
-`openspec/changes/add-parallel-agent-tasks/`.
+Реализованный план и критерии приёмки находятся в
+`openspec/changes/archive/2026-10-23-add-parallel-agent-tasks/`.
