@@ -1,0 +1,1178 @@
+{
+  "manifest": {
+    "repository": "https://github.com/Classic298/open-webui-plugins",
+    "files": [
+      {
+        "path": "2.1.1/tool.py",
+        "tool_version": "2.1.1",
+        "commit": "5f549492316505af4ec6f2de0bdee781b1e778a5",
+        "url": "https://raw.githubusercontent.com/Classic298/open-webui-plugins/5f549492316505af4ec6f2de0bdee781b1e778a5/inline-visualizer-v2/tool.py",
+        "sha256": "04a185f5553013a401107943db490f6b14f17ce2b1da59afebab1676e7d08bc4"
+      },
+      {
+        "path": "2.1.1/SKILL.md",
+        "tool_version": "2.1.1",
+        "commit": "5f549492316505af4ec6f2de0bdee781b1e778a5",
+        "url": "https://raw.githubusercontent.com/Classic298/open-webui-plugins/5f549492316505af4ec6f2de0bdee781b1e778a5/inline-visualizer-v2/SKILL.md",
+        "sha256": "ae352a0fc12bc6144b71120dd5bc4a84fbc7cb42ace9f0e42fc52c13d4d19779"
+      },
+      {
+        "path": "2.2.3/tool.py",
+        "tool_version": "2.2.3",
+        "commit": "bcc224db138b6901a8d4b99e7f8a8859bea5629b",
+        "url": "https://raw.githubusercontent.com/Classic298/open-webui-plugins/bcc224db138b6901a8d4b99e7f8a8859bea5629b/inline-visualizer-v2/tool.py",
+        "sha256": "38ed6323c3b2b7c1f4dbfafbf4ea04372f8fa3694672ec74f8bb5dba258b740b"
+      },
+      {
+        "path": "2.2.3/SKILL.md",
+        "tool_version": "2.2.3",
+        "commit": "bcc224db138b6901a8d4b99e7f8a8859bea5629b",
+        "url": "https://raw.githubusercontent.com/Classic298/open-webui-plugins/bcc224db138b6901a8d4b99e7f8a8859bea5629b/inline-visualizer-v2/SKILL.md",
+        "sha256": "d7fa8dab49d0fa2e4e55ab711b3d5aeaf8ba80bb1668034ba9d4ab03529f70a2"
+      }
+    ]
+  },
+  "exports": {
+    "lite_handoff_router.py": "6b0c5a880e43c6efe6db2fe47c1cb3d79462c032805177c6450c28a093940063",
+    "router_preparation.py": "f399c2b10098b2a090868dbf15ce4047fbd884118fc155c6b4a275ca829ea6b1"
+  },
+  "runs": [
+    {
+      "backend_passed": true,
+      "browser_rendering": "pending separate verification",
+      "version": "2.2.3",
+      "chat_id": "2b03664f-5ac3-464a-ba2e-10cd8f7cae1b",
+      "message_id": "245a7b35-a0a8-4063-8dca-da7301e94396",
+      "children": [
+        {
+          "chat_id": "7c61a4ea-14e4-4c41-9edb-c237211c43a7",
+          "message_id": "9c1b7510-75c3-4e78-a66c-d7b32250b9af",
+          "agent_id": "vg-agent-a",
+          "embed_count": 1,
+          "done": true,
+          "marker": "VGFIX-3495d965d5f4-1",
+          "tool_seconds": 5.021804334988701,
+          "start": 67908.501209156,
+          "end": 67913.523013491,
+          "connected_at_entry": true,
+          "connected_at_return": true
+        },
+        {
+          "chat_id": "ee9847a3-2bff-4f5f-b395-807d93158a99",
+          "message_id": "be2226c2-c024-44d2-97ab-282b04f07930",
+          "agent_id": "vg-agent-s",
+          "embed_count": 0,
+          "done": true
+        }
+      ],
+      "exports": {
+        "lite_handoff_router.py": "6b0c5a880e43c6efe6db2fe47c1cb3d79462c032805177c6450c28a093940063",
+        "router_preparation.py": "f399c2b10098b2a090868dbf15ce4047fbd884118fc155c6b4a275ca829ea6b1"
+      }
+    },
+    {
+      "backend_passed": true,
+      "browser_rendering": "pending separate verification",
+      "version": "2.2.3",
+      "chat_id": "5ef868b4-0dbd-4c33-9212-86cb8d6b1447",
+      "message_id": "eb214b5c-3fe3-4b98-a23e-39e4b05bc311",
+      "children": [
+        {
+          "chat_id": "8e85128d-3c4f-46c5-9b05-871ae3411125",
+          "message_id": "7f173f17-8a32-42f3-ba99-a2466e53200c",
+          "agent_id": "vg-agent-a",
+          "embed_count": 1,
+          "done": true,
+          "marker": "VGFIX-579b62f0b053-1",
+          "tool_seconds": 0.010504459001822397,
+          "start": 67078.836117902,
+          "end": 67078.846622361,
+          "connected_at_entry": false,
+          "connected_at_return": false
+        },
+        {
+          "chat_id": "d6c2570c-f5c9-434d-95d4-879349cc3825",
+          "message_id": "760b7452-d458-4276-bca9-01b79379ad2d",
+          "agent_id": "vg-agent-s",
+          "embed_count": 0,
+          "done": true
+        }
+      ],
+      "exports": {
+        "lite_handoff_router.py": "6b0c5a880e43c6efe6db2fe47c1cb3d79462c032805177c6450c28a093940063",
+        "router_preparation.py": "f399c2b10098b2a090868dbf15ce4047fbd884118fc155c6b4a275ca829ea6b1"
+      }
+    },
+    {
+      "backend_passed": true,
+      "browser_rendering": "pending separate verification",
+      "version": "2.2.3",
+      "chat_id": "7e234e20-787f-40c7-8ae3-c17ab767a8c7",
+      "message_id": "7ccb3650-cd40-4063-b4ca-0daef7016bd6",
+      "children": [
+        {
+          "chat_id": "471b8059-d9e5-480f-aed3-e1151fd54e86",
+          "message_id": "539ab77d-e429-4eca-9c7f-079c819d57cc",
+          "agent_id": "vg-agent-a",
+          "embed_count": 1,
+          "done": true,
+          "marker": "VGFIX-2ec34627c906-1",
+          "tool_seconds": 5.032858001999557,
+          "start": 67700.259024687,
+          "end": 67705.291882689,
+          "connected_at_entry": true,
+          "connected_at_return": true
+        },
+        {
+          "chat_id": "96a02325-b92b-44df-9009-10a8591a0543",
+          "message_id": "c3b0541f-4757-4a34-b939-953bd6edc362",
+          "agent_id": "vg-agent-a",
+          "embed_count": 1,
+          "done": true,
+          "marker": "VGFIX-2ec34627c906-2",
+          "tool_seconds": 5.042083209991688,
+          "start": 67700.261053687,
+          "end": 67705.303136897,
+          "connected_at_entry": true,
+          "connected_at_return": true
+        }
+      ],
+      "exports": {
+        "lite_handoff_router.py": "6b0c5a880e43c6efe6db2fe47c1cb3d79462c032805177c6450c28a093940063",
+        "router_preparation.py": "f399c2b10098b2a090868dbf15ce4047fbd884118fc155c6b4a275ca829ea6b1"
+      }
+    },
+    {
+      "backend_passed": true,
+      "browser_rendering": "pending separate verification",
+      "version": "2.2.3",
+      "chat_id": "8cbd36b2-6cf3-401c-9d52-ce9ebefa3007",
+      "message_id": "9cb0b95e-57c8-4067-88d0-67e929bd154b",
+      "children": [
+        {
+          "chat_id": "dc32a0b6-5a06-4669-b24d-c32286618978",
+          "message_id": "85cabff9-6624-4d01-b78b-52310faec3f9",
+          "agent_id": "vg-agent-a",
+          "embed_count": 1,
+          "done": true,
+          "marker": "VGFIX-c4cc1d7fd3d2-1",
+          "tool_seconds": 5.044539584996528,
+          "start": 68917.434890157,
+          "end": 68922.479429742,
+          "connected_at_entry": true,
+          "connected_at_return": true
+        },
+        {
+          "chat_id": "6f5f1aec-2b56-42e8-987e-f19dd5131d9d",
+          "message_id": "a8ad5631-fb1c-404a-8019-b1eb50d20fe4",
+          "agent_id": "vg-agent-b",
+          "embed_count": 1,
+          "done": true,
+          "marker": "VGFIX-c4cc1d7fd3d2-2",
+          "tool_seconds": 5.036084626990487,
+          "start": 68917.432382907,
+          "end": 68922.468467534,
+          "connected_at_entry": true,
+          "connected_at_return": true
+        }
+      ],
+      "exports": {
+        "lite_handoff_router.py": "6b0c5a880e43c6efe6db2fe47c1cb3d79462c032805177c6450c28a093940063",
+        "router_preparation.py": "f399c2b10098b2a090868dbf15ce4047fbd884118fc155c6b4a275ca829ea6b1"
+      }
+    },
+    {
+      "backend_passed": true,
+      "browser_rendering": "pending separate verification",
+      "version": "2.2.3",
+      "chat_id": "ad2ce1e2-704e-48bc-931e-f1733250b482",
+      "message_id": "5a11440d-bbc1-441f-8d03-eebb8db2e17e",
+      "children": [
+        {
+          "chat_id": "5027ea3b-5334-4b5b-b3b0-067cb3d22f79",
+          "message_id": "64da2ec0-9fff-40bd-a50a-49b22d6fdfa4",
+          "agent_id": "vg-agent-a",
+          "embed_count": 1,
+          "done": true,
+          "marker": "VGFIX-f7e5f607ca91-1",
+          "tool_seconds": 5.033195752999745,
+          "start": 67595.634753222,
+          "end": 67600.667948975,
+          "connected_at_entry": true,
+          "connected_at_return": true
+        },
+        {
+          "chat_id": "c1b85915-a287-40b8-bb2b-d2db3da34426",
+          "message_id": "5688d461-b6d5-440a-a4fc-bb6d933be346",
+          "agent_id": "vg-agent-b",
+          "embed_count": 1,
+          "done": true,
+          "marker": "VGFIX-f7e5f607ca91-2",
+          "tool_seconds": 5.038353294003173,
+          "start": 67595.641821306,
+          "end": 67600.6801746,
+          "connected_at_entry": true,
+          "connected_at_return": true
+        }
+      ],
+      "exports": {
+        "lite_handoff_router.py": "6b0c5a880e43c6efe6db2fe47c1cb3d79462c032805177c6450c28a093940063",
+        "router_preparation.py": "f399c2b10098b2a090868dbf15ce4047fbd884118fc155c6b4a275ca829ea6b1"
+      }
+    },
+    {
+      "backend_passed": true,
+      "browser_rendering": "pending separate verification",
+      "version": "2.2.3",
+      "chat_id": "f08abea5-f2e7-4be6-bd98-e295dd945efd",
+      "message_id": "e050e9dc-599f-4a05-a6c0-e9be513755dc",
+      "children": [
+        {
+          "chat_id": "674713a6-9468-4fec-a5a9-687cd663b049",
+          "message_id": "4a34ddcd-e6b5-4b4c-afdc-6a9afa2522f1",
+          "agent_id": "vg-agent-a",
+          "embed_count": 1,
+          "done": true,
+          "marker": "VGFIX-123113be9500-1",
+          "tool_seconds": 5.024374084998271,
+          "start": 66620.333775527,
+          "end": 66625.358149612,
+          "connected_at_entry": true,
+          "connected_at_return": true
+        },
+        {
+          "chat_id": "e2617759-2cc4-4fd5-a303-9b6be92e7aa5",
+          "message_id": "e9ed9496-f1a5-4835-8c46-104b96e2b572",
+          "agent_id": "vg-agent-s",
+          "embed_count": 0,
+          "done": true
+        }
+      ],
+      "exports": {
+        "lite_handoff_router.py": "6b0c5a880e43c6efe6db2fe47c1cb3d79462c032805177c6450c28a093940063",
+        "router_preparation.py": "f399c2b10098b2a090868dbf15ce4047fbd884118fc155c6b4a275ca829ea6b1"
+      }
+    }
+  ],
+  "negative": {
+    "negative_reproduced": true,
+    "version": "2.1.1",
+    "chat_id": "c687b3db-03b9-48cf-8741-d8cfcdbf7459",
+    "children": [
+      "63d0d2d3-5720-4bd8-9f2a-5909b993bd84",
+      "1fe85b9a-2cd4-4393-98b0-54e81b342e3b"
+    ],
+    "pending_seconds": 8.282803795009386,
+    "real_session": true,
+    "native_tasks_remaining": 0,
+    "tickets_remaining": 0
+  },
+  "tool_trace": [
+    {
+      "chat_id": "674713a6-9468-4fec-a5a9-687cd663b049",
+      "message_id": "4a34ddcd-e6b5-4b4c-afdc-6a9afa2522f1",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 66620.333775527,
+      "connected_now": true
+    },
+    {
+      "chat_id": "674713a6-9468-4fec-a5a9-687cd663b049",
+      "message_id": "4a34ddcd-e6b5-4b4c-afdc-6a9afa2522f1",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 66620.333850235,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "674713a6-9468-4fec-a5a9-687cd663b049",
+      "message_id": "4a34ddcd-e6b5-4b4c-afdc-6a9afa2522f1",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "emit",
+      "time": 66625.335007696,
+      "connected_now": true,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "674713a6-9468-4fec-a5a9-687cd663b049",
+      "message_id": "4a34ddcd-e6b5-4b4c-afdc-6a9afa2522f1",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "return",
+      "time": 66625.358149612,
+      "connected_now": true
+    },
+    {
+      "chat_id": "674713a6-9468-4fec-a5a9-687cd663b049",
+      "message_id": "4a34ddcd-e6b5-4b4c-afdc-6a9afa2522f1",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 66625.358248446,
+      "connected_now": true
+    },
+    {
+      "chat_id": "63d0d2d3-5720-4bd8-9f2a-5909b993bd84",
+      "message_id": "d1497032-f347-440a-84e6-28c08bec64f6",
+      "version": "2.1.1",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 66953.693770637,
+      "connected_now": true
+    },
+    {
+      "chat_id": "63d0d2d3-5720-4bd8-9f2a-5909b993bd84",
+      "message_id": "d1497032-f347-440a-84e6-28c08bec64f6",
+      "version": "2.1.1",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 66953.69383672,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "63d0d2d3-5720-4bd8-9f2a-5909b993bd84",
+      "message_id": "d1497032-f347-440a-84e6-28c08bec64f6",
+      "version": "2.1.1",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 66961.979442182,
+      "connected_now": true
+    },
+    {
+      "chat_id": "8e85128d-3c4f-46c5-9b05-871ae3411125",
+      "message_id": "7f173f17-8a32-42f3-ba99-a2466e53200c",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": false,
+      "event": "start",
+      "time": 67078.836117902,
+      "connected_now": false
+    },
+    {
+      "chat_id": "8e85128d-3c4f-46c5-9b05-871ae3411125",
+      "message_id": "7f173f17-8a32-42f3-ba99-a2466e53200c",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": false,
+      "event": "browser_call",
+      "time": 67078.836312986,
+      "connected_now": false,
+      "type": "execute"
+    },
+    {
+      "chat_id": "8e85128d-3c4f-46c5-9b05-871ae3411125",
+      "message_id": "7f173f17-8a32-42f3-ba99-a2466e53200c",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": false,
+      "event": "browser_return",
+      "time": 67078.836532569,
+      "connected_now": false
+    },
+    {
+      "chat_id": "8e85128d-3c4f-46c5-9b05-871ae3411125",
+      "message_id": "7f173f17-8a32-42f3-ba99-a2466e53200c",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": false,
+      "event": "emit",
+      "time": 67078.837068194,
+      "connected_now": false,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "8e85128d-3c4f-46c5-9b05-871ae3411125",
+      "message_id": "7f173f17-8a32-42f3-ba99-a2466e53200c",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": false,
+      "event": "return",
+      "time": 67078.846622361,
+      "connected_now": false
+    },
+    {
+      "chat_id": "8e85128d-3c4f-46c5-9b05-871ae3411125",
+      "message_id": "7f173f17-8a32-42f3-ba99-a2466e53200c",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": false,
+      "event": "end",
+      "time": 67078.846688569,
+      "connected_now": false
+    },
+    {
+      "chat_id": "5027ea3b-5334-4b5b-b3b0-067cb3d22f79",
+      "message_id": "64da2ec0-9fff-40bd-a50a-49b22d6fdfa4",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 67595.634753222,
+      "connected_now": true
+    },
+    {
+      "chat_id": "5027ea3b-5334-4b5b-b3b0-067cb3d22f79",
+      "message_id": "64da2ec0-9fff-40bd-a50a-49b22d6fdfa4",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 67595.634850847,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "c1b85915-a287-40b8-bb2b-d2db3da34426",
+      "message_id": "5688d461-b6d5-440a-a4fc-bb6d933be346",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 67595.641821306,
+      "connected_now": true
+    },
+    {
+      "chat_id": "c1b85915-a287-40b8-bb2b-d2db3da34426",
+      "message_id": "5688d461-b6d5-440a-a4fc-bb6d933be346",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 67595.641898597,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "5027ea3b-5334-4b5b-b3b0-067cb3d22f79",
+      "message_id": "64da2ec0-9fff-40bd-a50a-49b22d6fdfa4",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "emit",
+      "time": 67600.636967058,
+      "connected_now": true,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "c1b85915-a287-40b8-bb2b-d2db3da34426",
+      "message_id": "5688d461-b6d5-440a-a4fc-bb6d933be346",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "emit",
+      "time": 67600.64912185,
+      "connected_now": true,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "5027ea3b-5334-4b5b-b3b0-067cb3d22f79",
+      "message_id": "64da2ec0-9fff-40bd-a50a-49b22d6fdfa4",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "return",
+      "time": 67600.667948975,
+      "connected_now": true
+    },
+    {
+      "chat_id": "5027ea3b-5334-4b5b-b3b0-067cb3d22f79",
+      "message_id": "64da2ec0-9fff-40bd-a50a-49b22d6fdfa4",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 67600.668026892,
+      "connected_now": true
+    },
+    {
+      "chat_id": "c1b85915-a287-40b8-bb2b-d2db3da34426",
+      "message_id": "5688d461-b6d5-440a-a4fc-bb6d933be346",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "return",
+      "time": 67600.6801746,
+      "connected_now": true
+    },
+    {
+      "chat_id": "c1b85915-a287-40b8-bb2b-d2db3da34426",
+      "message_id": "5688d461-b6d5-440a-a4fc-bb6d933be346",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 67600.680229642,
+      "connected_now": true
+    },
+    {
+      "chat_id": "471b8059-d9e5-480f-aed3-e1151fd54e86",
+      "message_id": "539ab77d-e429-4eca-9c7f-079c819d57cc",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 67700.259024687,
+      "connected_now": true
+    },
+    {
+      "chat_id": "471b8059-d9e5-480f-aed3-e1151fd54e86",
+      "message_id": "539ab77d-e429-4eca-9c7f-079c819d57cc",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 67700.259139562,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "96a02325-b92b-44df-9009-10a8591a0543",
+      "message_id": "c3b0541f-4757-4a34-b939-953bd6edc362",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 67700.261053687,
+      "connected_now": true
+    },
+    {
+      "chat_id": "96a02325-b92b-44df-9009-10a8591a0543",
+      "message_id": "c3b0541f-4757-4a34-b939-953bd6edc362",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 67700.261129812,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "471b8059-d9e5-480f-aed3-e1151fd54e86",
+      "message_id": "539ab77d-e429-4eca-9c7f-079c819d57cc",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "emit",
+      "time": 67705.261136439,
+      "connected_now": true,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "96a02325-b92b-44df-9009-10a8591a0543",
+      "message_id": "c3b0541f-4757-4a34-b939-953bd6edc362",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "emit",
+      "time": 67705.27235398,
+      "connected_now": true,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "471b8059-d9e5-480f-aed3-e1151fd54e86",
+      "message_id": "539ab77d-e429-4eca-9c7f-079c819d57cc",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "return",
+      "time": 67705.291882689,
+      "connected_now": true
+    },
+    {
+      "chat_id": "471b8059-d9e5-480f-aed3-e1151fd54e86",
+      "message_id": "539ab77d-e429-4eca-9c7f-079c819d57cc",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 67705.291980147,
+      "connected_now": true
+    },
+    {
+      "chat_id": "96a02325-b92b-44df-9009-10a8591a0543",
+      "message_id": "c3b0541f-4757-4a34-b939-953bd6edc362",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "return",
+      "time": 67705.303136897,
+      "connected_now": true
+    },
+    {
+      "chat_id": "96a02325-b92b-44df-9009-10a8591a0543",
+      "message_id": "c3b0541f-4757-4a34-b939-953bd6edc362",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 67705.303185605,
+      "connected_now": true
+    },
+    {
+      "chat_id": "7c61a4ea-14e4-4c41-9edb-c237211c43a7",
+      "message_id": "9c1b7510-75c3-4e78-a66c-d7b32250b9af",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 67908.501209156,
+      "connected_now": true
+    },
+    {
+      "chat_id": "7c61a4ea-14e4-4c41-9edb-c237211c43a7",
+      "message_id": "9c1b7510-75c3-4e78-a66c-d7b32250b9af",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 67908.501294531,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "7c61a4ea-14e4-4c41-9edb-c237211c43a7",
+      "message_id": "9c1b7510-75c3-4e78-a66c-d7b32250b9af",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "emit",
+      "time": 67913.502360574,
+      "connected_now": true,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "7c61a4ea-14e4-4c41-9edb-c237211c43a7",
+      "message_id": "9c1b7510-75c3-4e78-a66c-d7b32250b9af",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "return",
+      "time": 67913.523013491,
+      "connected_now": true
+    },
+    {
+      "chat_id": "7c61a4ea-14e4-4c41-9edb-c237211c43a7",
+      "message_id": "9c1b7510-75c3-4e78-a66c-d7b32250b9af",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 67913.523110033,
+      "connected_now": true
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "e4688b7e-0aa7-43e0-aa1b-6c1c1ed398ef",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 68045.696817677,
+      "connected_now": true
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "e4688b7e-0aa7-43e0-aa1b-6c1c1ed398ef",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 68045.696937802,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "e4688b7e-0aa7-43e0-aa1b-6c1c1ed398ef",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_return",
+      "time": 68045.707470802,
+      "connected_now": true
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "e4688b7e-0aa7-43e0-aa1b-6c1c1ed398ef",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "emit",
+      "time": 68045.707758052,
+      "connected_now": true,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "e4688b7e-0aa7-43e0-aa1b-6c1c1ed398ef",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "return",
+      "time": 68045.716276843,
+      "connected_now": true
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "e4688b7e-0aa7-43e0-aa1b-6c1c1ed398ef",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 68045.716474302,
+      "connected_now": true
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "d3a54c75-f065-4d1a-98d1-57400de58128",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 68146.692696389,
+      "connected_now": true
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "d3a54c75-f065-4d1a-98d1-57400de58128",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 68146.692778806,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "d3a54c75-f065-4d1a-98d1-57400de58128",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_return",
+      "time": 68147.113111681,
+      "connected_now": true
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "d3a54c75-f065-4d1a-98d1-57400de58128",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "emit",
+      "time": 68147.11370064,
+      "connected_now": true,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "d3a54c75-f065-4d1a-98d1-57400de58128",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "return",
+      "time": 68147.130687765,
+      "connected_now": true
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "message_id": "d3a54c75-f065-4d1a-98d1-57400de58128",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 68147.13075314,
+      "connected_now": true
+    },
+    {
+      "chat_id": "6f5f1aec-2b56-42e8-987e-f19dd5131d9d",
+      "message_id": "a8ad5631-fb1c-404a-8019-b1eb50d20fe4",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 68917.432382907,
+      "connected_now": true
+    },
+    {
+      "chat_id": "6f5f1aec-2b56-42e8-987e-f19dd5131d9d",
+      "message_id": "a8ad5631-fb1c-404a-8019-b1eb50d20fe4",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 68917.432506407,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "dc32a0b6-5a06-4669-b24d-c32286618978",
+      "message_id": "85cabff9-6624-4d01-b78b-52310faec3f9",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "start",
+      "time": 68917.434890157,
+      "connected_now": true
+    },
+    {
+      "chat_id": "dc32a0b6-5a06-4669-b24d-c32286618978",
+      "message_id": "85cabff9-6624-4d01-b78b-52310faec3f9",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "browser_call",
+      "time": 68917.434957698,
+      "connected_now": true,
+      "type": "execute"
+    },
+    {
+      "chat_id": "6f5f1aec-2b56-42e8-987e-f19dd5131d9d",
+      "message_id": "a8ad5631-fb1c-404a-8019-b1eb50d20fe4",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "emit",
+      "time": 68922.435663242,
+      "connected_now": true,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "dc32a0b6-5a06-4669-b24d-c32286618978",
+      "message_id": "85cabff9-6624-4d01-b78b-52310faec3f9",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "emit",
+      "time": 68922.448857701,
+      "connected_now": true,
+      "type": "embeds"
+    },
+    {
+      "chat_id": "6f5f1aec-2b56-42e8-987e-f19dd5131d9d",
+      "message_id": "a8ad5631-fb1c-404a-8019-b1eb50d20fe4",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "return",
+      "time": 68922.468467534,
+      "connected_now": true
+    },
+    {
+      "chat_id": "6f5f1aec-2b56-42e8-987e-f19dd5131d9d",
+      "message_id": "a8ad5631-fb1c-404a-8019-b1eb50d20fe4",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 68922.468574742,
+      "connected_now": true
+    },
+    {
+      "chat_id": "dc32a0b6-5a06-4669-b24d-c32286618978",
+      "message_id": "85cabff9-6624-4d01-b78b-52310faec3f9",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "return",
+      "time": 68922.479429742,
+      "connected_now": true
+    },
+    {
+      "chat_id": "dc32a0b6-5a06-4669-b24d-c32286618978",
+      "message_id": "85cabff9-6624-4d01-b78b-52310faec3f9",
+      "version": "2.2.3",
+      "actor": "b5887211-4726-4789-9854-00aee6373500",
+      "connected": true,
+      "event": "end",
+      "time": 68922.479471992,
+      "connected_now": true
+    }
+  ],
+  "cleanup_trace": [
+    {
+      "chat_id": "0eaf50ce-401f-42ba-bbc1-a4350ef9db08",
+      "tickets": 0
+    },
+    {
+      "chat_id": "e2617759-2cc4-4fd5-a303-9b6be92e7aa5",
+      "tickets": 2
+    },
+    {
+      "chat_id": "674713a6-9468-4fec-a5a9-687cd663b049",
+      "tickets": 1
+    },
+    {
+      "chat_id": "f08abea5-f2e7-4be6-bd98-e295dd945efd",
+      "tickets": 0
+    },
+    {
+      "chat_id": "1fe85b9a-2cd4-4393-98b0-54e81b342e3b",
+      "tickets": 2
+    },
+    {
+      "inspection": true,
+      "time": 66982.777678233,
+      "tickets": 0
+    },
+    {
+      "chat_id": "c687b3db-03b9-48cf-8741-d8cfcdbf7459",
+      "tickets": 0
+    },
+    {
+      "request_chat": "5ef868b4-0dbd-4c33-9212-86cb8d6b1447",
+      "session_connected": true
+    },
+    {
+      "request_chat": "d6c2570c-f5c9-434d-95d4-879349cc3825",
+      "session_connected": true
+    },
+    {
+      "request_chat": "8e85128d-3c4f-46c5-9b05-871ae3411125",
+      "session_connected": true
+    },
+    {
+      "chat_id": "d6c2570c-f5c9-434d-95d4-879349cc3825",
+      "tickets": 2
+    },
+    {
+      "chat_id": "8e85128d-3c4f-46c5-9b05-871ae3411125",
+      "tickets": 1
+    },
+    {
+      "chat_id": "5ef868b4-0dbd-4c33-9212-86cb8d6b1447",
+      "tickets": 0
+    },
+    {
+      "request_chat": "ad2ce1e2-704e-48bc-931e-f1733250b482",
+      "session_connected": true
+    },
+    {
+      "request_chat": "5027ea3b-5334-4b5b-b3b0-067cb3d22f79",
+      "session_connected": true
+    },
+    {
+      "request_chat": "c1b85915-a287-40b8-bb2b-d2db3da34426",
+      "session_connected": true
+    },
+    {
+      "chat_id": "c1b85915-a287-40b8-bb2b-d2db3da34426",
+      "tickets": 2
+    },
+    {
+      "chat_id": "5027ea3b-5334-4b5b-b3b0-067cb3d22f79",
+      "tickets": 1
+    },
+    {
+      "chat_id": "ad2ce1e2-704e-48bc-931e-f1733250b482",
+      "tickets": 0
+    },
+    {
+      "request_chat": "7e234e20-787f-40c7-8ae3-c17ab767a8c7",
+      "session_connected": true
+    },
+    {
+      "request_chat": "471b8059-d9e5-480f-aed3-e1151fd54e86",
+      "session_connected": true
+    },
+    {
+      "request_chat": "96a02325-b92b-44df-9009-10a8591a0543",
+      "session_connected": true
+    },
+    {
+      "chat_id": "471b8059-d9e5-480f-aed3-e1151fd54e86",
+      "tickets": 2
+    },
+    {
+      "chat_id": "96a02325-b92b-44df-9009-10a8591a0543",
+      "tickets": 1
+    },
+    {
+      "chat_id": "7e234e20-787f-40c7-8ae3-c17ab767a8c7",
+      "tickets": 0
+    },
+    {
+      "request_chat": "2b03664f-5ac3-464a-ba2e-10cd8f7cae1b",
+      "session_connected": true
+    },
+    {
+      "request_chat": "7c61a4ea-14e4-4c41-9edb-c237211c43a7",
+      "session_connected": true
+    },
+    {
+      "request_chat": "ee9847a3-2bff-4f5f-b395-807d93158a99",
+      "session_connected": true
+    },
+    {
+      "chat_id": "ee9847a3-2bff-4f5f-b395-807d93158a99",
+      "tickets": 2
+    },
+    {
+      "chat_id": "7c61a4ea-14e4-4c41-9edb-c237211c43a7",
+      "tickets": 1
+    },
+    {
+      "chat_id": "2b03664f-5ac3-464a-ba2e-10cd8f7cae1b",
+      "tickets": 0
+    },
+    {
+      "request_chat": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "session_connected": true
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "tickets": 0
+    },
+    {
+      "request_chat": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "session_connected": true
+    },
+    {
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "tickets": 0
+    },
+    {
+      "request_chat": "8cbd36b2-6cf3-401c-9d52-ce9ebefa3007",
+      "session_connected": true
+    },
+    {
+      "request_chat": "6f5f1aec-2b56-42e8-987e-f19dd5131d9d",
+      "session_connected": true
+    },
+    {
+      "request_chat": "dc32a0b6-5a06-4669-b24d-c32286618978",
+      "session_connected": true
+    },
+    {
+      "chat_id": "6f5f1aec-2b56-42e8-987e-f19dd5131d9d",
+      "tickets": 2
+    },
+    {
+      "chat_id": "dc32a0b6-5a06-4669-b24d-c32286618978",
+      "tickets": 1
+    },
+    {
+      "chat_id": "8cbd36b2-6cf3-401c-9d52-ce9ebefa3007",
+      "tickets": 0
+    },
+    {
+      "request_chat": "",
+      "session_connected": false
+    },
+    {
+      "inspection": true,
+      "time": 69736.002881695,
+      "tickets": 0,
+      "viewer_sockets": 0
+    },
+    {
+      "chat_id": "",
+      "tickets": 0
+    },
+    {
+      "request_chat": "",
+      "session_connected": false
+    },
+    {
+      "inspection": true,
+      "time": 69771.364551711,
+      "tickets": 0,
+      "viewer_sockets": 0
+    },
+    {
+      "chat_id": "",
+      "tickets": 0
+    },
+    {
+      "request_chat": "",
+      "session_connected": false
+    },
+    {
+      "inspection": true,
+      "time": 69802.955655017,
+      "tickets": 0,
+      "viewer_sockets": 0
+    },
+    {
+      "chat_id": "",
+      "tickets": 0
+    }
+  ],
+  "controls": {
+    "direct": {
+      "handoff_passed": true,
+      "chat_id": "00c8aa97-2d63-46dc-87e0-bba9f71af108",
+      "tool_calls": [
+        "view_skill",
+        "lite_delegate",
+        "view_skill",
+        "visualize"
+      ],
+      "main_embeds": 1,
+      "children": []
+    },
+    "existing-control": {
+      "passed": true,
+      "runs": [
+        {
+          "chat_id": "f3a6d2e5-bb2c-45e5-91d9-459b2cf3dc4e",
+          "message_id": "0e5323ce-66f8-48b8-939d-fffdf6cbcf07",
+          "user_key": "user"
+        },
+        {
+          "chat_id": "cdb72b7a-5b84-4425-b72f-3a7d374b2c6c",
+          "message_id": "b3785815-d0a0-426c-917c-b643ae9c648e",
+          "user_key": "user2"
+        }
+      ],
+      "fresh_router_followup": "1a163e60-b3e2-4d24-9b4a-1e9ab0e2e28e"
+    },
+    "audit": {
+      "inspection": true,
+      "time": 69802.955655017,
+      "tickets": 0,
+      "viewer_sockets": 0
+    }
+  },
+  "provider_counters": {
+    "vg-router": 32,
+    "vg-s": 2,
+    "vg-a": 27,
+    "vg-b": 6
+  },
+  "cleanup": {
+    "cleaned": true,
+    "visualizer_fixture_chats_deleted": 23,
+    "ordinary_control_parents_deleted": 4,
+    "tickets": 0,
+    "viewer_sockets": 0,
+    "native_tasks_before_deletion": 0,
+    "shared_config_matches_snapshot": true,
+    "fixture_users_and_resources_remaining": 0,
+    "fixture_provider_running": false,
+    "production_modified": false
+  },
+  "browser_evidence": {
+    "verified": true,
+    "record": "visualizer-browser-evidence.md",
+    "browser": "Safari 27.0.1",
+    "network_resources": 47,
+    "local_http_resources": 45,
+    "srcdoc_documents": 2,
+    "external_network_requests": 0
+  },
+  "controls_not_recorded": []
+}

@@ -6,6 +6,42 @@
 для официального Docker-образа без metadata — штатная `open_webui.env.VERSION`.
 Оба варианта допускают только 0.12.3. Другие версии требуют отдельной проверки.
 
+## Inline Visualizer (2026-10-23)
+
+Подтверждены Tool **2.2.3** и согласованный Skill из snapshot
+`bcc224db138b6901a8d4b99e7f8a8859bea5629b` Classic298/open-webui-plugins,
+OWUI 0.12.3 (Docker Python 3.11.17), Safari 27.0.1. URLs и SHA-256 —
+[manifest](../tools/fixtures/inline_visualizer/manifest.json). В Skill не требуется
+отдельное поле версии. Функция 2.2.3 — `visualize`; `render_visualization` 2.1.1
+используется только в отрицательном контроле и не считается совместимой.
+
+**Runtime Router и оба exports не менялись.** Обновления Tool/Skill достаточно
+для проверенного child-chat пути. Native Tool возвращается за 5.02–5.05 с без
+callback основного чата; при отключённой настоящей сессии — за 0.011 с.
+Message-level embed сохраняется у child, модель продолжает HTML/SVG, родитель
+сохраняет прежние статусы/ссылки без embed работника. A+B и A+A сохраняют
+независимые визуализации.
+
+Подтверждены открытие по штатной ссылке, loader→готовый SVG во время генерации,
+reload и новая socket-сессия того же пользователя без повторных model/Tool calls.
+Кнопка меняет DOM и цвет SVG. Viewer без прямых grants на ресурсы видит своё
+выполнение; постороннему child API отказывает, internal дети отсутствуют в истории.
+
+Условия: пользовательские iframe scripts/same-origin, Tool/Skill только у
+выбранного агента, локальный HTML/SVG, Valves `security_level=offline`,
+`chime=false`. Router не включает same-origin. Network Inspector показал только
+локальный OWUI и `about:srcdoc`; backend работал с подготовленным loopback provider.
+CDN, внешние данные, другие версии плагина/OWUI и браузеры не подтверждены.
+
+Обычные A+B→C/A+A→C и следующий самостоятельный ответ Router повторно прошли.
+Отдельный Visualizer handoff в main сохранил embed; интерактивность проверена
+после загрузки сохранённого ответа. До reload live-main iframe оставался на
+loader; live-main rendering этим change не гарантируется. Проверка live-просмотра
+данного change относится к дочернему выполнению.
+Команды, IDs и раздельные backend/browser свидетельства —
+[acceptance.md](acceptance.md), [browser evidence](visualizer-browser-evidence.md)
+и [JSON](visualizer-evidence.json).
+
 Обычные тесты и тесты двух самостоятельных exports:
 
 ```sh

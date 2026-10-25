@@ -1,0 +1,33 @@
+{
+  "repository": "https://github.com/Classic298/open-webui-plugins",
+  "files": [
+    {
+      "path": "2.1.1/tool.py",
+      "tool_version": "2.1.1",
+      "commit": "5f549492316505af4ec6f2de0bdee781b1e778a5",
+      "url": "https://raw.githubusercontent.com/Classic298/open-webui-plugins/5f549492316505af4ec6f2de0bdee781b1e778a5/inline-visualizer-v2/tool.py",
+      "sha256": "04a185f5553013a401107943db490f6b14f17ce2b1da59afebab1676e7d08bc4"
+    },
+    {
+      "path": "2.1.1/SKILL.md",
+      "tool_version": "2.1.1",
+      "commit": "5f549492316505af4ec6f2de0bdee781b1e778a5",
+      "url": "https://raw.githubusercontent.com/Classic298/open-webui-plugins/5f549492316505af4ec6f2de0bdee781b1e778a5/inline-visualizer-v2/SKILL.md",
+      "sha256": "ae352a0fc12bc6144b71120dd5bc4a84fbc7cb42ace9f0e42fc52c13d4d19779"
+    },
+    {
+      "path": "2.2.3/tool.py",
+      "tool_version": "2.2.3",
+      "commit": "bcc224db138b6901a8d4b99e7f8a8859bea5629b",
+      "url": "https://raw.githubusercontent.com/Classic298/open-webui-plugins/bcc224db138b6901a8d4b99e7f8a8859bea5629b/inline-visualizer-v2/tool.py",
+      "sha256": "38ed6323c3b2b7c1f4dbfafbf4ea04372f8fa3694672ec74f8bb5dba258b740b"
+    },
+    {
+      "path": "2.2.3/SKILL.md",
+      "tool_version": "2.2.3",
+      "commit": "bcc224db138b6901a8d4b99e7f8a8859bea5629b",
+      "url": "https://raw.githubusercontent.com/Classic298/open-webui-plugins/bcc224db138b6901a8d4b99e7f8a8859bea5629b/inline-visualizer-v2/SKILL.md",
+      "sha256": "d7fa8dab49d0fa2e4e55ab711b3d5aeaf8ba80bb1668034ba9d4ab03529f70a2"
+    }
+  ]
+}

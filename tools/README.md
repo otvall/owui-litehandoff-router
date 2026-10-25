@@ -1,6 +1,111 @@
 Build the two independent Functions with `python tools/build_functions.py`.
 No build-time downloads are performed.
 
+## Inline Visualizer native/browser gate
+
+Use only disposable `owui-router-test`, OWUI **0.12.3**. Prepare its existing
+OWUI dependencies and `fixtures/inline_visualizer/` before the offline run.
+The manifest records upstream URLs, commits, versions and SHA-256; every asset
+is checked before any HTTP request. A changed hash is rejected. The two current
+exports are independent Functions; the checkout package is not installed.
+
+```sh
+python3 tools/visualizer_acceptance.py verify-assets
+docker exec owui-router-test mkdir -p /tmp/lhr-visualizer-gate
+docker cp tools/. owui-router-test:/tmp/lhr-visualizer-gate/
+docker cp dist owui-router-test:/tmp/lhr-visualizer-gate/dist
+docker exec -e VISUALIZER_DISPOSABLE=owui-router-test -e PYTHONPATH=/app/backend -w /app/backend owui-router-test python /tmp/lhr-visualizer-gate/visualizer_acceptance.py bootstrap
+docker exec -d owui-router-test sh -c 'echo $$ > /tmp/lhr-visualizer-gate/provider.pid; exec python /tmp/lhr-visualizer-gate/visualizer_gate_provider.py > /tmp/lhr-visualizer-gate/provider.log 2>&1'
+docker exec -e VISUALIZER_DISPOSABLE=owui-router-test -e PYTHONPATH=/app/backend -w /app/backend owui-router-test python /tmp/lhr-visualizer-gate/visualizer_acceptance.py install --version 2.2.3
+```
+
+Bootstrap signs a temporary session for the existing disposable admin, without
+printing tokens. Credentials/settings stay in mode-0600 files inside that
+directory. Install creates only `vg_*`/`vg-*` resources and three synthetic
+users, snapshots shared provider/config and viewer settings, and enables the
+declared iframe same-origin/scripts condition **only for the fixture viewer**.
+The viewer receives model grants; the owner keeps private Tools/Skills. Router
+and the simple worker have no Visualizer attachments. The audit Filter observes
+connections/tickets. A measurement suffix calls the byte-identical upstream
+implementation once and forwards native callbacks; it adds no renderer or RPC.
+
+Sign in at `http://127.0.0.1:8765` as `lhr-visualizer-viewer@example.com` using
+the password from private fixture state. Do not print session tokens or save
+the password in the browser. Choose **Visualizer acceptance Router**. Submit
+`VG_SINGLE: Create an interactive local SVG visualization with a button`.
+Keep the main chat open until completion; do not open a child beforehand.
+
+```sh
+docker exec -e VISUALIZER_DISPOSABLE=owui-router-test owui-router-test python /tmp/lhr-visualizer-gate/visualizer_acceptance.py latest
+docker exec -e VISUALIZER_DISPOSABLE=owui-router-test owui-router-test python /tmp/lhr-visualizer-gate/visualizer_acceptance.py verify
+```
+
+`verify --chat <main-id>` checks a specific saved run. Backend success stays
+separate from rendering. In Sources → agent A → **Открыть выполнение**, check
+SVG/unique marker, disappearance of loader, and Toggle (`STATE=0` → `STATE=1`,
+blue → green). Capture AX/screenshot, reload using the browser's toolbar button
+(OWUI may intercept Cmd+R as regeneration), and repeat. Compare provider
+`/stats` and `tool-trace.jsonl` before/after viewing; counters must not grow.
+
+For negative control install `--version 2.1.1` in the same fixture IDs (the
+installer resets its incompatible `offline` Valve). Submit fresh
+`VG_SINGLE NEGATIVE211` in the real browser, keep the main chat open and promptly
+run `negative --chat <main-id>`. It confirms a real session pending on `execute`
+for six seconds, then stops native tasks. Submit `VG_INSPECT_ONLY` and check the
+audit record has zero tickets. Reinstall **2.2.3** afterwards. An invented
+session ID is not a valid negative control.
+
+For disconnection submit fresh `VG_DISCONNECT`, then navigate the original tab
+to `about:blank` **without Stop**. The provider holds the Tool-call stream for
+12 seconds so the real socket disconnects before language detection. Verify
+the saved main ID afterwards, then open its child in a new session. A native
+disconnected-caller error is distinct from browser acknowledgement.
+
+Use `VG_PAIR` for A+B, `VG_REPEAT` for two A assignments, `VG_LIVE` for viewing
+while generation after Tool is held. Before LIVE remove any old
+`continue-generation` file, open its child, then release:
+
+```sh
+docker exec owui-router-test touch /tmp/lhr-visualizer-gate/continue-generation
+```
+
+The live hold is bounded to 120 seconds. `VG_DIRECT` checks ordinary handoff
+with Visualizer in the main chat. Fragments use local SVG/JavaScript, no CDN,
+fetch or images. Preserve local browser/backend transport during offline tests
+and record browser network evidence separately.
+
+For the existing pgate A+B→C/A+A→C fixtures prepared by the preceding sections,
+repeat the ordinary group/handoff control. This refreshes only synthetic fixture
+credentials and temporarily selects their local provider, restoring it in
+`finally`:
+
+```sh
+docker exec -e VISUALIZER_DISPOSABLE=owui-router-test -e PYTHONPATH=/app/backend -w /app/backend owui-router-test python /tmp/lhr-visualizer-gate/visualizer_existing_control.py
+```
+
+After preserving screenshots/AX and signing out/closing test browser sessions,
+run the process audit, export sanitized evidence, and restore:
+
+```sh
+docker exec -e VISUALIZER_DISPOSABLE=owui-router-test owui-router-test python /tmp/lhr-visualizer-gate/visualizer_acceptance.py audit
+docker exec -e VISUALIZER_DISPOSABLE=owui-router-test owui-router-test python /tmp/lhr-visualizer-gate/visualizer_acceptance.py export-evidence
+docker exec -e VISUALIZER_DISPOSABLE=owui-router-test owui-router-test python /tmp/lhr-visualizer-gate/visualizer_acceptance.py restore
+docker exec -e VISUALIZER_DISPOSABLE=owui-router-test owui-router-test python /tmp/lhr-visualizer-gate/visualizer_acceptance.py cleanup
+```
+
+Copy `visualizer-evidence.json` out before cleanup. Restore returns shared
+provider/config and the viewer's original UI fields, including resetting new
+fields. It preserves children and production resources. The separate `cleanup`
+action requires exported evidence, restore and an audit with zero viewer sockets
+and tickets; it deletes only this gate's new models/functions/resources/users
+and their fixture chats. It does not delete previous pgate installations.
+Optional manual control reports are included when present; absent ones are
+listed in `controls_not_recorded`, never converted to a passed result. Browser
+observations/screenshots remain a separate record from backend verification.
+Stop only the fixture provider via its saved PID after checking its command line.
+Delete only named fixture resources/chats after exporting evidence. Actual
+backend and browser results belong in `docs/acceptance.md`.
+
 `acceptance_provider.py` is a deterministic provider, not an LLM evaluation.
 `acceptance_server.py` adds a real local MCP Streamable HTTP endpoint and binds
 only `127.0.0.1:8766`. Both use the libraries already installed with OWUI.

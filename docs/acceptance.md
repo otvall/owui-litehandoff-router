@@ -1,5 +1,65 @@
 # Фактическая приёмка
 
+## Inline Visualizer: исходный gate 2026-10-23
+
+Одноразовый `owui-router-test`, OWUI 0.12.3; текущие два exports загружены
+самостоятельно, checkout внутри контейнера не установлен. Согласованные
+upstream Tool/Skill и отрицательный snapshot перечислены с полными SHA-256 в
+[manifest](../tools/fixtures/inline_visualizer/manifest.json). Установщик
+отклоняет изменённый файл до HTTP, без обращения к сети. Команды подготовки,
+проверки и restore — [tools/README.md](../tools/README.md).
+
+Первый успешный gate использовал неизменённый runtime Router:
+Pipe SHA-256 `6b0c5a880e43c6efe6db2fe47c1cb3d79462c032805177c6450c28a093940063`,
+Preparation `f399c2b10098b2a090868dbf15ce4047fbd884118fc155c6b4a275ca829ea6b1`.
+В Preparation заменён только штатный конфигурационный реестр fixture AGENTS.
+Измерительный suffix оригинального Tool передаёт настоящие callbacks и вызывает
+оригинал один раз. Работники читают настоящий согласованный Skill через native
+`view_skill`, затем опубликованную функцию (`visualize` / `render_visualization`).
+
+| Проверка | Фактический результат |
+| --- | --- |
+| 2.1.1, реальный Safari остаётся в основном чате | Parent `c687b3db-03b9-48cf-8741-d8cfcdbf7459`; Tool pending на browser `execute` 8.283 с, connected=true; child заранее не открывался. Ограниченный Stop: 0 native tasks, последующий `VG_INSPECT_ONLY`: 0 tickets |
+| 2.2.3, основной чат открыт | Parent `f08abea5-f2e7-4be6-bd98-e295dd945efd`; A child `674713a6-9468-4fec-a5a9-687cd663b049`; `visualize` 5.024 с без browser callback, один вызов; модель продолжила ответ, done=true, 1 child embed, 0 parent embeds |
+| 2.2.3, исходная вкладка отключена без Stop | Parent `5ef868b4-0dbd-4c33-9212-86cb8d6b1447`; A child `8e85128d-3c4f-46c5-9b05-871ae3411125`; исходный request connected=true, перед Tool connected=false. Native caller вернул disconnected error; Tool 0.011 с, продолжение модели и 1 сохранённый child embed, 0 parent embeds |
+| Отрисовка отдельно от backend | Обычный viewer без grants на Tool/Skill; Sources → A → «Открыть выполнение» первого parent. В `about:srcdoc` видны `VGFIX-123113be9500-1`, SVG `Local SVG 42`, Toggle; loader отсутствует. Нажатие меняет STATE=0→1 и синий круг на зелёный. AX и снимок экрана сохранены в CUA-записи этой приёмки |
+| Reload первого child | Восстановлены та же метка, SVG и Toggle; повторное нажатие STATE=0→1. Provider counters до/после: vg-router=5, vg-s=1, vg-a=3; новых Tool start нет |
+
+Результат исходного gate: **обновления внешних Tool/Skill достаточно; runtime
+Router не требует исправления**. Патчи OWUI и JS-форк плагина не применялись.
+Production-установка пользователя не изменялась. Последующие проверки изоляции,
+другой сессии и финального комплекта учитываются отдельно ниже.
+
+| Дополнительная проверка | Результат |
+| --- | --- |
+| A+B | Parent `ad2ce1e2-704e-48bc-931e-f1733250b482`; children `5027ea3b-5334-4b5b-b3b0-067cb3d22f79`, `c1b85915-a287-40b8-bb2b-d2db3da34426`; 5.033/5.038 с, overlap 5.026 с; метки `VGFIX-f7e5f607ca91-1/2`, обе кнопки работают |
+| A+A | Parent `7e234e20-787f-40c7-8ae3-c17ab767a8c7`; children `471b8059-d9e5-480f-aed3-e1151fd54e86`, `96a02325-b92b-44df-9009-10a8591a0543`; 5.033/5.042 с, overlap 5.031 с; метки `VGFIX-2ec34627c906-1/2`, обе кнопки работают |
+| Просмотр во время генерации | Parent `2b03664f-5ac3-464a-ba2e-10cd8f7cae1b`; child `7c61a4ea-14e4-4c41-9edb-c237211c43a7` открыт по source при done=false после Tool (5.022 с). Rendering visualization сменился на готовый `VGFIX-3495d965d5f4-1` после `touch continue-generation`; STATE=0→1. Worker counter остался vg-a=15, Tool start один |
+| Другая сессия viewer | Новое обычное окно Safari с новой socket-сессией открыло первый child после отключения исходной вкладки. SVG и кнопка работают, counters до/после vg-router=5, vg-s=1, vg-a=3 |
+| Доступ | Verify каждого parent подтвердил internal/type/parent chat+message/task_index, отсутствие детей в обычном списке/поиске и отказ чужому пользователю. Прямые GET приватных Tool/Skill viewer отклоняются |
+| Обычный Visualizer handoff | Main `00c8aa97-2d63-46dc-87e0-bba9f71af108`: view_skill→lite_delegate→view_skill→visualize completed; child нет, main embed сохранён. После reload VGFIX-direct интерактивен. Live-main loader оставался до reload; live-main совместимость не подтверждена |
+| Финальный gate и сеть | Parent `8cbd36b2-6cf3-401c-9d52-ce9ebefa3007`; A `dc32a0b6-5a06-4669-b24d-c32286618978`, B `6f5f1aec-2b56-42e8-987e-f19dd5131d9d`; 5.045/5.036 с, overlap 5.034 с. Оба открыты по source, SVG/Toggle/STATE=1 проверены. 47 ресурсов Network: 45 с 127.0.0.1 и два about:srcdoc; внешних запросов нет |
+| Прежние группы с handoff | Финальная команда visualizer_existing_control.py: A+B→C `f3a6d2e5-bb2c-45e5-91d9-459b2cf3dc4e`, A+A→C `cdb72b7a-5b84-4425-b72f-3a7d374b2c6c`; файлы/доступ/статусы/ссылки проверены прежним verifier. Следующий Router ответ `1a163e60-b3e2-4d24-9b4a-1e9ab0e2e28e` без новых workers |
+
+Браузер **Safari 27.0.1**, обычный fixture viewer, scripts/same-origin включены
+только как условие стенда. Рабочие ресурсы принадлежат другому обычному owner.
+Детали отрисовки/сети — [AX-запись](visualizer-browser-evidence.md), снимки экрана
+сохранены в CUA-записи приёмки. Метрики и IDs без credentials —
+[visualizer-evidence.json](visualizer-evidence.json).
+
+Для reload используйте кнопку Safari: Cmd+R в main OWUI перехватился как
+регенерация и дополнительно повторил direct-контроль. Эти вызовы не входят
+в доказательство отсутствия повторов при просмотре children.
+
+Проверки: сборка `python3 tools/build_functions.py` без изменения exports,
+**47/47** обычных тестов, **29/29** native на локальном Python 3.12.10.
+Docker использовал Python 3.11.17 и самостоятельные exports без checkout.
+После сохранения свидетельств удалены 23 Visualizer fixture-чата вместе с новыми
+ресурсами/тремя пользователями и четыре новых ordinary-control parent с их native
+children. До удаления native tasks=0; audit: tickets=0, viewer sockets=0.
+Provider/config и UI settings восстановлены и сверены с snapshot; свой provider
+8769 остановлен. Production не менялась.
+
 Дата: **2026-10-22**. Изменение `add-skill-based-handoff-router`:
 сценарии **7.1–7.3 выполнены** с детерминированным тестовым провайдером;
 перенос delegate в Pipe отдельно проверен, как описано ниже.
