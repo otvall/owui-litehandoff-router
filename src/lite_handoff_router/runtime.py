@@ -8,6 +8,7 @@ from copy import deepcopy
 from uuid import uuid4
 
 from .parallel_state import group_state
+from .profiles import ROUTER_PROFILE
 
 SCOPE_KEY = "lite_handoff_router"
 RECEIPT = "lite_router"
@@ -27,7 +28,7 @@ def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, ski
         "user_boundary": next((i for i in range(len(body.get("messages", [])) - 1, -1, -1)
                                if body["messages"][i].get("role") == "user"), -1),
         "generation": 0, "audit": [],
-        "parallel": group_state(max_parallel_tasks, parallel_timeout_seconds),
+        "parallel": group_state(max_parallel_tasks if ROUTER_PROFILE.parallel else 0, parallel_timeout_seconds),
     }
     request.scope[SCOPE_KEY] = state
     request.scope["lite_handoff_metadata"] = metadata

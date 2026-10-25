@@ -1,0 +1,182 @@
+{
+  "change": "add-owui-0111-router",
+  "date": "2026-10-25",
+  "unit_export_cases": 66,
+  "skipped_cases": 0,
+  "native": {
+    "0.11.1": {
+      "cases": 20,
+      "passed": true,
+      "fresh_database": true
+    },
+    "0.12.3": {
+      "cases": 41,
+      "passed": true,
+      "fresh_database": true
+    }
+  },
+  "exports": {
+    "0.11.1": {
+      "lite_handoff_router.py": "7a758dbe9ebac790a86d6df53c8164ed00cc79fb530a00c8ae4bd19a4da439cb",
+      "router_preparation.py": "33a1fe44e6d78203e2ff2686e82e188c8b51a32eee2a1732e846812d69656cfa"
+    },
+    "0.12.3": {
+      "lite_handoff_router.py": "f4f4ddcf86e887af736eb14b4eef4aa95429b1447232633acd587b0c054f34f6",
+      "router_preparation.py": "aeb5e213e46ac8fff6f7229d83ab1088afb9e5b33ec0894d83942f2fdd55b586"
+    }
+  },
+  "legacy_http": {
+    "evidence": "owui-0111-evidence.json",
+    "positive_runs": 6,
+    "negative_cases": 11,
+    "controls": "owui-0111-controls.json"
+  },
+  "current_http": {
+    "parallel_tools_mcp_files": [
+      {
+        "passed": true,
+        "chat_id": "db9c3acb-4b3c-4566-9474-b15aac42c691",
+        "message_id": "ac4e0ab1-4bfc-4eff-a261-964e0c5b2e97",
+        "user_key": "user",
+        "overlap_seconds": 0.999380041990662,
+        "children": [
+          "c7b6eebf-a622-4f19-b27d-789ef817cb40",
+          "95e2729d-9923-410d-83ad-03c17c4dd3db"
+        ],
+        "file_access_and_isolation": true
+      },
+      {
+        "passed": true,
+        "chat_id": "40662507-6cf5-4545-9d02-5d1960cc5fef",
+        "message_id": "d54c9668-e627-4a00-8e68-193e4f4a7f1e",
+        "user_key": "user2",
+        "overlap_seconds": 0.9988348760089139,
+        "children": [
+          "7402bb7c-e9f9-4282-bf2c-209b19dcf620",
+          "32b4e4db-2409-4ec8-bbab-690b7b4eecaf"
+        ],
+        "file_access_and_isolation": true
+      }
+    ],
+    "fresh_router_followup": true,
+    "selective_terminals": {
+      "passed": true,
+      "backend": "terminal-compatible actual subprocess shell; not stock Open Terminal",
+      "reports": [
+        {
+          "chat_id": "2ad1f36a-9d7b-4ca7-9135-9636d56e9e9b",
+          "message_id": "7ff21cab-e20b-493a-9954-8606a2b3581a",
+          "user": "one",
+          "question": "handoff terminal run=7ff21cab-e20b-493a-9954-8606a2b3581a",
+          "children": [],
+          "content": "A_OK_2c229dba708945ddb685ba59eac6bcd4"
+        },
+        {
+          "chat_id": "5b1eb9df-91f6-4784-a655-ff2847c6733c",
+          "message_id": "21d7b8e9-3089-4960-9dee-55f71a8bb302",
+          "user": "one",
+          "question": "mixed terminal run=21d7b8e9-3089-4960-9dee-55f71a8bb302",
+          "children": [
+            "d8bb50cd-c59f-4ae2-9eb4-164cd63ea236",
+            "8a772a45-4728-43d7-8447-bad1abf31cf2"
+          ],
+          "content": "FINAL_OK C_OK_6e2f151ac0374e6a8b942da601e02e0e"
+        },
+        {
+          "chat_id": "6dfd9777-c8cd-437e-857f-801bdcd404ad",
+          "message_id": "434e2591-9dc2-4f65-abeb-40000de0f7c2",
+          "user": "one",
+          "question": "same terminal run=434e2591-9dc2-4f65-abeb-40000de0f7c2",
+          "children": [
+            "c781b653-40f4-471e-8036-385496fcfe3f",
+            "52fab0bc-9ecf-45a7-a911-fcee2cedd81e"
+          ],
+          "content": "FINAL_OK C_OK_f438478005c542b996982b103dfc1ca0"
+        },
+        {
+          "chat_id": "e9153e22-dc69-4fe8-a650-e9650dc133b7",
+          "message_id": "e8ed6015-08d1-40ad-8b93-0668f372b584",
+          "user": "one",
+          "question": "general terminal run=e8ed6015-08d1-40ad-8b93-0668f372b584",
+          "children": [],
+          "content": "GENERAL_OK"
+        },
+        {
+          "chat_id": "ec19f6cc-690c-4315-8420-3cf41ed0a05a",
+          "message_id": "a426a87c-bd17-4b24-a9fe-8c67e76cea17",
+          "user": "one",
+          "question": "mixed concurrent run=a426a87c-bd17-4b24-a9fe-8c67e76cea17",
+          "children": [
+            "af2fa435-c3d3-43fe-b572-6b058af61dcf",
+            "45578684-6009-405d-b9ea-8b3b95a2520a"
+          ],
+          "content": "FINAL_OK C_OK_bfc7fd2b0f7e4bf0badcdbba969336da"
+        },
+        {
+          "chat_id": "7818e2c3-9393-4148-a80b-3b87626f6bc0",
+          "message_id": "f7ea0254-d1b0-452d-bd76-af2009bef7d3",
+          "user": "two",
+          "question": "mixed concurrent run=f7ea0254-d1b0-452d-bd76-af2009bef7d3",
+          "children": [
+            "24cea1eb-3663-4702-8dfe-635f7e6feaa7",
+            "0f99e805-7a9e-4b06-ba6e-dc993b57610f"
+          ],
+          "content": "FINAL_OK C_OK_70b1ca2957cf46f18956ac8e721c1199"
+        }
+      ],
+      "commands": 10,
+      "production_modified": false
+    },
+    "inline_visualizer_223": {
+      "chat_id": "e78b4cb6-2675-4234-8875-823fac1edcc4",
+      "message_id": "8a70d680-4513-47d0-8651-bf283b490c13",
+      "user": "one",
+      "question": "mixed terminal visualizer: create an interactive SVG visualization run=8a70d680-4513-47d0-8651-bf283b490c13",
+      "visualizer_child": "f5ceb03e-c695-40ac-b524-957a3c569bc2",
+      "tool_skill_version": "2.2.3",
+      "backend_passed": true,
+      "browser": {
+        "inspection": "Safari AX and native clicks",
+        "svg_present": true,
+        "toggle": "STATE=0 -> STATE=1",
+        "pixel_qa": false,
+        "signed_out_after": true
+      }
+    }
+  },
+  "cleanup": {
+    "legacy": {
+      "snapshots_restored": true,
+      "remaining_models_functions_tools_skills_users_files_chats": 0,
+      "container_removed": true
+    },
+    "current": {
+      "restored": true,
+      "created_parents_removed": 5,
+      "created_files_removed": 12,
+      "terminal_config_restored": true,
+      "terminal_fixture_remaining_rows": 0,
+      "terminal_provider_8770_stopped": true,
+      "prior_fixture_directory_restored": true,
+      "baseline_services_8766_8768_preserved": true
+    }
+  },
+  "production_modified": false,
+  "validation": {
+    "openspec_strict": true,
+    "git_diff_check": true
+  },
+  "review": {
+    "status": "changes_requested",
+    "severity": "P2",
+    "open_findings": 3,
+    "completed_tasks": 15,
+    "total_tasks": 17,
+    "report": "../openspec/changes/add-owui-0111-router/review.md",
+    "uncovered_cases": [
+      "OAuth actor token vs custom Authorization",
+      "legacy global disable before schema fetch",
+      "automatic MCP disconnect on Stop of a hanging ordinary call"
+    ]
+  }
+}

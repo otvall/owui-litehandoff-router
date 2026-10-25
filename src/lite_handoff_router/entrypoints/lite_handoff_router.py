@@ -7,7 +7,7 @@ from ..owui_adapter import OWUIAdapter
 from ..protocol import confirmed_target
 from ..runtime import require, metadata_draft, publish
 from ..history import refresh_source
-from ..observation import observe_response
+from ..observation import observe_response, check_profile_calls
 
 
 class Pipe:
@@ -22,6 +22,7 @@ class Pipe:
         adapter = OWUIAdapter()
         user = await adapter.user(__user__["id"])
         state = require(__request__, __metadata__, user.id)
+        check_profile_calls(state)
         refresh_source(state, body.get("messages", []))
         target = confirmed_target(state, state["source"])
         sessions_before = set(__request__.scope.get("lite_handoff_mcp", {}))

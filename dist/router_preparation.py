@@ -38,6 +38,20 @@ async def bind_tool_context(adapter, tool, messages, check=None, pinned=None):
         protected = await adapter.bind(protected, {**extra, **pinned, **context})
     return {**tool, 'callable': protected}
 
+# Source: profiles
+"""Build-time release capabilities. Request data never selects a profile."""
+from dataclasses import dataclass
+from types import MappingProxyType
+
+@dataclass(frozen=True)
+class ReleaseProfile:
+    version: str
+    skill_readers: frozenset[str]
+    parallel: bool
+RELEASE_PROFILES = MappingProxyType({'0.11.1': ReleaseProfile('0.11.1', frozenset({'view_skill'}), False), '0.12.3': ReleaseProfile('0.12.3', frozenset({'view_skill', 'read_skill_file', 'grep_skill_files'}), True)})
+ROUTER_TARGET_VERSION = '0.12.3'
+ROUTER_PROFILE = RELEASE_PROFILES[ROUTER_TARGET_VERSION]
+
 # Source: owui_adapter
 """All imports of OWUI's internal APIs live behind this versioned boundary."""
 import asyncio
@@ -51,14 +65,24 @@ def as_dict(value):
 
 class OWUIAdapter:
 
+    def __new__(cls):
+        if cls is OWUIAdapter:
+            implementation = OWUI0111Adapter if ROUTER_PROFILE.version == '0.11.1' else OWUI0123Adapter
+            return object.__new__(implementation)
+        return object.__new__(cls)
+
+    @property
+    def profile(self):
+        return ROUTER_PROFILE
+
     def __init__(self):
         try:
             installed_version = version('open-webui')
         except PackageNotFoundError:
             from open_webui.env import VERSION
             installed_version = VERSION
-        if installed_version != '0.12.3':
-            raise RuntimeError('Lite Handoff Router requires Open WebUI 0.12.3')
+        if installed_version != self.profile.version:
+            raise RuntimeError('Lite Handoff Router requires Open WebUI ' + self.profile.version + '; installed version: ' + str(installed_version))
 
     async def user(self, user_id):
         from open_webui.models.users import Users
@@ -97,7 +121,7 @@ class OWUIAdapter:
 
     async def tools(self, request, ids, user, extra):
         from open_webui.models.tools import Tools
-        from open_webui.utils.plugin import get_tools_cache, get_tool_contents_cache, load_tool_module_by_id, set_tool_module_in_cache
+        from open_webui.utils.plugin import get_tools_cache, get_tool_contents_cache
         actor = await self.user(extra['__user__']['id'])
         local = [identifier for identifier in ids if not identifier.startswith('server:')]
         rows = await Tools.get_tools_by_ids(local) if local else {}
@@ -112,8 +136,7 @@ class OWUIAdapter:
                 continue
             module = get_tools_cache(request).get(identifier)
             if module is None or get_tool_contents_cache(request).get(identifier) != row.content:
-                module, _, source = await load_tool_module_by_id(identifier, content=row.content)
-                set_tool_module_in_cache(request, identifier, row.content, module, source)
+                module = await self.load_module(request, identifier, row.content)
             if hasattr(module, 'valves') and hasattr(module, 'Valves'):
                 module.valves = module.Valves(**await Tools.get_tool_valves_by_id(identifier) or {})
             injection = actor.model_dump()
@@ -143,11 +166,27 @@ class OWUIAdapter:
                 result[name] = tool
         return result
 
-    async def tool_access(self, request, identifier, owner):
+    async def load_module(self, request, identifier, content):
+        from open_webui.utils.plugin import load_tool_module_by_id, set_tool_module_in_cache
+        module, _, source = await load_tool_module_by_id(identifier, content=content)
+        set_tool_module_in_cache(request, identifier, content, module, source)
+        return module
+
+    def local_tools_enabled(self):
         from open_webui.env import ENABLE_TOOLS
+        return ENABLE_TOOLS
+
+    def servers_enabled(self):
+        from open_webui.utils.tools import ENABLE_TOOL_SERVERS
+        return ENABLE_TOOL_SERVERS
+
+    async def member_groups(self, user):
+        from open_webui.models.groups import Groups
+        return {g.id for g in await Groups.get_groups_by_member_id(user.id, include_inherited=True)}
+
+    async def tool_access(self, request, identifier, owner):
         from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
         from open_webui.models.tools import Tools
-        from open_webui.models.groups import Groups
         from open_webui.models.access_grants import AccessGrants
         if identifier.startswith('server:mcp:'):
             await self.mcp_access(identifier.removeprefix('server:mcp:'), owner)
@@ -155,8 +194,8 @@ class OWUIAdapter:
         if identifier.startswith('server:'):
             await self.openapi_server(request, identifier, owner)
             return
-        row = await Tools.get_tool_by_id(identifier) if ENABLE_TOOLS else None
-        groups = {g.id for g in await Groups.get_groups_by_member_id(owner.id, include_inherited=True)}
+        row = await Tools.get_tool_by_id(identifier) if self.local_tools_enabled() else None
+        groups = await self.member_groups(owner)
         if row is None or not (owner.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL or row.user_id == owner.id or await AccessGrants.has_access(user_id=owner.id, resource_type='tool', resource_id=identifier, permission='read', user_group_ids=groups)):
             raise ValueError('Required model Tool unavailable or denied: ' + identifier)
 
@@ -170,13 +209,14 @@ class OWUIAdapter:
         connections = await tools.Config.get('tool_server.connections', [])
         index = data.get('idx', 0) if data else -1
         connection = connections[index] if 0 <= index < len(connections) else None
-        if not tools.ENABLE_TOOL_SERVERS or not data or (not connection) or (not (connection.get('config') or {}).get('enable', True)) or (not await tools.has_connection_access(owner, connection)):
+        if not self.servers_enabled() or not data or (not connection) or (not (connection.get('config') or {}).get('enable', True)) or (not await tools.has_connection_access(owner, connection)):
             raise ValueError('Required model Tool server unavailable or denied: ' + identifier)
         return (server_id, data, connection, set(subset.split(',')) if subset else None)
 
     async def server_tools(self, request, identifier, owner, actor, extra):
         from open_webui.utils import tools
         server_id, data, connection, subset = await self.openapi_server(request, identifier, owner)
+        await self.server_headers(request, connection, actor, server_id, extra.get('__metadata__', {}))
 
         def allowed(name, current):
             filters = (current.get('config') or {}).get('function_name_filter_list', '')
@@ -191,7 +231,8 @@ class OWUIAdapter:
                 _, current_data, current, _ = await self.openapi_server(request, identifier, fresh_owner)
                 if not allowed(name, current) or not any((s['name'] == name for s in current_data.get('specs', []))):
                     raise ValueError('Model server Tool is no longer available: ' + name)
-                headers, cookies = await tools.build_tool_server_headers(current, request, actor, server_id=server_id, metadata=extra.get('__metadata__', {}))
+                current_actor = await self.user(actor.id)
+                headers, cookies = await self.server_headers(request, current, current_actor, server_id, extra.get('__metadata__', {}))
                 headers.setdefault('Content-Type', 'application/json')
                 return await tools.execute_tool_server(url=current_data['url'], headers=headers, cookies=cookies, name=name, params=kwargs, server_data=current_data)
             return invoke
@@ -202,12 +243,24 @@ class OWUIAdapter:
                 result[name] = {'tool_id': identifier, 'type': 'external', 'spec': tools.clean_openai_tool_schema(deepcopy(spec)), 'callable': await self.bind(operation(name), {})}
         return result
 
+    async def server_headers(self, request, connection, actor, server_id, metadata, *, require_user_auth=False):
+        from open_webui.utils import tools
+        auth = connection.get('auth_type', 'bearer')
+        if require_user_auth:
+            if auth == 'session' and (not getattr(getattr(request.state, 'token', None), 'credentials', None)):
+                raise ValueError('Terminal requires execution-user session authorization')
+            if auth == 'system_oauth':
+                token = await tools.get_system_oauth_token(request, actor)
+                if not token or not token.get('access_token'):
+                    raise ValueError('Terminal requires execution-user OAuth authorization')
+        return await tools.build_tool_server_headers(connection, request, actor, server_id=server_id, metadata=metadata)
+
     async def terminal_access(self, request, identifier, owner):
         from open_webui.utils import tools
         connections = await tools.Config.get('terminal_server.connections', []) or []
         connection = next((c for c in connections if c.get('id') == identifier), None)
-        groups = {g.id for g in await tools.Groups.get_groups_by_member_id(owner.id, include_inherited=True)}
-        if not tools.ENABLE_TOOL_SERVERS or not connection or (not connection.get('enabled', True)) or (not await tools.has_connection_access(owner, connection, groups)):
+        groups = await self.member_groups(owner)
+        if not self.servers_enabled() or not connection or (not connection.get('enabled', True)) or (not await tools.has_connection_access(owner, connection, groups)):
             raise ValueError('Required model terminal unavailable or denied: ' + identifier)
         return connection
 
@@ -225,18 +278,11 @@ class OWUIAdapter:
         return (connection, {**data, 'url': get_terminal_server_url(connection)}, context_id)
 
     async def terminal_headers(self, request, identifier, connection, actor, metadata, context_id):
-        from open_webui.utils import tools
         from open_webui.utils.terminals import TERMINAL_CONTEXT_HEADER
         auth = connection.get('auth_type', 'bearer')
         if auth not in {'bearer', 'session', 'system_oauth', 'none'}:
             raise ValueError('Unsupported terminal authorization: ' + str(auth))
-        if auth == 'session' and (not getattr(getattr(request.state, 'token', None), 'credentials', None)):
-            raise ValueError('Terminal requires execution-user session authorization')
-        if auth == 'system_oauth':
-            token = await tools.get_system_oauth_token(request, actor)
-            if not token or not token.get('access_token'):
-                raise ValueError('Terminal requires execution-user OAuth authorization')
-        headers, cookies = await tools.build_tool_server_headers(connection, request, actor, server_id=identifier, metadata=metadata)
+        headers, cookies = await self.server_headers(request, connection, actor, identifier, metadata, require_user_auth=True)
         headers.update({'Content-Type': 'application/json', 'X-User-Id': actor.id})
         for name in list(headers):
             if name.lower() in {'x-user-id', 'x-session-id', TERMINAL_CONTEXT_HEADER.lower()}:
@@ -319,12 +365,11 @@ class OWUIAdapter:
         await self.mcp_connection(server_id, user)
 
     async def mcp_connection(self, server_id, user):
-        from open_webui.env import ENABLE_TOOL_SERVERS
         from open_webui.models.config import Config
         from open_webui.utils.access_control import has_connection_access
         connections = await Config.get('tool_server.connections', [])
         connection = next((c for c in connections if c.get('type') == 'mcp' and (c.get('info') or {}).get('id') == server_id), None)
-        if not ENABLE_TOOL_SERVERS or not connection or (not (connection.get('config') or {}).get('enable')) or (not await has_connection_access(user, connection)):
+        if not self.servers_enabled() or not connection or (not (connection.get('config') or {}).get('enable')) or (not await has_connection_access(user, connection)):
             raise ValueError('Required MCP connection unavailable or denied: ' + server_id)
         return connection
 
@@ -387,6 +432,8 @@ class OWUIAdapter:
         return {'type': 'file', 'id': row.id, 'name': (row.meta or {}).get('name') or row.filename, 'url': '/api/v1/files/' + row.id + '/content'}
 
     async def native_delegate(self, request, user, metadata, task, file_ids):
+        if not self.profile.parallel:
+            raise ValueError('Parallel tasks are unavailable in Open WebUI ' + self.profile.version + ' profile')
         from open_webui.utils.subagents import delegate
         return await delegate(task, '', False, request=request, user_data=user.model_dump(), metadata=metadata, file_ids=file_ids, parent_chat_id=metadata['chat_id'], parent_message_id=metadata['message_id'])
 
@@ -439,6 +486,77 @@ class OWUIAdapter:
         if response is None or (isinstance(response, dict) and response.get('error')):
             raise RuntimeError(str(response or 'Provider returned no response'))
         return response
+
+class OWUI0123Adapter(OWUIAdapter):
+    """Native API of the current release."""
+
+class OWUI0111Adapter(OWUIAdapter):
+    """Native API of the legacy release; imports stay lazy in this boundary."""
+
+    async def skill(self, skill_id, user):
+        from open_webui.routers.skills import get_skill_by_id
+        skill = await get_skill_by_id(skill_id, user=user, db=None)
+        if not skill.is_active:
+            raise ValueError(f'Skill "{skill_id}" is inactive')
+        return as_dict(skill)
+
+    async def load_module(self, request, identifier, content):
+        from open_webui.utils.plugin import get_tools_cache, get_tool_contents_cache, load_tool_module_by_id
+        module, _ = await load_tool_module_by_id(identifier, content=content)
+        get_tools_cache(request)[identifier] = module
+        get_tool_contents_cache(request)[identifier] = content
+        return module
+
+    def local_tools_enabled(self):
+        from open_webui.env import ENABLE_PLUGINS
+        return ENABLE_PLUGINS
+
+    def servers_enabled(self):
+        from open_webui.utils.tools import ENABLE_PLUGINS
+        return ENABLE_PLUGINS
+
+    async def member_groups(self, user):
+        from open_webui.models.groups import Groups
+        return {g.id for g in await Groups.get_groups_by_member_id(user.id)}
+
+    async def server_headers(self, request, connection, actor, server_id, metadata, *, require_user_auth=False):
+        from open_webui.utils import tools
+        from open_webui.utils.middleware import get_system_oauth_token
+        auth = connection.get('auth_type', 'bearer')
+        if auth not in {'bearer', 'session', 'system_oauth', 'oauth_2.1', 'oauth_2.1_static', 'none'}:
+            raise ValueError('Unsupported server authorization: ' + str(auth))
+        trusted = {}
+        if auth == 'session' and (not getattr(getattr(request.state, 'token', None), 'credentials', None)):
+            raise ValueError('Server requires execution-user session authorization')
+        if auth == 'system_oauth':
+            token = await get_system_oauth_token(request, actor)
+            if not token or not token.get('access_token'):
+                raise ValueError('Server requires execution-user OAuth authorization')
+            trusted['__oauth_token__'] = token
+        headers, cookies = await tools.build_tool_server_headers(connection, request, actor, server_id=server_id, metadata=metadata, extra_params=trusted)
+        if auth in {'oauth_2.1', 'oauth_2.1_static'} and (not headers.get('Authorization', '').removeprefix('Bearer ').strip()):
+            raise ValueError('Server requires execution-user OAuth authorization')
+        return (headers, cookies)
+
+    async def connect_mcp(self, request, server_id, user, extra):
+        from open_webui.utils import tools
+        from open_webui.utils.mcp.client import MCPClient
+        connection = await self.mcp_connection(server_id, user)
+        actor = await self.user(extra['__user__']['id'])
+        headers, _ = await self.server_headers(request, connection, actor, server_id, extra.get('__metadata__', {}))
+        client = MCPClient()
+        try:
+            await client.connect(url=connection.get('url', ''), headers=headers or None)
+            specs = await client.list_tool_specs()
+            filters = (connection.get('config') or {}).get('function_name_filter_list', '')
+            if isinstance(filters, str):
+                filters = filters.split(',')
+            if filters:
+                specs = [spec for spec in specs if tools.is_string_allowed(spec['name'], filters)]
+            return (client, specs)
+        except BaseException:
+            await client.disconnect()
+            raise
 
 # Source: registry
 """The same immutable request snapshot supplies routing discovery and execution."""
@@ -527,7 +645,7 @@ SCOPE_KEY = 'lite_handoff_router'
 RECEIPT = 'lite_router'
 
 def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids, *, max_parallel_tasks=4, parallel_timeout_seconds=300):
-    state = {'request_id': uuid4().hex, 'user_id': user_id, 'chat_id': metadata.get('chat_id'), 'message_id': metadata.get('message_id'), 'router_id': body['model'], 'registry': deepcopy(registry), 'diagnostics': diagnostics, 'base_tool_ids': list(tool_ids), 'base_skill_ids': list(skill_ids), 'source': deepcopy(body.get('messages', [])), 'phase': 'router', 'pending': [], 'active_agent': None, 'skill_scope': None, 'original_source': deepcopy(body.get('messages', [])), 'user_boundary': next((i for i in range(len(body.get('messages', [])) - 1, -1, -1) if body['messages'][i].get('role') == 'user'), -1), 'generation': 0, 'audit': [], 'parallel': group_state(max_parallel_tasks, parallel_timeout_seconds)}
+    state = {'request_id': uuid4().hex, 'user_id': user_id, 'chat_id': metadata.get('chat_id'), 'message_id': metadata.get('message_id'), 'router_id': body['model'], 'registry': deepcopy(registry), 'diagnostics': diagnostics, 'base_tool_ids': list(tool_ids), 'base_skill_ids': list(skill_ids), 'source': deepcopy(body.get('messages', [])), 'phase': 'router', 'pending': [], 'active_agent': None, 'skill_scope': None, 'original_source': deepcopy(body.get('messages', [])), 'user_boundary': next((i for i in range(len(body.get('messages', [])) - 1, -1, -1) if body['messages'][i].get('role') == 'user'), -1), 'generation': 0, 'audit': [], 'parallel': group_state(max_parallel_tasks if ROUTER_PROFILE.parallel else 0, parallel_timeout_seconds)}
     request.scope[SCOPE_KEY] = state
     request.scope['lite_handoff_metadata'] = metadata
     metadata['tools'] = {}
@@ -667,6 +785,8 @@ def input_file_id(file):
     return file.get('id') or (file.get('file') or {}).get('id')
 
 async def validate_batch(adapter, request, user, metadata, state, tasks):
+    if not ROUTER_PROFILE.parallel:
+        raise ValueError('Parallel tasks are unavailable in Open WebUI ' + ROUTER_PROFILE.version + ' profile')
     group = state['parallel']
     if group['max_tasks'] == 0:
         raise ValueError('Parallel tasks are disabled by max_parallel_tasks=0')
@@ -703,7 +823,7 @@ async def validate_batch(adapter, request, user, metadata, state, tasks):
 
 async def prepare_worker(adapter, request, body, metadata, user):
     """Only native internal requests with a live server binding enter worker mode."""
-    if getattr(request.state, 'internal', False) is not True:
+    if not ROUTER_PROFILE.parallel or getattr(request.state, 'internal', False) is not True:
         return False
     ticket = (getattr(request.state, 'chat_context', None) or {}).get(PARALLEL_TICKET)
     entry = run_registry(request).get(ticket) if isinstance(ticket, str) else None
@@ -802,6 +922,8 @@ async def collect_result(adapter, user, entry, native_result):
     return result
 
 async def execute_group(adapter, request, user, metadata, state, assignments, events):
+    if not ROUTER_PROFILE.parallel:
+        raise ValueError('Parallel tasks are unavailable in Open WebUI ' + ROUTER_PROFILE.version + ' profile')
     group = state['parallel']
     group['status'] = 'running'
     registry = run_registry(request)
@@ -905,6 +1027,8 @@ async def execute_group(adapter, request, user, metadata, state, assignments, ev
     return {'status': group['status'], 'results': deepcopy(group['results'])}
 
 def parallel_tool(adapter, request, user, metadata, state, events):
+    if not ROUTER_PROFILE.parallel:
+        raise ValueError('Parallel tasks are unavailable in Open WebUI ' + ROUTER_PROFILE.version + ' profile')
 
     async def lite_parallel(tasks: list) -> str:
         actor = await adapter.user(user.id)
@@ -959,8 +1083,8 @@ class Filter:
         adapter = OWUIAdapter()
         user = await adapter.user(__user__['id'])
         metadata = __metadata__ if __metadata__ is not None else body.setdefault('metadata', {})
-        if await prepare_worker(adapter, __request__, body, metadata, user):
+        if ROUTER_PROFILE.parallel and await prepare_worker(adapter, __request__, body, metadata, user):
             return body
         registry, diagnostics = await discover(adapter, __request__, user, AGENTS, body['model'])
-        begin(__request__, body, metadata, user.id, registry, diagnostics, ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids), max_parallel_tasks=self.valves.max_parallel_tasks, parallel_timeout_seconds=self.valves.parallel_timeout_seconds)
+        begin(__request__, body, metadata, user.id, registry, diagnostics, ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids), max_parallel_tasks=self.valves.max_parallel_tasks if ROUTER_PROFILE.parallel else 0, parallel_timeout_seconds=self.valves.parallel_timeout_seconds)
         return body

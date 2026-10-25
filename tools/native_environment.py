@@ -7,12 +7,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def configure(name="helpers"):
+def configure(name="helpers", owui_version="0.12.3", data_root=None):
     package = Path(find_spec("open_webui").origin).parent
-    data = ROOT / ".native-data" / name
+    data = Path(data_root or ROOT / ".native-data") / owui_version / name
     data.mkdir(parents=True, exist_ok=True)
     os.environ.update({
-        "DATA_DIR": str(data), "FRONTEND_BUILD_DIR": str(package / "frontend"),
+        "DATA_DIR": str(data), "DATABASE_URL": "sqlite:///" + str(data / "webui.db"),
+        "FRONTEND_BUILD_DIR": str(package / "frontend"),
         "STATIC_DIR": str(data / "static"), "OFFLINE_MODE": "true",
         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
         "WEBUI_SECRET_KEY": "isolated-router-tests-only",

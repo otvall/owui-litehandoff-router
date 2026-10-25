@@ -1,10 +1,10 @@
 # OWUI compatibility
 
-Поддерживается только **Open WebUI 0.12.3**, Python 3.11/3.12. Все обращения
+Поддерживаются отдельные комплекты **Open WebUI 0.12.3 и 0.11.1**, Python 3.11/3.12. Все обращения
 к внутренним API находятся в `src/lite_handoff_router/owui_adapter.py`.
 Проверка версии выполняется до исполнения. Для pip используется package metadata,
 для официального Docker-образа без metadata — штатная `open_webui.env.VERSION`.
-Оба варианта допускают только 0.12.3. Другие версии требуют отдельной проверки.
+Оба способа проверяют точное совпадение версии комплекта и сервера. Другие версии требуют отдельной проверки.
 
 ## Inline Visualizer (2026-10-23)
 
@@ -51,7 +51,7 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 Проверки с настоящими импортированными helpers установленного OWUI:
 
 ```sh
-.venv/bin/python tools/run_native_tests.py
+.venv/bin/python tools/run_native_tests.py --owui-version 0.12.3
 ```
 
 Runner создаёт отдельную БД `.native-data/`, использует frontend из wheel OWUI
@@ -199,3 +199,69 @@ iframe prerequisites у одноразового пользователя. Nativ
 показывал пустую центральную область, поэтому пиксельная проверка не заявляется.
 Подробности и обезличенные hashes приведены в `docs/acceptance.md` и
 `docs/terminal-evidence.json`.
+
+## Профили 0.11.1 и 0.12.3
+
+Комплект фиксирует точную версию; metadata запроса, UserValves и сохранённые
+parallel Valves её не выбирают. Для 0.11.1 доступен обычный same-chat
+`lite_delegate`, локальные и серверные Tools, текстовые Skills (`view_skill`)
+и необязательный терминал модели. `lite_parallel` и worker bridge отключены
+до проверки native subagents, независимо от `subagents.enable` и лимитов.
+История и receipt не создают права на дочерний dispatch.
+
+Комплект 0.12.3 сохраняет три Skill readers, параллельные задания и defaults
+4 задания / 300 секунд. Legacy-комплект устанавливается отдельно; попытка
+запуска на другой версии завершается точной проверкой версии.
+
+
+
+### Серверные Tools и auth 0.11.1
+
+Локальные IDs берутся из Workspace Tools. OpenAPI принимает `server:<id>`
+или `server:openapi:<id>`, необязательный suffix `|function1,function2`
+пересекается с native `function_name_filter_list`. MCP использует
+`server:mcp:<info.id>`. Global gate 0.11.1 — `ENABLE_PLUGINS`, ACL подключения
+проверяется от owner отдельно от actor. Иерархия групп 0.12.3 не эмулируется.
+
+| Auth | OWUI 0.11.1 | Проверка |
+| --- | --- | --- |
+| `bearer` | Ключ серверного подключения | Native OpenAPI и terminal headers |
+| `session` | Token и cookies текущего request | Два actor; OpenAPI, terminal, реальный MCP token |
+| `system_oauth` | Native middleware helper для actor, доверенный `extra_params` | Native headers; реальный MCP с synthetic token fixture |
+| `none` | Без Authorization; cookies не копируются | Native OpenAPI и terminal headers |
+| `oauth_2.1` / `oauth_2.1_static` | Native OAuth manager для actor/server | Native OpenAPI manager fixture; реальный MCP `oauth_2.1` |
+
+Терминальная поверхность ограничена первыми четырьмя режимами. В 0.11.1
+cookies пересылаются только native режимами session/system OAuth;
+`forward_cookies` 0.12.3 этого поведения не меняет. Для system OAuth токен
+не читается из client metadata, аргументов Tools или owner. Отсутствующий
+обязательный actor auth отклоняет подготовку. Тесты с synthetic OAuth token
+проверяют связывание пользователя/транспорта, а не внешний authorization flow.
+
+Native suites: `tests/native_0111/test_servers_0111.py`,
+`tests/native_0111/test_terminals_0111.py`,
+`tests/native_common/test_mcp_transport.py`. Реальный MCP list/call/disconnect
+проверяется SDK каждой версии, включая error/Stop и отсутствие replay.
+У terminal `display_file` native 0.11.1 создаёт inline file result при
+`inline=true`; terminal path не становится обычным OWUI file ID.
+
+Stop отменяет ожидание и будущие команды. Backend-процесс и общий filesystem
+сохраняют native политику. Интерактивная terminal pane и копирование
+attachments в backend не добавляются; серверные Tools панели не публикуются.
+
+### Браузерная проверка 0.11.1 (2026-10-25)
+
+Safari, одноразовый actor `one`, `127.0.0.1:8767`. Открыты сохранённые чаты:
+terminal handoff `24b840bc-b64a-4051-8ae2-47760fe03d55` и обычный
+`9ee38e27-3055-431f-98a1-460233bb287f`. Через штатную кнопку подробностей раскрыты
+routing/working Skill, `lite_delegate`, local Tool, OpenAPI и настоящий MCP.
+В первом чате дополнительно раскрыты `run_command` с `printf`/`exit_code=0`
+и `read_file` с совпадающим `LEGACY_MARKER_a622093b-c1b5-43ff-85c9-7a60c488b961`.
+Второй чат не содержит terminal calls; local result показывает личный
+`region=one` и свой attachment, MCP result — `auth_matches_actor=true`.
+В первом сохранённом чате видно и следующее сообщение `LEGACY_GENERAL_OK`.
+
+Это наблюдения AX и подтверждённых UI-кликов без открытия terminal pane.
+Native screenshot capture возвращает пустую центральную область при наличии
+полного AX дерева и работающих кликов; пиксельная оценка не подтверждена.
+HTTP/SDK assertions и браузерные наблюдения учитываются раздельно.

@@ -397,7 +397,6 @@ OpenAPI transport заменён
 тестовым исполнителем; реальный MCP transport проверен gate и Docker-прогонами.
 Качество реальной LLM не оценивалось. Команды — [tools/README.md](../tools/README.md);
 `resource-evidence.json` и приватные записи остаются в тестовом контейнере.
-
 ## Selective agent terminals — 2026-10-25
 
 Change `add-selective-agent-terminals`: 59 unit и 37 native проверок прошли;
@@ -446,3 +445,76 @@ AX-дерево показало SVG и `TG_VISUALIZER_REGRESSION`, реальн
 завершена браузерная сессия, удалены три собственных пользователя, их чаты,
 модели, Functions, Tools, Skills и тестовые файлы; собственный backend остановлен.
 Read-only проверка БД подтвердила отсутствие ресурсов с префиксом `tgate`.
+
+## Комплект OWUI 0.11.1 (2026-10-25)
+
+В отдельном `owui-router-0111-test` на `127.0.0.1:8767` проверены два legacy
+exports без checkout/source package. Его БД и provider не используют данные
+сервера 0.12.3. Fixtures: `tools/legacy_acceptance.py`,
+`tools/legacy_gate_provider.py`; команды — в `tools/README.md`.
+
+Шесть положительных HTTP runs: terminal handoff с отличающимся parent selection,
+обычный handoff без терминала, самостоятельный Router, два одновременных actor
+и следующее настоящее сообщение в том же чате после агента. Последнее снова
+отвечает Router, без terminal tools или prompt агента.
+
+В native Tool loop сохранены routing Skill → inline `lite_delegate` → собственный
+текстовый Skill → local Tool → OpenAPI → реальный MCP. Терминальный A дополнительно
+выполнил subprocess shell-команду записи уникального маркера и прочитал файл.
+У B нет terminal schema/callable/prompt. Positive parallel Valves равны 8, native
+subagents включены; `lite_parallel`/`delegate_task` не предлагаются.
+
+Оба actor имеют доступ к моделям, но не к приватным Tools/Skills/terminal owner.
+Прямые API остаются закрыты до и после. Local Tool проверен с личными UserValves
+и свежим собственным OWUI attachment; другой actor не может прочитать файл.
+OpenAPI/MCP принимают реальный session token текущего actor; backend проверяет
+его совпадение, не сохраняя credential в отчёт. Промпты и температуры `.21`/`.41`
+проверены provider assertions. Shell headers содержат actor и основной chat ID;
+context равен `chat:<id>`. Автоматической копии attachments в terminal нет.
+
+[Обезличенное backend evidence и SHA-256](owui-0111-evidence.json) фиксирует
+положительные runs. Это scripted plumbing test, не LLM eval, не stock Open
+Terminal и не внешний OAuth authorization flow. Native матрица отдельно
+проверяет synthetic OAuth helpers, guards, error/Stop и SDK ownership:
+20 cases для 0.11.1, 41 для 0.12.3 на этом этапе; общие unit/export — 65.
+Browser inspection и завершающие controls/регрессии учитываются отдельно.
+
+Legacy HTTP controls: 11 успешных cases в
+[отдельном отчёте](owui-0111-controls.json). Missing local Tool, disabled server,
+отозванный terminal owner ACL, реальная смена owner, отсутствующий actor system
+OAuth и две inlet-подмены отклонены до первой генерации агента и terminal
+команды. Native refresh внутри настоящего destination inlet не прочитал чужой
+Skill. Сгенерированный `lite_parallel` получил явную ошибку; подтверждённый audit
+блокирует продолжение до повторной генерации. Ни один run не создал child chat.
+
+Stop проверен после начала настоящего MCP-вызова и shell-команды: спустя четыре
+секунды task list пуст, новых генераций/команд/чтений нет и повтор не отправлен.
+Удалённая shell-команда может завершиться после Stop; это не rollback backend.
+Native SDK suite отдельно проверяет закрытие в той же задаче владельца.
+
+Завершающая матрица change: **66 unit/export, 20 native 0.11.1, 41 native 0.12.3**,
+без skipped cases; полные native suites повторены на пустых независимых БД.
+Runner явно импортирует native config/migrations до записи первых fixtures.
+
+На окончательных exports 0.12.3 повторены A+B→C и A+A→C с реальными local Tools,
+MCP, двумя forecast CSV и итоговым HTML-файлом. Работа перекрывалась примерно
+на секунду; чужой пользователь не читает файлы/children. После C снова ответил
+Router. Выборочные терминалы: шесть runs, десять реальных shell-команд.
+Child embed Visualizer 2.2.3 `f5ceb03e-c695-40ac-b524-957a3c569bc2` открыт в Safari;
+AX показывает SVG, клик изменил `STATE=0` → `STATE=1`. Pixel capture остаётся
+ограничением среды, отдельно от успешного UI interaction.
+
+[Итоговая матрица с hashes и cleanup](owui-release-matrix.json) разделяет версии,
+HTTP, SDK и browser evidence. Snapshot Functions/Valves/provider и synthetic
+OAuth rows прежних pgate fixtures восстановлен; удалены только новые чаты и
+файлы. Новые terminal fixtures/пользователи/файлы обеих версий отсутствуют
+(read-only audit: ноль строк по каждому типу). Provider 8770 остановлен,
+предыдущая terminal fixture directory возвращена на место; baseline 8766/8768
+сохранены. Отдельный контейнер 0.11.1 и временные native БД удалены. Browser
+viewer вышел из обеих сессий, тестовая вкладка оставлена `about:blank`.
+
+Последующее ревью выявило три P2 вне этой тестовой матрицы: OAuth/custom
+Authorization, schema fetch при global disable 0.11.1 и автоматическое закрытие
+зависшей MCP-сессии при Stop ordinary handoff. Задачи 3.1–3.2 открыты повторно;
+исторические успешные прогоны не означают готовность change к архиву.
+Подробности — [review.md](../openspec/changes/add-owui-0111-router/review.md).

@@ -1,4 +1,5 @@
 Build the two independent Functions with `python tools/build_functions.py`.
+
 ## Selective terminal acceptance
 
 Use only `owui-router-test` (OWUI 0.12.3). Copy `terminal_acceptance.py`,
@@ -274,3 +275,81 @@ container; no real external OAuth flow or authorization server is tested.
 `check` verifies native private API denial before/after model execution,
 A+B→C/A+A→C, same-chat reselection, own files, UserValves and execution-user MCP
 identity. Browser evidence remains a separate acceptance record.
+
+## Изолированный gate OWUI 0.11.1
+
+`legacy_acceptance.py` и `legacy_gate_provider.py` предназначены только для
+нового `owui-router-0111-test`, `LEGACY_DISPOSABLE=owui-router-0111-test` и
+`/tmp/lhr-0111-gate`. На рабочей инсталляции их не запускайте. Стенд не монтирует
+checkout или data volume 0.12.3. Его loopback provider объединяет scripted LLM,
+OpenAPI, настоящий MCP SDK и backend из `terminal_gate_provider.py`, выполняющий
+реальные subprocess shell-команды. Это plumbing acceptance с безопасными
+маркерами, не оценка качества LLM и не stock Open Terminal.
+
+```sh
+python3 tools/build_functions.py --owui-version 0.11.1
+docker run -d --name owui-router-0111-test -p 127.0.0.1:8767:8080 \
+  -e OFFLINE_MODE=true -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
+  -e RAG_EMBEDDING_ENGINE=openai -e ENABLE_VERSION_UPDATE_CHECK=false \
+  -e ANONYMIZED_TELEMETRY=false -e DO_NOT_TRACK=true \
+  -e WEBUI_SECRET_KEY=isolated-owui-0111-router-acceptance-only \
+  ghcr.io/open-webui/open-webui:v0.11.1
+docker exec owui-router-0111-test mkdir -p /tmp/lhr-0111-gate/dist
+docker cp tools/legacy_acceptance.py owui-router-0111-test:/tmp/lhr-0111-gate/
+docker cp tools/legacy_gate_provider.py owui-router-0111-test:/tmp/lhr-0111-gate/
+docker cp tools/parallel_gate.py owui-router-0111-test:/tmp/lhr-0111-gate/
+docker cp tools/terminal_gate_provider.py owui-router-0111-test:/tmp/lhr-0111-gate/
+docker cp dist/owui-0.11.1/. owui-router-0111-test:/tmp/lhr-0111-gate/dist/
+docker exec -d owui-router-0111-test sh -c \
+  'cd /tmp/lhr-0111-gate && python legacy_gate_provider.py > provider.log 2>&1'
+docker exec -e LEGACY_DISPOSABLE=owui-router-0111-test owui-router-0111-test \
+  python /tmp/lhr-0111-gate/legacy_acceptance.py bootstrap
+docker exec -e PYTHONPATH=/app/backend -e LEGACY_DISPOSABLE=owui-router-0111-test \
+  owui-router-0111-test python /tmp/lhr-0111-gate/legacy_acceptance.py install
+docker exec -e LEGACY_DISPOSABLE=owui-router-0111-test owui-router-0111-test \
+  python /tmp/lhr-0111-gate/legacy_acceptance.py check
+```
+
+Дождитесь готовности `/api/version` перед bootstrap. Bootstrap разрешён только
+на новой БД; создаются одноразовый admin, non-admin owner и два actor. Install
+сначала сохраняет config/provider/server/terminal snapshots, затем ставит два
+exports и собственные `legacy-*` ресурсы. При незавершённой установке его можно
+повторить с тем же snapshot. Приватные UserValves задаются native persistence:
+самостоятельное редактирование actor без direct grant штатно запрещено.
+Legacy списки custom/base models читаются через `/models/export` и `/models/base`.
+
+Секреты, пароли и полные snapshots остаются в mode-0600 `private-state.json` и
+`admin-token` внутри контейнера. В evidence переносятся только отдельные
+обезличенные отчёты, hashes exports и проверенные признаки auth. Проверки SDK
+и версий до HTTP gate описаны в `docs/development.md`; это отдельные suites.
+
+После browser inspection выполните `restore`, затем `cleanup` тем же способом
+запуска CLI. Они восстанавливают snapshots и удаляют только сохранённые
+`legacy-*` модели, Tools/Skills/Functions, пользователей, чаты/файлы fixtures.
+Сохраните обезличенное evidence до удаления контейнера. Остановите только его
+provider, затем удалите только `owui-router-0111-test`; его отдельная временная
+БД и shell-файлы не используются сервером 0.12.3. Не применяйте эти cleanup
+команды к другому контейнеру или общим terminal files.
+
+### Регрессия прежних product fixtures 0.12.3
+
+`compatibility_regression.py` запускается только из
+`/tmp/lhr-0123-compat-regression` с `ROUTER_COMPAT_DISPOSABLE=owui-router-test`.
+Требует прежние подготовленные `/tmp/lhr-parallel-gate`, loopback 8766/8768,
+два новых exports в своей `dist/` и временный mode-0600 `admin-token`.
+Копию существующего fixture state и все snapshots хранит только внутри своего
+каталога. Временно обновляет Functions, actor login и истёкшие synthetic MCP
+OAuth sessions, проверяет A+B→C/A+A→C/files/fresh Router, затем в `finally`
+восстанавливает точные Functions/Valves/provider и прежние encrypted OAuth rows.
+Новые собственные parent chats и записанные OWUI file IDs удаляются native API.
+Повторный `cleanup` допускает 404 только для уже удалённых собственных IDs.
+Прежние модели/Tools/Skills/users и baseline services не удаляются.
+
+```sh
+docker exec -e PYTHONPATH=/app/backend -e ROUTER_COMPAT_DISPOSABLE=owui-router-test \
+  owui-router-test python /tmp/lhr-0123-compat-regression/compatibility_regression.py
+```
+
+Для legacy отрицательных cases используйте action `controls` до restore.
+Cleanup явно удаляет записанные actor attachments перед пользователями:
+штатное удаление пользователя само по себе может оставить File rows.

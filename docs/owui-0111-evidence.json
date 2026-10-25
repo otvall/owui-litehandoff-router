@@ -1,0 +1,74 @@
+{
+  "version": "0.11.1",
+  "backend_passed": true,
+  "runs": [
+    {
+      "chat_id": "aaf4cd51-9bb2-4a27-8617-ee43a30b80b7",
+      "message_id": "41877c70-a16f-4702-a5b8-e1ad34c17098",
+      "user": "one",
+      "question": "handoff terminal run=41877c70-a16f-4702-a5b8-e1ad34c17098",
+      "file_id": "56532059-9240-453d-8ded-4b9b805c9ca3",
+      "marker": "LEGACY_FINAL_A_OK"
+    },
+    {
+      "chat_id": "f34f8ede-b637-4b11-8835-10798d2e3129",
+      "message_id": "0f1c0c60-8a40-4eee-961b-85bb8b3e1596",
+      "user": "one",
+      "question": "ordinary handoff run=0f1c0c60-8a40-4eee-961b-85bb8b3e1596",
+      "file_id": "44e9ed2e-50c3-4154-8f64-db6024f31d36",
+      "marker": "LEGACY_FINAL_B_OK"
+    },
+    {
+      "chat_id": "d6c64788-b6d8-442d-9afe-b68c57e9cc2a",
+      "message_id": "f6c1a324-2a8f-4418-b27d-a48053dc5398",
+      "user": "one",
+      "question": "general run=f6c1a324-2a8f-4418-b27d-a48053dc5398",
+      "file_id": null,
+      "marker": "LEGACY_GENERAL_OK"
+    },
+    {
+      "chat_id": "ce5c8ca6-b16f-4bc2-8e43-5edeeebbf6ba",
+      "message_id": "892e3298-53d4-411c-9609-2cedd11cb352",
+      "user": "one",
+      "question": "handoff concurrent run=892e3298-53d4-411c-9609-2cedd11cb352",
+      "file_id": "364b1497-24d8-4794-a5b1-52a1c1f71dd3",
+      "marker": "LEGACY_FINAL_A_OK"
+    },
+    {
+      "chat_id": "401be4d9-b3b0-4657-bbc5-8cc4528ecae9",
+      "message_id": "4afc3544-47f7-407f-ae25-22f56ad2982f",
+      "user": "two",
+      "question": "handoff concurrent run=4afc3544-47f7-407f-ae25-22f56ad2982f",
+      "file_id": "dbdb2863-d7e9-4d50-9281-5c0bab5ceb3a",
+      "marker": "LEGACY_FINAL_A_OK"
+    },
+    {
+      "chat_id": "aaf4cd51-9bb2-4a27-8617-ee43a30b80b7",
+      "message_id": "670ed381-9f27-4b69-b340-8c301eff2dc3",
+      "user": "one",
+      "question": "general followup run=670ed381-9f27-4b69-b340-8c301eff2dc3",
+      "file_id": null,
+      "marker": "LEGACY_GENERAL_OK"
+    }
+  ],
+  "production_modified": false,
+  "exports": {
+    "lite_handoff_router.py": "7a758dbe9ebac790a86d6df53c8164ed00cc79fb530a00c8ae4bd19a4da439cb",
+    "router_preparation.py": "33a1fe44e6d78203e2ff2686e82e188c8b51a32eee2a1732e846812d69656cfa"
+  },
+  "native_cases": 20,
+  "same_chat_followup": true,
+  "actor_attachments_and_user_valves": true,
+  "private_direct_access_denied_before_after": true,
+  "cleanup": {
+    "snapshots_restored": true,
+    "remaining_models_functions_tools_skills_users_files_chats": 0,
+    "container_removed": true
+  },
+  "limitations": [
+    "scripted provider, not LLM eval",
+    "terminal-compatible real shell fixture, not stock Open Terminal",
+    "OAuth helper tests use synthetic tokens",
+    "browser inspection uses AX and clicks; pixel capture blank"
+  ]
+}

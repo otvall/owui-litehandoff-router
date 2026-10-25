@@ -11,6 +11,7 @@ from .protocol import delegate_tool
 from .parallel import parallel_tool, ROUTING_TOOLS, downstream_data
 from .resources import ResourceScope
 from .terminals import terminal_binding, prepare_terminal_scope, is_terminal_tool
+from .profiles import ROUTER_PROFILE
 
 ENVELOPE = frozenset({"stream", "stream_options", "files"})
 
@@ -55,7 +56,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         deepcopy(m) for m in state["source"] if m.get("role") != "system"
     ], metadata=metadata)
     draft = await adapter.prompt_and_params(draft, selected, user, metadata)
-    packet = await downstream_data(adapter, user, metadata, state) if target else None
+    packet = await downstream_data(adapter, user, metadata, state) if target and ROUTER_PROFILE.parallel else None
     if packet:
         draft["files"] = deepcopy(metadata["files"])
     prompt = await manifest(adapter, skill_ids, owner, None if target else state["registry"])
@@ -86,7 +87,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
             raise ValueError("Reserved delegate Tool collision: lite_delegate; remove the separate delegate Tool from base_tool_ids")
         tools["lite_delegate"] = delegate_tool(adapter, request, user, metadata, state)
         group = state.get("parallel") or {}
-        if group.get("max_tasks"):
+        if ROUTER_PROFILE.parallel and group.get("max_tasks"):
             reason = (await adapter.parallel_reason(request, metadata, user) if metadata.get("chat_id")
                       else "Parallel tasks require a saved chat")
             group["unavailable_reason"] = reason
@@ -100,7 +101,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if skill_ids:
         builtins = await adapter.builtins(request, model, {
             **extra, "__user__": owner.model_dump(), "__skill_ids__": skill_ids})
-        for name in READERS:
+        for name in ROUTER_PROFILE.skill_readers:
             if name not in builtins:
                 raise ValueError("Required builtin Skill reader unavailable: " + name)
             if name in tools:

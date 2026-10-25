@@ -8,6 +8,7 @@ from uuid import uuid4
 from .parallel_state import control_generation
 from .runtime import begin, require
 from .resources import routing_owner
+from .profiles import ROUTER_PROFILE
 
 PARALLEL_RUNS = "lite_handoff_parallel_runs"
 PARALLEL_TICKET = "lite_parallel_ticket"
@@ -30,6 +31,8 @@ def input_file_id(file):
 
 
 async def validate_batch(adapter, request, user, metadata, state, tasks):
+    if not ROUTER_PROFILE.parallel:
+        raise ValueError("Parallel tasks are unavailable in Open WebUI " + ROUTER_PROFILE.version + " profile")
     group = state["parallel"]
     if group["max_tasks"] == 0:
         raise ValueError("Parallel tasks are disabled by max_parallel_tasks=0")
@@ -67,7 +70,7 @@ async def validate_batch(adapter, request, user, metadata, state, tasks):
 
 async def prepare_worker(adapter, request, body, metadata, user):
     """Only native internal requests with a live server binding enter worker mode."""
-    if getattr(request.state, "internal", False) is not True:
+    if not ROUTER_PROFILE.parallel or getattr(request.state, "internal", False) is not True:
         return False
     ticket = (getattr(request.state, "chat_context", None) or {}).get(PARALLEL_TICKET)
     entry = run_registry(request).get(ticket) if isinstance(ticket, str) else None
@@ -183,6 +186,8 @@ async def collect_result(adapter, user, entry, native_result):
 
 
 async def execute_group(adapter, request, user, metadata, state, assignments, events):
+    if not ROUTER_PROFILE.parallel:
+        raise ValueError("Parallel tasks are unavailable in Open WebUI " + ROUTER_PROFILE.version + " profile")
     group = state["parallel"]
     group["status"] = "running"
     registry = run_registry(request)
@@ -309,6 +314,8 @@ async def execute_group(adapter, request, user, metadata, state, assignments, ev
 
 
 def parallel_tool(adapter, request, user, metadata, state, events):
+    if not ROUTER_PROFILE.parallel:
+        raise ValueError("Parallel tasks are unavailable in Open WebUI " + ROUTER_PROFILE.version + " profile")
     async def lite_parallel(tasks: list) -> str:
         actor = await adapter.user(user.id)
         if require(request, metadata, actor.id) is not state:

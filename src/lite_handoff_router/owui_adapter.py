@@ -7,6 +7,7 @@ import json
 from uuid import UUID
 
 from .binding import bind_tool_context
+from .profiles import ROUTER_PROFILE
 
 
 def as_dict(value):
@@ -14,6 +15,16 @@ def as_dict(value):
 
 
 class OWUIAdapter:
+    def __new__(cls):
+        if cls is OWUIAdapter:
+            implementation = OWUI0111Adapter if ROUTER_PROFILE.version == "0.11.1" else OWUI0123Adapter
+            return object.__new__(implementation)
+        return object.__new__(cls)
+
+    @property
+    def profile(self):
+        return ROUTER_PROFILE
+
     def __init__(self):
         try:
             installed_version = version("open-webui")
@@ -22,8 +33,9 @@ class OWUIAdapter:
             from open_webui.env import VERSION
 
             installed_version = VERSION
-        if installed_version != "0.12.3":
-            raise RuntimeError("Lite Handoff Router requires Open WebUI 0.12.3")
+        if installed_version != self.profile.version:
+            raise RuntimeError("Lite Handoff Router requires Open WebUI " + self.profile.version
+                               + "; installed version: " + str(installed_version))
 
     async def user(self, user_id):
         from open_webui.models.users import Users
@@ -66,8 +78,7 @@ class OWUIAdapter:
 
     async def tools(self, request, ids, user, extra):
         from open_webui.models.tools import Tools
-        from open_webui.utils.plugin import (get_tools_cache, get_tool_contents_cache,
-                                            load_tool_module_by_id, set_tool_module_in_cache)
+        from open_webui.utils.plugin import get_tools_cache, get_tool_contents_cache
 
         actor = await self.user(extra["__user__"]["id"])
         local = [identifier for identifier in ids if not identifier.startswith("server:")]
@@ -83,8 +94,7 @@ class OWUIAdapter:
                 continue
             module = get_tools_cache(request).get(identifier)
             if module is None or get_tool_contents_cache(request).get(identifier) != row.content:
-                module, _, source = await load_tool_module_by_id(identifier, content=row.content)
-                set_tool_module_in_cache(request, identifier, row.content, module, source)
+                module = await self.load_module(request, identifier, row.content)
             if hasattr(module, "valves") and hasattr(module, "Valves"):
                 module.valves = module.Valves(**(await Tools.get_tool_valves_by_id(identifier) or {}))
             injection = actor.model_dump()
@@ -118,11 +128,31 @@ class OWUIAdapter:
                 result[name] = tool
         return result
 
-    async def tool_access(self, request, identifier, owner):
+    async def load_module(self, request, identifier, content):
+        from open_webui.utils.plugin import load_tool_module_by_id, set_tool_module_in_cache
+
+        module, _, source = await load_tool_module_by_id(identifier, content=content)
+        set_tool_module_in_cache(request, identifier, content, module, source)
+        return module
+
+    def local_tools_enabled(self):
         from open_webui.env import ENABLE_TOOLS
+
+        return ENABLE_TOOLS
+
+    def servers_enabled(self):
+        from open_webui.utils.tools import ENABLE_TOOL_SERVERS
+
+        return ENABLE_TOOL_SERVERS
+
+    async def member_groups(self, user):
+        from open_webui.models.groups import Groups
+
+        return {g.id for g in await Groups.get_groups_by_member_id(user.id, include_inherited=True)}
+
+    async def tool_access(self, request, identifier, owner):
         from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
         from open_webui.models.tools import Tools
-        from open_webui.models.groups import Groups
         from open_webui.models.access_grants import AccessGrants
 
         if identifier.startswith("server:mcp:"):
@@ -131,8 +161,8 @@ class OWUIAdapter:
         if identifier.startswith("server:"):
             await self.openapi_server(request, identifier, owner)
             return
-        row = await Tools.get_tool_by_id(identifier) if ENABLE_TOOLS else None
-        groups = {g.id for g in await Groups.get_groups_by_member_id(owner.id, include_inherited=True)}
+        row = await Tools.get_tool_by_id(identifier) if self.local_tools_enabled() else None
+        groups = await self.member_groups(owner)
         if row is None or not ((owner.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL)
                 or row.user_id == owner.id or await AccessGrants.has_access(
                     user_id=owner.id, resource_type="tool", resource_id=identifier,
@@ -150,7 +180,7 @@ class OWUIAdapter:
         connections = await tools.Config.get("tool_server.connections", [])
         index = data.get("idx", 0) if data else -1
         connection = connections[index] if 0 <= index < len(connections) else None
-        if (not tools.ENABLE_TOOL_SERVERS or not data or not connection
+        if (not self.servers_enabled() or not data or not connection
                 or not (connection.get("config") or {}).get("enable", True)
                 or not await tools.has_connection_access(owner, connection)):
             raise ValueError("Required model Tool server unavailable or denied: " + identifier)
@@ -160,6 +190,8 @@ class OWUIAdapter:
         from open_webui.utils import tools
 
         server_id, data, connection, subset = await self.openapi_server(request, identifier, owner)
+        # Detect missing required actor authorization before publishing a draft.
+        await self.server_headers(request, connection, actor, server_id, extra.get("__metadata__", {}))
 
         def allowed(name, current):
             filters = (current.get("config") or {}).get("function_name_filter_list", "")
@@ -173,8 +205,9 @@ class OWUIAdapter:
                 _, current_data, current, _ = await self.openapi_server(request, identifier, fresh_owner)
                 if not allowed(name, current) or not any(s["name"] == name for s in current_data.get("specs", [])):
                     raise ValueError("Model server Tool is no longer available: " + name)
-                headers, cookies = await tools.build_tool_server_headers(
-                    current, request, actor, server_id=server_id, metadata=extra.get("__metadata__", {}))
+                current_actor = await self.user(actor.id)
+                headers, cookies = await self.server_headers(
+                    request, current, current_actor, server_id, extra.get("__metadata__", {}))
                 headers.setdefault("Content-Type", "application/json")
                 return await tools.execute_tool_server(url=current_data["url"], headers=headers, cookies=cookies,
                     name=name, params=kwargs, server_data=current_data)
@@ -189,13 +222,27 @@ class OWUIAdapter:
                     "callable": await self.bind(operation(name), {})}
         return result
 
+    async def server_headers(self, request, connection, actor, server_id, metadata, *, require_user_auth=False):
+        from open_webui.utils import tools
+
+        auth = connection.get("auth_type", "bearer")
+        if require_user_auth:
+            if auth == "session" and not getattr(getattr(request.state, "token", None), "credentials", None):
+                raise ValueError("Terminal requires execution-user session authorization")
+            if auth == "system_oauth":
+                token = await tools.get_system_oauth_token(request, actor)
+                if not token or not token.get("access_token"):
+                    raise ValueError("Terminal requires execution-user OAuth authorization")
+        return await tools.build_tool_server_headers(
+            connection, request, actor, server_id=server_id, metadata=metadata)
+
     async def terminal_access(self, request, identifier, owner):
         from open_webui.utils import tools
 
         connections = await tools.Config.get("terminal_server.connections", []) or []
         connection = next((c for c in connections if c.get("id") == identifier), None)
-        groups = {g.id for g in await tools.Groups.get_groups_by_member_id(owner.id, include_inherited=True)}
-        if (not tools.ENABLE_TOOL_SERVERS or not connection or not connection.get("enabled", True)
+        groups = await self.member_groups(owner)
+        if (not self.servers_enabled() or not connection or not connection.get("enabled", True)
                 or not await tools.has_connection_access(owner, connection, groups)):
             raise ValueError("Required model terminal unavailable or denied: " + identifier)
         return connection
@@ -217,20 +264,13 @@ class OWUIAdapter:
         return connection, {**data, "url": get_terminal_server_url(connection)}, context_id
 
     async def terminal_headers(self, request, identifier, connection, actor, metadata, context_id):
-        from open_webui.utils import tools
         from open_webui.utils.terminals import TERMINAL_CONTEXT_HEADER
 
         auth = connection.get("auth_type", "bearer")
         if auth not in {"bearer", "session", "system_oauth", "none"}:
             raise ValueError("Unsupported terminal authorization: " + str(auth))
-        if auth == "session" and not getattr(getattr(request.state, "token", None), "credentials", None):
-            raise ValueError("Terminal requires execution-user session authorization")
-        if auth == "system_oauth":
-            token = await tools.get_system_oauth_token(request, actor)
-            if not token or not token.get("access_token"):
-                raise ValueError("Terminal requires execution-user OAuth authorization")
-        headers, cookies = await tools.build_tool_server_headers(
-            connection, request, actor, server_id=identifier, metadata=metadata)
+        headers, cookies = await self.server_headers(
+            request, connection, actor, identifier, metadata, require_user_auth=True)
         headers.update({"Content-Type": "application/json", "X-User-Id": actor.id})
         # A connection's custom headers cannot override trusted execution routing.
         for name in list(headers):
@@ -323,14 +363,13 @@ class OWUIAdapter:
         await self.mcp_connection(server_id, user)
 
     async def mcp_connection(self, server_id, user):
-        from open_webui.env import ENABLE_TOOL_SERVERS
         from open_webui.models.config import Config
         from open_webui.utils.access_control import has_connection_access
 
         connections = await Config.get("tool_server.connections", [])
         connection = next((c for c in connections if c.get("type") == "mcp"
                            and (c.get("info") or {}).get("id") == server_id), None)
-        if not ENABLE_TOOL_SERVERS or not connection or not (connection.get("config") or {}).get("enable") \
+        if not self.servers_enabled() or not connection or not (connection.get("config") or {}).get("enable") \
                 or not await has_connection_access(user, connection):
             raise ValueError("Required MCP connection unavailable or denied: " + server_id)
         return connection
@@ -405,6 +444,8 @@ class OWUIAdapter:
                 "url": "/api/v1/files/" + row.id + "/content"}
 
     async def native_delegate(self, request, user, metadata, task, file_ids):
+        if not self.profile.parallel:
+            raise ValueError("Parallel tasks are unavailable in Open WebUI " + self.profile.version + " profile")
         from open_webui.utils.subagents import delegate
 
         return await delegate(task, "", False, request=request, user_data=user.model_dump(),
@@ -474,3 +515,84 @@ class OWUIAdapter:
         if response is None or (isinstance(response, dict) and response.get("error")):
             raise RuntimeError(str(response or "Provider returned no response"))
         return response
+
+
+class OWUI0123Adapter(OWUIAdapter):
+    """Native API of the current release."""
+
+
+class OWUI0111Adapter(OWUIAdapter):
+    """Native API of the legacy release; imports stay lazy in this boundary."""
+
+    async def skill(self, skill_id, user):
+        from open_webui.routers.skills import get_skill_by_id
+
+        skill = await get_skill_by_id(skill_id, user=user, db=None)
+        if not skill.is_active:
+            raise ValueError(f'Skill "{skill_id}" is inactive')
+        return as_dict(skill)
+
+    async def load_module(self, request, identifier, content):
+        from open_webui.utils.plugin import get_tools_cache, get_tool_contents_cache, load_tool_module_by_id
+
+        module, _ = await load_tool_module_by_id(identifier, content=content)
+        get_tools_cache(request)[identifier] = module
+        get_tool_contents_cache(request)[identifier] = content
+        return module
+
+    def local_tools_enabled(self):
+        from open_webui.env import ENABLE_PLUGINS
+
+        return ENABLE_PLUGINS
+
+    def servers_enabled(self):
+        from open_webui.utils.tools import ENABLE_PLUGINS
+
+        return ENABLE_PLUGINS
+
+    async def member_groups(self, user):
+        from open_webui.models.groups import Groups
+
+        return {g.id for g in await Groups.get_groups_by_member_id(user.id)}
+
+    async def server_headers(self, request, connection, actor, server_id, metadata, *, require_user_auth=False):
+        from open_webui.utils import tools
+        from open_webui.utils.middleware import get_system_oauth_token
+
+        auth = connection.get("auth_type", "bearer")
+        if auth not in {"bearer", "session", "system_oauth", "oauth_2.1", "oauth_2.1_static", "none"}:
+            raise ValueError("Unsupported server authorization: " + str(auth))
+        trusted = {}
+        if auth == "session" and not getattr(getattr(request.state, "token", None), "credentials", None):
+            raise ValueError("Server requires execution-user session authorization")
+        if auth == "system_oauth":
+            token = await get_system_oauth_token(request, actor)
+            if not token or not token.get("access_token"):
+                raise ValueError("Server requires execution-user OAuth authorization")
+            trusted["__oauth_token__"] = token
+        headers, cookies = await tools.build_tool_server_headers(
+            connection, request, actor, server_id=server_id, metadata=metadata, extra_params=trusted)
+        if auth in {"oauth_2.1", "oauth_2.1_static"} and not headers.get("Authorization", "").removeprefix("Bearer ").strip():
+            raise ValueError("Server requires execution-user OAuth authorization")
+        return headers, cookies
+
+    async def connect_mcp(self, request, server_id, user, extra):
+        from open_webui.utils import tools
+        from open_webui.utils.mcp.client import MCPClient
+
+        connection = await self.mcp_connection(server_id, user)
+        actor = await self.user(extra["__user__"]["id"])
+        headers, _ = await self.server_headers(request, connection, actor, server_id, extra.get("__metadata__", {}))
+        client = MCPClient()
+        try:
+            await client.connect(url=connection.get("url", ""), headers=headers or None)
+            specs = await client.list_tool_specs()
+            filters = (connection.get("config") or {}).get("function_name_filter_list", "")
+            if isinstance(filters, str):
+                filters = filters.split(",")
+            if filters:
+                specs = [spec for spec in specs if tools.is_string_allowed(spec["name"], filters)]
+            return client, specs
+        except BaseException:
+            await client.disconnect()
+            raise

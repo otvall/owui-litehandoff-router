@@ -82,4 +82,27 @@ Skills им не нужны: владелец соответствующей м�
 Проверки: `tests/native/test_skills.py` и `tests/native/test_resource_access.py`
 используют настоящие builtin readers, приватные ресурсы, файлы/страницы,
 native refresh, разных владельцев и изменение attachments. Запуск:
-`.venv/bin/python tools/run_native_tests.py`.
+`.venv/bin/python tools/run_native_tests.py --owui-version 0.12.3`.
+
+## Текстовые Skills OWUI 0.11.1
+
+В 0.11.1 Skill хранит текст `content`, а native reader — `view_skill(id)`.
+Создайте `route-a` с описанием условий передачи и инструкцией
+`lite_delegate(agent_id="agent-a")`; задайте `AGENTS = {"agent-a": "route-a"}`.
+Рабочий `a-working-guide` с инструкциями решения прикрепите к
+`agent-a.info.meta.skillIds`. `base_skill_ids` Router хранит дополнительные
+общие инструкции, routing Skill из `AGENTS` дублировать в нём не нужно.
+
+Каталог и read scope сохраняют те же границы владельцев и моделей. Только
+`view_skill` получает owner authority; локальный Tool получает actor и его
+UserValves. Native refresh не снимает guard; отключённый/отсоединённый Skill
+не читается. Имена всех трёх readers остаются зарезервированы, но
+`read_skill_file` и `grep_skill_files` в legacy-комплекте отсутствуют.
+Файловые страницы/версии из раздела выше относятся к 0.12.3. В 0.11.1
+параллельные задания недоступны независимо от текста Skill.
+
+Roundtrip текстовых Skills/моделей, два actor без прямых grants, отдельные
+каталоги, refresh, изменения attachments, неактивность и inlet-подмена
+проверяются `tests/native_0111/test_resources_0111.py`. Запуск legacy suite —
+по команде в [development.md](development.md). Для current suite используйте
+`.venv/bin/python tools/run_native_tests.py --owui-version 0.12.3`.

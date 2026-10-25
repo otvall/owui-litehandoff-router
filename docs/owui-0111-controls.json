@@ -1,0 +1,96 @@
+{
+  "passed": true,
+  "outcomes": [
+    {
+      "case": "missing resource",
+      "error": {
+        "content": {
+          "detail": "Required model Tools unavailable: legacy-missing-tool"
+        }
+      },
+      "no_agent_generation": true,
+      "no_terminal_dispatch": true
+    },
+    {
+      "case": "disabled server",
+      "error": {
+        "content": {
+          "detail": "Required model Tool server unavailable or denied: server:openapi:legacy-openapi|server_echo"
+        }
+      },
+      "no_agent_generation": true,
+      "no_terminal_dispatch": true
+    },
+    {
+      "case": "revoked terminal owner access",
+      "error": {
+        "content": {
+          "detail": "Required model terminal unavailable or denied: legacy-terminal-a"
+        }
+      },
+      "no_agent_generation": true,
+      "no_terminal_dispatch": true
+    },
+    {
+      "case": "missing actor OAuth",
+      "error": {
+        "content": {
+          "detail": "Server requires execution-user OAuth authorization"
+        }
+      },
+      "no_agent_generation": true,
+      "no_terminal_dispatch": true
+    },
+    {
+      "case": "owner changed",
+      "error": {
+        "content": {
+          "detail": "401: You do not have permission to access this resource. Please contact your administrator for assistance."
+        }
+      },
+      "no_agent_generation": true,
+      "no_terminal_dispatch": true
+    },
+    {
+      "case": "inlet replace",
+      "error": {
+        "content": {
+          "detail": "Destination inlet replaced a protected Tool: view_skill"
+        }
+      },
+      "no_agent_generation": true,
+      "no_terminal_dispatch": true
+    },
+    {
+      "case": "inlet terminal",
+      "error": {
+        "content": {
+          "detail": "Destination inlet replaced a protected Tool: run_command"
+        }
+      },
+      "no_agent_generation": true,
+      "no_terminal_dispatch": true
+    },
+    {
+      "case": "native refresh in destination inlet",
+      "scope_blocked": true
+    },
+    {
+      "case": "generated unsupported parallel call",
+      "explicit_error": true,
+      "child_dispatch": false
+    },
+    {
+      "case": "Stop during terminal",
+      "no_retry": true,
+      "no_late_generation": true,
+      "child_dispatch": false
+    },
+    {
+      "case": "Stop during mcp",
+      "no_retry": true,
+      "no_late_generation": true,
+      "child_dispatch": false
+    }
+  ]
+}

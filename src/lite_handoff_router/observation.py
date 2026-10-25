@@ -4,6 +4,14 @@ from copy import deepcopy
 import codecs
 import json
 
+from .profiles import ROUTER_PROFILE
+
+
+def check_profile_calls(state):
+    if not ROUTER_PROFILE.parallel and any(
+            call.get("name") in {"lite_parallel", "delegate_task"} for call in state.get("audit", [])):
+        raise ValueError("Parallel tasks are unavailable in Open WebUI " + ROUTER_PROFILE.version + " profile")
+
 
 def observe_response(response, state, executor):
     state["generation"] = state.get("generation", 0) + 1

@@ -1,6 +1,7 @@
 # Установка OWUI Lite Handoff Router
 
-Целевая версия — **Open WebUI 0.12.3**, Python 3.11/3.12. Окружение,
+Целевые версии — **Open WebUI 0.12.3 и 0.11.1**, Python 3.11/3.12. Каждой
+версии нужен свой комплект Functions с точной проверкой версии. Окружение,
 зависимости и модели подготовьте до переноса в закрытый контур.
 Для работы комплект использует только стандартную библиотеку и установленный OWUI.
 
@@ -49,12 +50,22 @@ Rollback восстанавливает сохранённые Tool/Skill/Valves
 
 ```sh
 python3 tools/build_functions.py
+python3 tools/build_functions.py --owui-version 0.11.1
 ```
 
 Импортируйте `dist/router_preparation.py` как Filter Function,
 `dist/lite_handoff_router.py` как Pipe Function. Активируйте обе Functions.
 `lite_delegate` встроен в Pipe; отдельный Workspace Tool устанавливать не нужно.
 После импорта исходники проекта на сервере не нужны. Сборка не скачивает пакеты.
+
+Первая команда собирает 0.12.3 в прежний `dist/`, вторая — 0.11.1 в
+`dist/owui-0.11.1/`. В каждой директории используйте только свою пару
+`router_preparation.py` / `lite_handoff_router.py`. Заголовки legacy Functions
+содержат `OWUI 0.11.1`; runtime обеих Functions проверяет точное совпадение.
+Обновление не требует установки Python-пакета Router, переноса или downgrade
+БД. Перед заменой сохраните обе Functions, Valves, `AGENTS` и metadata моделей.
+Для rollback остановите активные запросы и восстановите согласованную пару
+своей версии с её настройками. Общие файлы terminal backend не удаляйте.
 
 В административных Valves Pipe укажите `orchestrator_model_id` — ID настоящей
 локальной LLM Router, поддерживающей native function calling. Сам Pipe
@@ -84,6 +95,28 @@ UserValves и клиентские списки ресурсов этот наб
 пользователем ресурсы чата. Реальные вызовы видны в истории ответа.
 
 ## Первый агент и routing Skill
+
+В OWUI 0.11.1 создавайте native текстовый Skill через Workspace → Skills.
+Его `content` содержит инструкции; файловый пакет не требуется. Например:
+
+```json
+{
+  "id": "route-a",
+  "name": "route-profile-a",
+  "description": "Вопросы по профилю A",
+  "content": "Прочитай профиль. Для вопросов по профилю A вызови отдельный lite_delegate(agent_id=\"agent-a\")."
+}
+```
+
+Для рабочего Skill используйте отдельный ID, например `a-working-guide`,
+и прикрепите его к `meta.skillIds` агента. Формат `AGENTS`, `base_skill_ids`
+и attachments одинаков в обоих комплектах. Владельцу Router нужен доступ к
+routing Skill, владельцу агента — к рабочему. Пользователю достаточно доступа
+к моделям: прямые grants на приватные Skills/Tools ему не выдаются.
+
+Комплект 0.11.1 публикует только `view_skill(id)`. В инструкции ниже упоминания
+`lite_parallel` относятся исключительно к 0.12.3; не включайте их в routing
+Skill 0.11.1. Общий обычный handoff работает в том же чате в обеих версиях.
 
 Используйте существующую активную Workspace Model, например `agent-a`,
 с собственной базовой LLM, промптом и параметрами. Её LLM также должна
@@ -252,6 +285,9 @@ MCP-сессия принадлежит запросу, пользователю
 
 ## Терминал у выбранных агентов
 
+Этот binding поддерживается обоими комплектами. В 0.11.1 используются его
+штатные transport/context helpers и только основной chat ID, без child tasks.
+
 По умолчанию терминал выключен у всех агентов. Для выбранного агента задайте
 в **его серверной metadata** ID уже настроенного подключения из раздела
 терминалов OWUI:
@@ -277,7 +313,7 @@ MCP-сессия принадлежит запросу, пользователю
 и сохранить модель штатным импортом JSON либо API обновления модели. Сохраняйте
 Model ID, остальные metadata, параметры и grants; не заменяйте весь объект
 приведённым фрагментом. После сохранения повторно экспортируйте модель и
-проверьте наличие поля. OWUI 0.12.3 сохраняет дополнительные поля `ModelMeta`;
+проверьте наличие поля. OWUI 0.12.3 и 0.11.1 сохраняют дополнительные поля `ModelMeta`;
 миграция БД не требуется. `AGENTS` менять не нужно.
 
 Подключение должно быть доступно владельцу Workspace Model. Прямой grant
@@ -348,7 +384,7 @@ native режим для запроса; legacy не поддерживаетс�
 Воспроизводимый автоматический вариант пункта 3:
 
 ```sh
-.venv/bin/python tools/run_native_tests.py
+.venv/bin/python tools/run_native_tests.py --owui-version 0.12.3
 ```
 
 Тест `tests/native/test_chain.py` загружает два exports настоящими загрузчиками
@@ -371,3 +407,25 @@ delegate Tool из **сохранённых** `base_tool_ids`: новый defaul
 проверки обновления. Его метод `lite_delegate` не должен попадать в базовый набор:
 коллизия с зарезервированным встроенным Tool вызывает ошибку подготовки.
 Для отката к исходному комплекту восстановите также старый Tool и его read-grants.
+
+
+## Серверные подключения в 0.11.1
+
+Для OpenAPI используйте native server ID в `toolIds`, например
+`server:openapi:internal-a|lookup`; subset не расширяет фильтр функций
+подключения. Для MCP — `server:mcp:internal-a`. Настройте enable и ACL
+подключения для owner модели, не выдавая actor прямой grant.
+
+Native 0.11.1 использует `ENABLE_PLUGINS`. Bearer берёт ключ подключения,
+session — текущие token/cookies, system OAuth — token actor из middleware,
+`none` не добавляет auth. OAuth 2.1 для OpenAPI/MCP получает token actor из
+native manager. Требуемая отсутствующая пользовательская авторизация
+останавливает подготовку; сохранённая client metadata её не заменяет.
+У terminal поддержаны bearer/session/system OAuth/none. В 0.11.1 cookies
+передаются только в session/system OAuth, независимо от `forward_cookies`.
+Режимы и границы native/synthetic auth-проверок — в [compatibility.md](compatibility.md).
+
+Terminal binding, контекст сессий, Stop, общий filesystem и требование обычных
+OWUI file IDs описаны выше и применяются к обеим версиям. В 0.11.1 используйте
+`display_file(..., inline=true)`, если нужен native inline file result;
+это не предоставляет пользователю прямой download grant терминального сервера.
