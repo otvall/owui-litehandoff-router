@@ -164,3 +164,38 @@ OpenAPI серверные Tools используют native специфика�
 для двух групп, файлы, destination inlets, Stop/deadline/cascade delete,
 просмотр обеих групп в Safari. Все вызовы внутреннего OWUI API находятся в
 `owui_adapter.py`; native тест отдельно проверяет эту границу и version guard.
+
+## Выборочный серверный терминал
+
+Адаптер 0.12.3 использует `terminal_server.connections`, `get_terminal_servers`,
+`has_connection_access`, terminal context/URL helpers и `execute_tool_server`.
+ACL подключения проверяется у владельца модели с его группами. Для transport
+используются actor и native `build_tool_server_headers`; `X-User-Id` и chat/context
+заголовки закрепляются за фактическим исполнением. Поддержаны `bearer`, `session`,
+`system_oauth`, `none`; отсутствие обязательной пользовательской авторизации
+возвращает ошибку, а не токен владельца. Callables имеют native `type=terminal`
+и `tool_id=terminal:<id>`; серверные инструкции/cwd и terminal result schema
+сохраняются. Глобальные функции OWUI и его ACL не подменяются.
+
+`read_user_terminal` и `send_user_terminal_input` не предоставляются агентам.
+Терминальные Skills и AGENTS.md автоматически не импортируются: рабочие Skills
+по-прежнему определяет `meta.skillIds`. Терминальная панель пользователя для
+серверных команд не требуется. Прямые вызовы модели в обход Router этим
+механизмом не подготавливаются.
+
+Native проверки `tests/native/test_terminals.py` подтверждают сохранение metadata,
+owner/group ACL, запреты подключения/контекста, credentials/cookies двух actor,
+chat/context headers, исключение интерактивных Tools и native форму `display_file`.
+Эти native проверки transport используют управляемый ответ. Отдельный HTTP
+acceptance 2026-10-25 прошёл на двух exports с совместимым backend, реально
+выполняющим shell-команды и чтение файлов: handoff, смешанная группа, A+A,
+два пользователя, запрет прямого доступа, disabled/отозванное подключение и
+Stop/deadline/поздний результат. Это не stock Open Terminal и не production.
+
+В Safari через AX и UI раскрыты результаты основного и дочерних чатов без
+терминальной панели. Регрессия Inline Visualizer 2.2.3 сохранила child embed,
+показала SVG и отреагировала на клик `STATE=0`→`STATE=1` после включения штатных
+iframe prerequisites у одноразового пользователя. Native screenshot capture
+показывал пустую центральную область, поэтому пиксельная проверка не заявляется.
+Подробности и обезличенные hashes приведены в `docs/acceptance.md` и
+`docs/terminal-evidence.json`.

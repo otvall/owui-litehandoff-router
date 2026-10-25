@@ -120,6 +120,7 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_batch_validation_is_atomic(self):
         for invalid in ({"agent_id": "route-b", "task": "x"}, {"agent_id": "b", "task": " "},
+                        {"agent_id": "b", "task": "x", "terminal_id": "client"},
                         {"agent_id": "b", "task": "x", "temperature": 0.2},
                         {"agent_id": "b", "task": "x", "file_ids": ["unattached"]}):
             request, metadata, state, user = self.setup_request()
@@ -220,6 +221,23 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
                     await collect_result(adapter,user,entry,'summary')
             else:
                 self.assertEqual((await collect_result(adapter,user,entry,'summary'))['status'],'failed')
+
+    async def test_terminal_paths_are_not_portable_owui_artifacts(self):
+        request,metadata,state,user=self.setup_request()
+        adapter=GroupAdapter()
+        entry={"agent_id":"a","task":"terminal output","child":("child","answer")}
+        adapter.children_map["child"]={"user_id":user.id,"meta":{"parent_chat_id":"parent"}}
+        for file in ({"path":"/tmp/result.txt"},
+                     {"source":"open_terminal","path":"/tmp/result.txt","terminal_id":"t"}):
+            adapter.messages[("child","answer")]={"done":True,"content":"Result","files":[file]}
+            with self.assertRaisesRegex(ValueError,"available OWUI file"):
+                await collect_result(adapter,user,entry,"summary")
+        adapter.messages[("child","answer")]={"done":True,"content":"Result","files":[{"id":"normal-file"}]}
+        result=await collect_result(adapter,user,entry,"summary")
+        self.assertEqual(result["files"][0]["id"],"normal-file")
+        adapter.deleted_files.add("normal-file")
+        with self.assertRaisesRegex(ValueError,"unavailable"):
+            await collect_result(adapter,user,entry,"summary")
 
     async def test_stop_and_timeout_cleanup_without_retry(self):
         for timeout in (False, True):

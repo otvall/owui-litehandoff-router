@@ -1,5 +1,6 @@
 """All imports of OWUI's internal APIs live behind this versioned boundary."""
 
+import asyncio
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 import json
@@ -187,6 +188,104 @@ class OWUIAdapter:
                     "spec": tools.clean_openai_tool_schema(deepcopy(spec)),
                     "callable": await self.bind(operation(name), {})}
         return result
+
+    async def terminal_access(self, request, identifier, owner):
+        from open_webui.utils import tools
+
+        connections = await tools.Config.get("terminal_server.connections", []) or []
+        connection = next((c for c in connections if c.get("id") == identifier), None)
+        groups = {g.id for g in await tools.Groups.get_groups_by_member_id(owner.id, include_inherited=True)}
+        if (not tools.ENABLE_TOOL_SERVERS or not connection or not connection.get("enabled", True)
+                or not await tools.has_connection_access(owner, connection, groups)):
+            raise ValueError("Required model terminal unavailable or denied: " + identifier)
+        return connection
+
+    async def terminal_server(self, request, identifier, owner, metadata):
+        from open_webui.utils import tools
+        from open_webui.utils.terminals import (
+            terminal_context_available, terminal_context_config, terminal_context_id, get_terminal_server_url)
+
+        connection = await self.terminal_access(request, identifier, owner)
+        context_id = terminal_context_id(connection, metadata, "chat")
+        context = terminal_context_config(connection, "chat")
+        if not terminal_context_available(connection, "chat") or (
+                isinstance(context, dict) and context.get("context_id") == "chat_id" and not context_id):
+            raise ValueError("Model terminal requires an available saved chat context: " + identifier)
+        data = next((s for s in await tools.get_terminal_servers(request) if s.get("id") == identifier), None)
+        if not data or not data.get("specs"):
+            raise ValueError("Required model terminal has no available Tools: " + identifier)
+        return connection, {**data, "url": get_terminal_server_url(connection)}, context_id
+
+    async def terminal_headers(self, request, identifier, connection, actor, metadata, context_id):
+        from open_webui.utils import tools
+        from open_webui.utils.terminals import TERMINAL_CONTEXT_HEADER
+
+        auth = connection.get("auth_type", "bearer")
+        if auth not in {"bearer", "session", "system_oauth", "none"}:
+            raise ValueError("Unsupported terminal authorization: " + str(auth))
+        if auth == "session" and not getattr(getattr(request.state, "token", None), "credentials", None):
+            raise ValueError("Terminal requires execution-user session authorization")
+        if auth == "system_oauth":
+            token = await tools.get_system_oauth_token(request, actor)
+            if not token or not token.get("access_token"):
+                raise ValueError("Terminal requires execution-user OAuth authorization")
+        headers, cookies = await tools.build_tool_server_headers(
+            connection, request, actor, server_id=identifier, metadata=metadata)
+        headers.update({"Content-Type": "application/json", "X-User-Id": actor.id})
+        # A connection's custom headers cannot override trusted execution routing.
+        for name in list(headers):
+            if name.lower() in {"x-user-id", "x-session-id", TERMINAL_CONTEXT_HEADER.lower()}:
+                headers.pop(name)
+        headers["X-User-Id"] = actor.id
+        if metadata.get("chat_id"):
+            headers["X-Session-Id"] = metadata["chat_id"]
+        if context_id:
+            headers[TERMINAL_CONTEXT_HEADER] = context_id
+        return headers, cookies
+
+    async def terminal_tools(self, request, identifier, owner, extra):
+        from open_webui.utils import tools
+
+        actor = await self.user(extra["__user__"]["id"])
+        metadata = {key: extra.get("__metadata__", {}).get(key) for key in ("chat_id", "message_id")}
+        connection, data, context_id = await self.terminal_server(request, identifier, owner, metadata)
+        headers, cookies = await self.terminal_headers(request, identifier, connection, actor, metadata, context_id)
+        if (connection.get("config") or {}).get("working_directory_context", True):
+            cwd, prompt = await asyncio.gather(tools.get_terminal_cwd(data["url"], headers, cookies),
+                                              tools.get_terminal_system_prompt(data["url"], headers, cookies))
+        else:
+            cwd, prompt = None, await tools.get_terminal_system_prompt(data["url"], headers, cookies)
+
+        def operation(name):
+            async def invoke(**kwargs):
+                current_owner = await self.user(owner.id)
+                current, current_data, context = await self.terminal_server(request, identifier, current_owner, metadata)
+                if not any(s.get("name") == name for s in current_data.get("specs", [])):
+                    raise ValueError("Model terminal Tool is no longer available: " + name)
+                current_actor = await self.user(actor.id)
+                fresh_headers, fresh_cookies = await self.terminal_headers(
+                    request, identifier, current, current_actor, metadata, context)
+                if name == "display_file":
+                    kwargs.pop("page", None)
+                return await tools.execute_tool_server(url=current_data["url"], headers=fresh_headers,
+                    cookies=fresh_cookies, name=name, params=kwargs, server_data=current_data)
+            return invoke
+
+        result = {}
+        for spec in data["specs"]:
+            name = spec["name"]
+            if name in {"read_user_terminal", "send_user_terminal_input"}:
+                continue
+            if name in result:
+                raise ValueError("Conflicting terminal Tool name: " + name)
+            schema = tools.clean_openai_tool_schema(tools.add_terminal_display_file_inline_param(deepcopy(spec)))
+            if name == "run_command" and cwd:
+                schema["description"] = schema.get("description", "") + "\n\nThe current working directory is: " + cwd
+            result[name] = {"tool_id": "terminal:" + identifier, "type": "terminal", "spec": schema,
+                            "callable": await self.bind(operation(name), {})}
+        if not result:
+            raise ValueError("Required model terminal has no permitted server Tools: " + identifier)
+        return result, prompt or data.get("system_prompt")
 
     async def connect_mcp(self, request, server_id, user, extra):
         from fastapi import HTTPException

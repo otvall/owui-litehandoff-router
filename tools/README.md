@@ -1,4 +1,51 @@
 Build the two independent Functions with `python tools/build_functions.py`.
+## Selective terminal acceptance
+
+Use only `owui-router-test` (OWUI 0.12.3). Copy `terminal_acceptance.py`,
+`terminal_gate_provider.py`, `parallel_gate.py` and current `dist/` into
+`/tmp/lhr-terminal-gate/`. The provider binds container loopback 8770 and also
+provides a terminal-compatible backend: it actually executes subprocess shell
+commands and reads their files. It is a disposable test backend, not a stock
+Open Terminal installation. Only its `work/` files are removed by cleanup.
+
+```sh
+docker exec -e TERMINAL_DISPOSABLE=owui-router-test -e PYTHONPATH=/app/backend -w /app/backend owui-router-test python /tmp/lhr-terminal-gate/terminal_acceptance.py bootstrap
+docker exec -d owui-router-test python /tmp/lhr-terminal-gate/terminal_gate_provider.py
+docker exec -e TERMINAL_DISPOSABLE=owui-router-test -e PYTHONPATH=/app/backend -w /app/backend owui-router-test python /tmp/lhr-terminal-gate/terminal_acceptance.py install
+docker exec -e TERMINAL_DISPOSABLE=owui-router-test -e PYTHONPATH=/app/backend -w /app/backend owui-router-test python /tmp/lhr-terminal-gate/terminal_acceptance.py check
+docker exec -e TERMINAL_DISPOSABLE=owui-router-test -e PYTHONPATH=/app/backend -w /app/backend owui-router-test python /tmp/lhr-terminal-gate/terminal_acceptance.py controls
+docker exec -e TERMINAL_DISPOSABLE=owui-router-test -e PYTHONPATH=/app/backend -w /app/backend owui-router-test python /tmp/lhr-terminal-gate/terminal_acceptance.py revocation
+```
+
+The gate installs separate `tgate` models and the two exports with only `AGENTS`
+configured. Two actors have model access and no direct grants on the agents'
+terminals, working Skills or ordinary Tool. A third fixture connection is
+directly selectable and checks that parent selection does not override model
+bindings. Private credentials and configuration snapshots stay in a mode-0600
+state file inside the container. `check` records actual marker/file reads,
+handoff, mixed/same-agent groups and concurrent users. `controls` covers a
+disabled resource, Stop/deadline and late subprocess results. Browser inspection
+uses the saved report chat IDs and does not require a terminal pane.
+
+For the Inline Visualizer regression, also copy the pinned `tools/fixtures/`
+directory beside the scripts and run the `visualizer` action. It verifies the
+2.2.3 Tool/Skill checksums and attaches them only to the ordinary B fixture,
+then checks a real saved child embed. Open the recorded child in the browser
+and verify its SVG and toggle. The `revocation` action removes the fixture
+owner's terminal grant temporarily, verifies no command is dispatched and
+restores the connection in `finally`.
+
+After collecting evidence and closing fixture browser sessions, restore shared
+settings and delete only these fixture users/resources and their test files:
+
+```sh
+docker exec -e TERMINAL_DISPOSABLE=owui-router-test -e PYTHONPATH=/app/backend -w /app/backend owui-router-test python /tmp/lhr-terminal-gate/terminal_acceptance.py restore
+docker exec -e TERMINAL_DISPOSABLE=owui-router-test -e PYTHONPATH=/app/backend -w /app/backend owui-router-test python /tmp/lhr-terminal-gate/terminal_acceptance.py cleanup
+```
+
+Stop the fixture provider process after cleanup. Keep sanitized evidence in the
+repository; never copy the private state or admin token into it. A repeated
+installation needs a fresh fixture directory after the previous cleanup.
 No build-time downloads are performed.
 
 ## Inline Visualizer native/browser gate

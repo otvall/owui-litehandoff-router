@@ -27,6 +27,9 @@ class Directory:
     async def tool_access(self, request, identifier, user):
         self.calls.append(("tool",identifier,user.id))
 
+    async def terminal_access(self, request, identifier, user):
+        self.calls.append(("terminal",identifier,user.id))
+
 
 class ResourceScopeTest(unittest.IsolatedAsyncioTestCase):
     def scope(self, adapter):
@@ -69,3 +72,34 @@ class ResourceScopeTest(unittest.IsolatedAsyncioTestCase):
         await scope.skill("routing-skill")
         with self.assertRaisesRegex(ValueError,"model scope"):
             await scope.tool("card-tool")
+
+    async def test_terminal_scope_keeps_owner_authority_and_rechecks_binding(self):
+        adapter=Directory()
+        meta=adapter.model_row["info"]["meta"]
+        meta["lite_handoff"]={"terminal_id":"term-a"}
+        scope=ResourceScope(adapter,None,SimpleNamespace(id="actor"),adapter.model_row,
+                            SimpleNamespace(id="owner"),[],[],terminal_id="term-a")
+        await scope.terminal("term-a")
+        self.assertEqual(adapter.calls,[("model","agent","actor"),("terminal","term-a","owner")])
+        for identifier in ("term-b",None):
+            meta["lite_handoff"]["terminal_id"]=identifier
+            with self.assertRaisesRegex(ValueError,"detached"):
+                await scope.terminal("term-a")
+        meta["lite_handoff"]["terminal_id"]="term-a"
+        adapter.model_row["info"]["user_id"]="other-owner"
+        with self.assertRaisesRegex(ValueError,"owner changed"):
+            await scope.terminal("term-a")
+        adapter.model_row["info"]["user_id"]="owner"
+        adapter.denied=True
+        with self.assertRaisesRegex(ValueError,"denied"):
+            await scope.terminal("term-a")
+        self.assertEqual(len([c for c in adapter.calls if c[0]=="terminal"]),1)
+
+    async def test_no_binding_or_router_cannot_gain_terminal_from_tool_ids(self):
+        adapter=Directory()
+        for router,terminal_id in ((False,None),(True,"term-a")):
+            scope=ResourceScope(adapter,None,SimpleNamespace(id="actor"),adapter.model_row,
+                SimpleNamespace(id="owner"),["terminal:term-a"],[],router=router,terminal_id=terminal_id)
+            with self.assertRaisesRegex(ValueError,"model scope"):
+                await scope.terminal("term-a")
+        self.assertEqual(adapter.calls,[])

@@ -40,6 +40,7 @@ async def bind_tool_context(adapter, tool, messages, check=None, pinned=None):
 
 # Source: owui_adapter
 """All imports of OWUI's internal APIs live behind this versioned boundary."""
+import asyncio
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 import json
@@ -200,6 +201,91 @@ class OWUIAdapter:
             if allowed(name, connection):
                 result[name] = {'tool_id': identifier, 'type': 'external', 'spec': tools.clean_openai_tool_schema(deepcopy(spec)), 'callable': await self.bind(operation(name), {})}
         return result
+
+    async def terminal_access(self, request, identifier, owner):
+        from open_webui.utils import tools
+        connections = await tools.Config.get('terminal_server.connections', []) or []
+        connection = next((c for c in connections if c.get('id') == identifier), None)
+        groups = {g.id for g in await tools.Groups.get_groups_by_member_id(owner.id, include_inherited=True)}
+        if not tools.ENABLE_TOOL_SERVERS or not connection or (not connection.get('enabled', True)) or (not await tools.has_connection_access(owner, connection, groups)):
+            raise ValueError('Required model terminal unavailable or denied: ' + identifier)
+        return connection
+
+    async def terminal_server(self, request, identifier, owner, metadata):
+        from open_webui.utils import tools
+        from open_webui.utils.terminals import terminal_context_available, terminal_context_config, terminal_context_id, get_terminal_server_url
+        connection = await self.terminal_access(request, identifier, owner)
+        context_id = terminal_context_id(connection, metadata, 'chat')
+        context = terminal_context_config(connection, 'chat')
+        if not terminal_context_available(connection, 'chat') or (isinstance(context, dict) and context.get('context_id') == 'chat_id' and (not context_id)):
+            raise ValueError('Model terminal requires an available saved chat context: ' + identifier)
+        data = next((s for s in await tools.get_terminal_servers(request) if s.get('id') == identifier), None)
+        if not data or not data.get('specs'):
+            raise ValueError('Required model terminal has no available Tools: ' + identifier)
+        return (connection, {**data, 'url': get_terminal_server_url(connection)}, context_id)
+
+    async def terminal_headers(self, request, identifier, connection, actor, metadata, context_id):
+        from open_webui.utils import tools
+        from open_webui.utils.terminals import TERMINAL_CONTEXT_HEADER
+        auth = connection.get('auth_type', 'bearer')
+        if auth not in {'bearer', 'session', 'system_oauth', 'none'}:
+            raise ValueError('Unsupported terminal authorization: ' + str(auth))
+        if auth == 'session' and (not getattr(getattr(request.state, 'token', None), 'credentials', None)):
+            raise ValueError('Terminal requires execution-user session authorization')
+        if auth == 'system_oauth':
+            token = await tools.get_system_oauth_token(request, actor)
+            if not token or not token.get('access_token'):
+                raise ValueError('Terminal requires execution-user OAuth authorization')
+        headers, cookies = await tools.build_tool_server_headers(connection, request, actor, server_id=identifier, metadata=metadata)
+        headers.update({'Content-Type': 'application/json', 'X-User-Id': actor.id})
+        for name in list(headers):
+            if name.lower() in {'x-user-id', 'x-session-id', TERMINAL_CONTEXT_HEADER.lower()}:
+                headers.pop(name)
+        headers['X-User-Id'] = actor.id
+        if metadata.get('chat_id'):
+            headers['X-Session-Id'] = metadata['chat_id']
+        if context_id:
+            headers[TERMINAL_CONTEXT_HEADER] = context_id
+        return (headers, cookies)
+
+    async def terminal_tools(self, request, identifier, owner, extra):
+        from open_webui.utils import tools
+        actor = await self.user(extra['__user__']['id'])
+        metadata = {key: extra.get('__metadata__', {}).get(key) for key in ('chat_id', 'message_id')}
+        connection, data, context_id = await self.terminal_server(request, identifier, owner, metadata)
+        headers, cookies = await self.terminal_headers(request, identifier, connection, actor, metadata, context_id)
+        if (connection.get('config') or {}).get('working_directory_context', True):
+            cwd, prompt = await asyncio.gather(tools.get_terminal_cwd(data['url'], headers, cookies), tools.get_terminal_system_prompt(data['url'], headers, cookies))
+        else:
+            cwd, prompt = (None, await tools.get_terminal_system_prompt(data['url'], headers, cookies))
+
+        def operation(name):
+
+            async def invoke(**kwargs):
+                current_owner = await self.user(owner.id)
+                current, current_data, context = await self.terminal_server(request, identifier, current_owner, metadata)
+                if not any((s.get('name') == name for s in current_data.get('specs', []))):
+                    raise ValueError('Model terminal Tool is no longer available: ' + name)
+                current_actor = await self.user(actor.id)
+                fresh_headers, fresh_cookies = await self.terminal_headers(request, identifier, current, current_actor, metadata, context)
+                if name == 'display_file':
+                    kwargs.pop('page', None)
+                return await tools.execute_tool_server(url=current_data['url'], headers=fresh_headers, cookies=fresh_cookies, name=name, params=kwargs, server_data=current_data)
+            return invoke
+        result = {}
+        for spec in data['specs']:
+            name = spec['name']
+            if name in {'read_user_terminal', 'send_user_terminal_input'}:
+                continue
+            if name in result:
+                raise ValueError('Conflicting terminal Tool name: ' + name)
+            schema = tools.clean_openai_tool_schema(tools.add_terminal_display_file_inline_param(deepcopy(spec)))
+            if name == 'run_command' and cwd:
+                schema['description'] = schema.get('description', '') + '\n\nThe current working directory is: ' + cwd
+            result[name] = {'tool_id': 'terminal:' + identifier, 'type': 'terminal', 'spec': schema, 'callable': await self.bind(operation(name), {})}
+        if not result:
+            raise ValueError('Required model terminal has no permitted server Tools: ' + identifier)
+        return (result, prompt or data.get('system_prompt'))
 
     async def connect_mcp(self, request, server_id, user, extra):
         from fastapi import HTTPException
@@ -481,6 +567,42 @@ def publish(request, current, draft, tools):
     request.state.metadata = draft
     request.scope[SCOPE_KEY]['skill_scope'] = draft.get('lite_skill_scope')
 
+# Source: terminals
+"""Optional server terminal binding; never inherit a client's selection."""
+
+def terminal_binding(model):
+    meta = model.get('info', {}).get('meta') or {}
+    settings = meta.get('lite_handoff', {})
+    if not isinstance(settings, dict):
+        raise ValueError('Model lite_handoff settings must be an object')
+    identifier = settings.get('terminal_id')
+    if identifier is None:
+        return None
+    if not isinstance(identifier, str):
+        raise ValueError('Model lite_handoff.terminal_id must be a string or null')
+    identifier = identifier.strip()
+    if not identifier:
+        return None
+    if (meta.get('capabilities') or {}).get('terminal') is False:
+        raise ValueError('Model terminal binding conflicts with disabled Terminal capability')
+    return identifier
+
+def is_terminal_tool(tool):
+    return tool.get('type') == 'terminal' or str(tool.get('tool_id', '')).startswith('terminal:') or (tool.get('server') or {}).get('is_terminal') is True
+
+def prepare_terminal_scope(metadata, identifier):
+    for key in ('terminal_id', 'terminal_skills'):
+        metadata.pop(key, None)
+    if isinstance(metadata.get('tool_servers'), list):
+        metadata['tool_servers'] = [s for s in metadata['tool_servers'] if not isinstance(s, dict) or s.get('is_terminal') is not True]
+    context = dict(metadata.get('chat_context') or {})
+    for key in ('terminal_id', 'terminal_skills'):
+        context.pop(key, None)
+    if 'chat_context' in metadata:
+        metadata['chat_context'] = context
+    if identifier:
+        metadata['terminal_id'] = identifier
+
 # Source: resources
 """Separate model-bound resource authority from the execution user."""
 
@@ -489,14 +611,15 @@ async def routing_owner(adapter, request, user, router_id):
 
 class ResourceScope:
 
-    def __init__(self, adapter, request, user, model, owner, tool_ids, skill_ids, *, router=False):
+    def __init__(self, adapter, request, user, model, owner, tool_ids, skill_ids, *, router=False, terminal_id=None):
         self.adapter, self.request, self.user = (adapter, request, user)
         self.model_id, self.owner_id = (model['id'], owner.id)
         self.tool_ids, self.skill_ids = (frozenset(tool_ids), frozenset(skill_ids))
         self.router = router
+        self.terminal_id = terminal_id if not router else None
 
     async def authority(self, kind, identifier):
-        allowed = self.skill_ids if kind == 'skill' else self.tool_ids
+        allowed = self.skill_ids if kind == 'skill' else {self.terminal_id} - {None} if kind == 'terminal' else self.tool_ids
         if identifier not in allowed:
             raise ValueError('Resource is outside the current model scope')
         model = await self.adapter.model(self.request, self.model_id, self.user)
@@ -505,7 +628,7 @@ class ResourceScope:
             raise ValueError('Model resource owner changed during generation')
         if not self.router:
             meta = model.get('info', {}).get('meta') or {}
-            configured = ids(meta.get('skillIds' if kind == 'skill' else 'toolIds') or [])
+            configured = {terminal_binding(model)} - {None} if kind == 'terminal' else ids(meta.get('skillIds' if kind == 'skill' else 'toolIds') or [])
             if identifier not in configured:
                 raise ValueError('Resource was detached from the current model')
         return owner
@@ -517,6 +640,10 @@ class ResourceScope:
     async def tool(self, identifier):
         owner = await self.authority('tool', identifier)
         await self.adapter.tool_access(self.request, identifier, owner)
+
+    async def terminal(self, identifier):
+        owner = await self.authority('terminal', identifier)
+        await self.adapter.terminal_access(self.request, identifier, owner)
 
 # Source: parallel
 """One synchronous group of isolated native agent tasks; no second Tool loop."""
