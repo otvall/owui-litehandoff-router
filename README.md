@@ -13,6 +13,7 @@ Router для Open WebUI **0.12.5**: самостоятельный ответ �
 библиотеки OWUI и доступные внутри контура модели/сервисы.
 
 - [Установка и настройка](docs/setup.md)
+- [Промпт Router, routing Skills и общие ресурсы](docs/router-configuration.md)
 - [Разработка и подготовка зависимостей](docs/development.md)
 - [Проверки совместимости](docs/compatibility.md)
 - [Контекст и обмен результатами](docs/context.md)
