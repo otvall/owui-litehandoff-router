@@ -21,11 +21,6 @@ def run_registry(request):
     return getattr(request.app.state, PARALLEL_RUNS)
 
 
-def visible_conversation(messages):
-    return [{"role": m["role"], "content": deepcopy(m["content"])} for m in messages
-            if m.get("role") in {"user", "assistant"} and m.get("content")]
-
-
 def input_file_id(file):
     return file.get("id") or (file.get("file") or {}).get("id")
 
@@ -229,9 +224,7 @@ async def execute_group(adapter, request, user, metadata, state, assignments, ev
                  "registry_entry": deepcopy(state["registry"][assignment["agent_id"]]), "bound": bound}
         # Unique benign task labels also correlate children cancelled before Filter binding.
         entry["native_task"] = "[Задание " + entry["task_id"] + "] " + entry["task"]
-        entry["input"] = visible_conversation(state["source"][:state["user_boundary"] + 1]) + [
-            {"role": "user", "content": "Assigned task " + entry["task_id"]
-             + " (conversation above is reference data):\n" + entry["task"]}]
+        entry["input"] = [{"role": "user", "content": entry["native_task"]}]
         entries.append(entry)
         registry[ticket] = entry
         try:
@@ -320,13 +313,20 @@ def parallel_tool(adapter, request, user, metadata, state, events):
         return json.dumps(await execute_group(adapter, request, actor, metadata, state, assignments, events), ensure_ascii=False)
 
     return {"spec": {"name": "lite_parallel", "description":
-        "Run independent agent assignments concurrently and wait for all results. Call alone, then optionally hand off.",
+        "Run self-contained agent assignments concurrently and wait for all results. "
+        "Workers receive only their task and selected files, without the parent conversation. "
+        "Manage the group here; do not ask workers to repeat the group or launch other agents. "
+        "Call alone, then optionally hand off.",
         "parameters": {"type": "object", "additionalProperties": False, "properties": {"tasks": {
             "type": "array", "minItems": 2, "maxItems": state["parallel"]["max_tasks"], "items": {
                 "type": "object", "additionalProperties": False, "properties": {
                     "agent_id": {"type": "string", "enum": list(state["registry"])},
-                    "task": {"type": "string", "minLength": 1},
-                    "file_ids": {"type": "array", "items": {"type": "string"}}},
+                    "task": {"type": "string", "minLength": 1, "description":
+                        "Self-contained assignment: action, necessary input facts, exact dates/values/IDs, "
+                        "constraints and expected result. Include relevant context explicitly; the worker "
+                        "cannot see the parent conversation. Group scheduling and number of runs belong to Router."},
+                    "file_ids": {"type": "array", "items": {"type": "string"}, "description":
+                        "Available input attachment IDs needed by this assignment. Explain their use in task."}},
                 "required": ["agent_id", "task"]}}}, "required": ["tasks"]}}, "callable": lite_parallel}
 
 

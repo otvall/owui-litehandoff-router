@@ -15,7 +15,8 @@ from lite_handoff_router.parallel import (parallel_tool, run_registry, prepare_w
 from lite_handoff_router.parallel import finish_cleanup
 from lite_handoff_router.protocol import delegate_tool, delegate, confirmed_target
 from lite_handoff_router.observation import observe_response
-from lite_handoff_router.model_execution import prepare_model
+from lite_handoff_router.model_execution import prepare_model, WORKER_PROMPT
+from lite_handoff_router.history import refresh_source
 from tests.test_preparation import Directory
 from tests.test_protocol import call
 from tests.test_router import Adapter, User
@@ -155,6 +156,56 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "one parallel group"):
             await self.invoke(adapter, request, metadata, state, user, [{"agent_id": "a", "task": "x"}] * 2)
 
+    async def test_same_agent_workers_receive_only_their_assignment_and_selected_files(self):
+        request, metadata, state, user = self.setup_request()
+        state["source"].insert(1, {"role": "assistant", "content": "PARENT_VISIBLE_ANSWER"})
+        state["source"][2]["content"] = "PARENT_REQUEST: сделай 2 параллельных вызова в этот агент"
+        state["user_boundary"] = 2
+        parent_source = copy.deepcopy(state["source"])
+        adapter = GroupAdapter()
+        tasks = [
+            {"agent_id": "a", "task": "Покажи прогноз ФТП FTP-42 за 2026-11-01–2026-11-30.",
+             "file_ids": ["input-file"]},
+            {"agent_id": "a", "task": "Покажи прогноз ФТП FTP-99 за 2026-12-01–2026-12-31."},
+        ]
+        report = await self.invoke(adapter, request, metadata, state, user, tasks)
+        self.assertEqual(report["status"], "completed")
+        self.assertEqual(state["source"], parent_source)
+        self.assertEqual([r["task"] for r in report["results"]], [t["task"] for t in tasks])
+        for index, scope in enumerate(adapter.scopes):
+            worker = scope["lite_handoff_router"]
+            self.assertTrue(worker["worker"])
+            self.assertEqual(worker["active_agent"], "a")
+            self.assertEqual(worker["source"], worker["original_source"])
+            self.assertEqual(len(worker["source"]), 1)
+            self.assertEqual(worker["source"][0]["role"], "user")
+            self.assertIn(tasks[index]["task"], worker["source"][0]["content"])
+            self.assertNotIn(tasks[1-index]["task"], str(worker["source"]))
+            self.assertNotIn("PARENT_", str(worker["source"]))
+            self.assertNotIn("FOREIGN_TOOL_SECRET", str(worker["source"]))
+            self.assertEqual([f["id"] for f in scope["lite_handoff_metadata"]["files"]],
+                             ["input-file"] if index == 0 else [])
+
+    async def test_worker_role_preserves_model_prompt_without_accumulating_or_changing_handoff(self):
+        request, metadata, parent, user = self.setup_request()
+        body = {"model": "router", "messages": [{"role": "user", "content": "ASSIGNED_ONLY: forecast"}]}
+        state = begin(request, body, metadata, user.id, parent["registry"], [], [], [])
+        state.update(worker=True, active_agent="a", phase="agent")
+        adapter = GroupAdapter()
+        for _ in range(2):
+            draft, tools = await prepare_model(adapter, request, body, user, metadata, state, "llm", {}, target="a")
+            systems = [m["content"] for m in draft["messages"] if m["role"] == "system"]
+            self.assertEqual(systems.count(WORKER_PROMPT), 1)
+            self.assertIn("Router", systems)  # The fixture's own model system prompt.
+            self.assertNotIn("ASSIGNED_ONLY", str(systems))
+            self.assertEqual([m["content"] for m in draft["messages"] if m["role"] == "user"],
+                             ["ASSIGNED_ONLY: forecast"])
+            self.assertFalse({"lite_delegate", "lite_parallel", "delegate_task"} & set(tools))
+            refresh_source(state, draft["messages"])
+        state.pop("worker")
+        draft, _ = await prepare_model(adapter, request, body, user, metadata, state, "llm", {}, target="a")
+        self.assertNotIn(WORKER_PROMPT, str(draft["messages"]))
+
     async def test_mixed_actual_generations_are_rejected_by_both_controls(self):
         assignments = [{"agent_id": "a", "task": "x"}] * 2
         for extra in (call("lite_delegate", "d", {"agent_id": "a"}),
@@ -202,6 +253,25 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
         adapter.deleted_files.add("artifact-child-0")
         with self.assertRaisesRegex(ValueError, "unavailable"):
             await downstream_data(adapter, user, metadata, state)
+
+    async def test_ordinary_and_final_handoff_keep_dialogue_without_worker_role(self):
+        request, metadata, state, user = self.setup_request()
+        adapter = GroupAdapter()
+        for after_group in (False, True):
+            if after_group:
+                await self.invoke(adapter, request, metadata, state, user,
+                                  [{"agent_id": "a", "task": "forecast A"},
+                                   {"agent_id": "a", "task": "forecast B"}])
+            draft, tools = await prepare_model(adapter, request, {}, user, metadata, state, "llm", {}, target="a")
+            self.assertIn("Forecasts, then presentation", str(draft["messages"]))
+            self.assertNotIn(WORKER_PROMPT, str(draft["messages"]))
+            self.assertFalse({"lite_delegate", "lite_parallel", "delegate_task"} & set(tools))
+            self.assertNotIn("FOREIGN_TOOL_SECRET", str(draft["messages"]))
+            if after_group:
+                packet = next(m["content"] for m in draft["messages"]
+                              if str(m.get("content", "")).startswith("Confirmed parallel task results."))
+                for result in state["parallel"]["results"]:
+                    self.assertIn(result["result"], packet)
 
     async def test_native_summary_never_substitutes_missing_or_incomplete_output(self):
         request,metadata,state,user=self.setup_request()

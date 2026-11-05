@@ -166,6 +166,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
             systems = "\n".join(str(m.get("content")) for m in payload["messages"] if m.get("role") == "system")
             self.assertEqual(systems.count("AGENT_PROMPT"), 1)
             self.assertNotIn("ROUTER_PROMPT", systems)
+            self.assertNotIn("Router already manages the group", systems)
             self.assertIn("Native User", systems)
             self.assertIn("T42", systems)
             self.assertNotIn("router_only", payload)

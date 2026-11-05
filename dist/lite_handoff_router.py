@@ -763,9 +763,6 @@ def run_registry(request):
         setattr(request.app.state, PARALLEL_RUNS, {})
     return getattr(request.app.state, PARALLEL_RUNS)
 
-def visible_conversation(messages):
-    return [{'role': m['role'], 'content': deepcopy(m['content'])} for m in messages if m.get('role') in {'user', 'assistant'} and m.get('content')]
-
 def input_file_id(file):
     return file.get('id') or (file.get('file') or {}).get('id')
 
@@ -937,7 +934,7 @@ async def execute_group(adapter, request, user, metadata, state, assignments, ev
         ticket = uuid4().hex
         entry = {**deepcopy(assignment), 'task_id': uuid4().hex, 'index': index, 'user_id': user.id, 'parent_chat_id': state['chat_id'], 'parent_message_id': state['message_id'], 'router_id': state['router_id'], 'registry_entry': deepcopy(state['registry'][assignment['agent_id']]), 'bound': bound}
         entry['native_task'] = '[Задание ' + entry['task_id'] + '] ' + entry['task']
-        entry['input'] = visible_conversation(state['source'][:state['user_boundary'] + 1]) + [{'role': 'user', 'content': 'Assigned task ' + entry['task_id'] + ' (conversation above is reference data):\n' + entry['task']}]
+        entry['input'] = [{'role': 'user', 'content': entry['native_task']}]
         entries.append(entry)
         registry[ticket] = entry
         try:
@@ -1017,7 +1014,7 @@ def parallel_tool(adapter, request, user, metadata, state, events):
             raise ValueError('Only one parallel group before handoff is allowed per request')
         assignments = await validate_batch(adapter, request, actor, metadata, state, tasks)
         return json.dumps(await execute_group(adapter, request, actor, metadata, state, assignments, events), ensure_ascii=False)
-    return {'spec': {'name': 'lite_parallel', 'description': 'Run independent agent assignments concurrently and wait for all results. Call alone, then optionally hand off.', 'parameters': {'type': 'object', 'additionalProperties': False, 'properties': {'tasks': {'type': 'array', 'minItems': 2, 'maxItems': state['parallel']['max_tasks'], 'items': {'type': 'object', 'additionalProperties': False, 'properties': {'agent_id': {'type': 'string', 'enum': list(state['registry'])}, 'task': {'type': 'string', 'minLength': 1}, 'file_ids': {'type': 'array', 'items': {'type': 'string'}}}, 'required': ['agent_id', 'task']}}}, 'required': ['tasks']}}, 'callable': lite_parallel}
+    return {'spec': {'name': 'lite_parallel', 'description': 'Run self-contained agent assignments concurrently and wait for all results. Workers receive only their task and selected files, without the parent conversation. Manage the group here; do not ask workers to repeat the group or launch other agents. Call alone, then optionally hand off.', 'parameters': {'type': 'object', 'additionalProperties': False, 'properties': {'tasks': {'type': 'array', 'minItems': 2, 'maxItems': state['parallel']['max_tasks'], 'items': {'type': 'object', 'additionalProperties': False, 'properties': {'agent_id': {'type': 'string', 'enum': list(state['registry'])}, 'task': {'type': 'string', 'minLength': 1, 'description': 'Self-contained assignment: action, necessary input facts, exact dates/values/IDs, constraints and expected result. Include relevant context explicitly; the worker cannot see the parent conversation. Group scheduling and number of runs belong to Router.'}, 'file_ids': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Available input attachment IDs needed by this assignment. Explain their use in task.'}}, 'required': ['agent_id', 'task']}}}, 'required': ['tasks']}}, 'callable': lite_parallel}
 
 async def downstream_data(adapter, user, metadata, state):
     group = state.get('parallel') or {}
@@ -1035,6 +1032,7 @@ async def downstream_data(adapter, user, metadata, state):
 """Prepare one model's payload and executable capabilities before publication."""
 from copy import deepcopy
 ENVELOPE = frozenset({'stream', 'stream_options', 'files'})
+WORKER_PROMPT = 'You are executing one assignment from Router. Router already manages the group and number of runs. Perform only your assigned task; do not organize other agents or repeat the assignment merely to satisfy a parent request about the number of runs. You receive the assignment and selected files, without the parent conversation. Report missing required inputs instead of inventing them.'
 
 def injections(request, user, metadata, model, messages, events):
     return {'__request__': request, '__user__': user.model_dump(), '__metadata__': metadata, '__model__': model, '__messages__': messages, '__files__': metadata.get('files', []), '__features__': {}, '__chat_id__': metadata.get('chat_id'), '__message_id__': metadata.get('message_id'), '__session_id__': metadata.get('session_id'), **events}
@@ -1064,6 +1062,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     draft = {key: deepcopy(value) for key, value in body.items() if key in ENVELOPE}
     draft.update(model=llm_id, messages=[deepcopy(m) for m in state['source'] if m.get('role') != 'system'], metadata=metadata)
     draft = await adapter.prompt_and_params(draft, selected, user, metadata)
+    if state.get('worker'):
+        draft['messages'].insert(0, {'role': 'system', 'content': WORKER_PROMPT})
     packet = await downstream_data(adapter, user, metadata, state) if target else None
     if packet:
         draft['files'] = deepcopy(metadata['files'])

@@ -47,7 +47,7 @@ async def completion(request: Request):
     # Advance the scripted provider independently of that filtered history.
     question = str(next(m['content'] for m in reversed(messages) if m['role'] == 'user'))
     assignment = next((m['content'] for m in messages if m['role'] == 'user'
-                       and str(m.get('content', '')).startswith('Assigned task ')), question)
+                       and str(m.get('content', '')).startswith(('Assigned task ', '[Задание '))), question)
     key = (model, str(assignment))
     phase = RUNS.get(key, 0)
     RUNS[key] = phase + 1

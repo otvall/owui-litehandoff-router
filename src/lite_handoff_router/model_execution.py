@@ -13,6 +13,12 @@ from .resources import ResourceScope
 from .terminals import terminal_binding, prepare_terminal_scope, is_terminal_tool
 
 ENVELOPE = frozenset({"stream", "stream_options", "files"})
+WORKER_PROMPT = (
+    "You are executing one assignment from Router. Router already manages the group and number of runs. "
+    "Perform only your assigned task; do not organize other agents or repeat the assignment merely "
+    "to satisfy a parent request about the number of runs. You receive the assignment and selected "
+    "files, without the parent conversation. Report missing required inputs instead of inventing them."
+)
 
 
 def injections(request, user, metadata, model, messages, events):
@@ -55,6 +61,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         deepcopy(m) for m in state["source"] if m.get("role") != "system"
     ], metadata=metadata)
     draft = await adapter.prompt_and_params(draft, selected, user, metadata)
+    if state.get("worker"):
+        draft["messages"].insert(0, {"role": "system", "content": WORKER_PROMPT})
     packet = await downstream_data(adapter, user, metadata, state) if target else None
     if packet:
         draft["files"] = deepcopy(metadata["files"])
