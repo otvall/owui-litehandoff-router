@@ -30,7 +30,7 @@ def save(value): gate.private_json(STATE,value)
 def disposable():
     assert ROOT==Path('/tmp/lhr-terminal-gate')
     assert os.environ.get('TERMINAL_DISPOSABLE')=='owui-router-test'
-    assert gate.api('/api/version')['version']=='0.12.3'
+    assert gate.api('/api/version')['version']=='0.12.5'
 
 
 def create(collection,form):

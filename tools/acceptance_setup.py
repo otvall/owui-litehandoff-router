@@ -39,7 +39,7 @@ def api(path, data=None, token=None, method=None):
 
 
 def setup():
-    assert api("/api/version")["version"] == "0.12.3"
+    assert api("/api/version")["version"] == "0.12.5"
     assert api("/api/v1/auths/")["role"] == "admin"
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
     if "original_config" not in state:

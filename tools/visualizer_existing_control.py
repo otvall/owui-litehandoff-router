@@ -15,7 +15,7 @@ import resource_acceptance as resources
 own=Path('/tmp/lhr-visualizer-gate')
 assert Path(__file__).resolve().parent == own
 assert os.environ.get('VISUALIZER_DISPOSABLE') == 'owui-router-test'
-assert gate.api('/api/version', token=(own/'admin-token').read_text().strip())['version'] == '0.12.3'
+assert gate.api('/api/version', token=(own/'admin-token').read_text().strip())['version'] == '0.12.5'
 descriptor = os.open(gate.TOKEN, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(descriptor, 'w') as output:
     output.write((own/'admin-token').read_text())

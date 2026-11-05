@@ -1,0 +1,160 @@
+{
+  "date": "2026-11-05",
+  "supported_owui": "0.12.5",
+  "environment": {
+    "system": "Darwin",
+    "machine": "arm64",
+    "python": "3.12.10",
+    "mcp": "2.3.0",
+    "httpx2": "2.16.0"
+  },
+  "results": {
+    "unit_export": {
+      "cases": 73,
+      "passed": true,
+      "skipped": 0
+    },
+    "native": {
+      "cases": 51,
+      "passed": true,
+      "skipped": 0
+    }
+  },
+  "openspec_strict": {
+    "passed": true,
+    "items": 11
+  },
+  "database": {
+    "isolated": true,
+    "fresh_full_run": true,
+    "data_root": "/tmp/lhr-alias-native-20261105"
+  },
+  "exports": {
+    "lite_handoff_router.py": "b6fa5c7f7d628e70add1b7c9e52671f2278c3f3007f179160b02dad94c450ef8",
+    "router_preparation.py": "d4ffc085a78f6b9a6feb72570b0bab178378389774eab5ff12d69e8789dafe27"
+  },
+  "native_sources_match_wheel_record": {
+    "open_webui/models/chats.py": "5f57bb0885e382d51ec988f2070e04673831f892425f87530cd049c0c6f9c9ac",
+    "open_webui/routers/skills.py": "159af9f446cc7701025aed860f1d7218666545b79aa4f23242b27e064df27322",
+    "open_webui/utils/mcp/client.py": "916d3457552b3b8959853239d9c61276d41834b21ce5ebbd6091429afa78b0a2",
+    "open_webui/utils/middleware.py": "9fcfcdaa2d658d51dc7de11dac41710b7fbaa8258de70c00f10d74eb53ae2bf5",
+    "open_webui/utils/models.py": "eb5cffd93f05379297dde2a7ecd47d9b8b29ae09fe83b142b172be793f57417d",
+    "open_webui/utils/payload.py": "c4fa395b43f0cdfd1fa95461749dfa283f0ae9b780acffd53e86046eed018fdb",
+    "open_webui/utils/plugin.py": "bb8ff91ce27f3f4340469f0e8f3c1e53b88b2acf3e0ad44899a6439ed8b47910",
+    "open_webui/utils/subagents.py": "6d72f73aaa4b73f31dcaec80485121ef10c8a54a4d35876ef6ded557de2f2f27",
+    "open_webui/utils/terminals.py": "40dbc20336f754a9d1bca480a4a8228b5d2928b632c855b5cc41cf7ed736fa25",
+    "open_webui/utils/tools.py": "be14b5ff9c7366861a4ca1e06cad9b8a7c335b242090e35af348be2069124b95"
+  },
+  "verified": [
+    "standalone exports and exact version guards",
+    "native streaming same-chat handoff",
+    "skills, tools, actor UserValves and owner ACL",
+    "real MCP 2.x loopback transport and cancellation",
+    "terminal schema, headers, refresh and cancellation contracts",
+    "native parallel API and worker binding",
+    "history converter and file access",
+    "automatic MCP close on native export request success, provider failure, stream failure and Stop; no manual close before assertion",
+    "session reuse across native generations and ordinary handoff",
+    "real MCP transport cleanup with parallel Stop/deadline and actor isolation",
+    "OpenAPI local/server and two-server collisions, reversed order and subset IDs, native executor and standalone Filter/Pipe loop",
+    "native MCP policy refresh, previously prepared and queued callable revocation, allow/block list/string/empty filters, no reconnect",
+    "one absolute close deadline includes partially opened connect/list_tool_specs clients, active SDK courtesy cancellation and concurrent disconnect",
+    "real MCP SDK shielded courtesy-cancel write blocked by fixture: session worker, native transport and active/queued waiters finish under the shared deadline",
+    "call cancelled during awaited permission check is not sent while its owner is still executing finally",
+    "direct adapter opening failure preserves the original error if bounded cleanup times out",
+    "long Tool operations and server namespaces produce unique public aliases at most 64 characters; repeated alias collisions preserve every resource; native dispatch keeps original operation and actor auth"
+  ],
+  "limitations": [
+    "generation transport and browser event delivery replaced in native chain tests",
+    "terminal backend mocked in native tests",
+    "full A+B to C HTTP acceptance not rerun on 0.12.5",
+    "browser and Inline Visualizer acceptance not rerun on 0.12.5",
+    "OpenAPI discovery and HTTP execution transport replaced with deterministic fixtures",
+    "parallel group cleanup uses real product group code and MCP transport with simulated native child dispatch"
+  ],
+  "production_modified": false,
+  "baseline_before_bugfixes": {
+    "results": {
+      "unit_export": {
+        "cases": 62,
+        "passed": true,
+        "skipped": 0
+      },
+      "native": {
+        "cases": 41,
+        "passed": true,
+        "skipped": 0
+      }
+    },
+    "exports": {
+      "lite_handoff_router.py": "28eb6b8b6753c42fc8a6263de102eacac1e96483ce64a09a5aff47076b8dc6a9",
+      "router_preparation.py": "9744d21e968e4539fbcd83b35ae2094ed52dc40972ca8b6ad096f3c53c925c2a"
+    },
+    "note": "Initial 0.12.5 migration, before fix-router-mcp-and-tool-dispatch"
+  },
+  "change": "fix-router-mcp-and-tool-dispatch",
+  "commands": [
+    "python3 tools/build_functions.py",
+    "PYTHONPATH=src /tmp/lhr-0125-venv/bin/python -m unittest discover -s tests -v",
+    "/tmp/lhr-0125-venv/bin/python tools/run_native_tests.py --data-root /tmp/lhr-alias-native-20261105",
+    "openspec validate --all --strict",
+    "git diff --check"
+  ],
+  "red_regressions": {
+    "owner_stop": "1 test failed with TimeoutError after 5 seconds: no disconnect on owner cancellation",
+    "openapi_and_mcp_policy": "2 native tests produced 4 assertion failures: duplicate schema names and forbidden MCP callable still executed",
+    "review_followup": "2 unit tests failed: cancelled write sent after policy check; close blocked waiting for active cancellation. Native opening test failed both connect and list_tool_specs subcases: request/session tasks exceeded the close budget.",
+    "long_tool_aliases": "2 unit tests failed; extended native collision test failed 4 subcases with alias lengths 75 and 72, above the 64-character limit."
+  },
+  "review_followup": {
+    "findings_fixed": [
+      "P1 total MCP close deadline during opening and active cancellation",
+      "P2 cancelled call sent after awaited policy check",
+      "P2 overlength OpenAPI public alias after namespacing"
+    ],
+    "previous_validation": {
+      "date": "2026-11-03",
+      "unit_export_cases": 69,
+      "native_cases": 48
+    },
+    "deadline_regressions": {
+      "budget_seconds": 0.05,
+      "reason": "Shortened production constant for deterministic timeout regressions; production budget remains 5 seconds."
+    },
+    "native_sources_rechecked_against_wheel_record": true,
+    "alias_validation": {
+      "previous_unit_export_cases": 71,
+      "previous_native_cases": 51,
+      "native_collision_subcases_added": 4,
+      "native_sources_rechecked_against_wheel_record": true
+    }
+  },
+  "pre_publish_validation": {
+    "date": "2026-11-05",
+    "unit_export": {
+      "cases": 73,
+      "passed": true,
+      "skipped": 0
+    },
+    "native": {
+      "cases": 51,
+      "passed": true,
+      "skipped": 0,
+      "data_root": "/tmp/lhr-publish-native-20261105"
+    },
+    "openspec_strict": {
+      "items": 9,
+      "passed": true,
+      "active_changes": 0
+    },
+    "exports_match_recorded_hashes": true,
+    "git_diff_check": true,
+    "commands": [
+      "python3 tools/build_functions.py",
+      "PYTHONPATH=src /tmp/lhr-0125-venv/bin/python -m unittest discover -s tests -v",
+      "/tmp/lhr-0125-venv/bin/python tools/run_native_tests.py --data-root /tmp/lhr-publish-native-20261105",
+      "openspec validate --all --strict",
+      "git diff --check"
+    ]
+  }
+}

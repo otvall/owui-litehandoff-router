@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 
 from fastapi import FastAPI
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 
 import acceptance_provider
 
-mcp = FastMCP("Router acceptance MCP", streamable_http_path="/", stateless_http=True, json_response=True)
+mcp = MCPServer("Router acceptance MCP")
 TRACE = Path(__file__).resolve().parent / "mcp-trace.jsonl"
 
 
@@ -26,7 +26,7 @@ async def mcp_echo(value: str, ctx: Context) -> str:
     return json.dumps(record)
 
 
-mcp_app = mcp.streamable_http_app()
+mcp_app = mcp.streamable_http_app(streamable_http_path="/", stateless_http=True, json_response=True)
 
 
 @asynccontextmanager

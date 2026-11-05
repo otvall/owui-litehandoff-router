@@ -38,7 +38,7 @@ def disposable():
     assert ROOT == Path('/tmp/lhr-visualizer-gate'), 'Use the disposable container directory'
     assert os.environ.get('VISUALIZER_DISPOSABLE') == 'owui-router-test'
     gate = transport()
-    assert gate.api('/api/version')['version'] == '0.12.3'
+    assert gate.api('/api/version')['version'] == '0.12.5'
     assert gate.api('/api/v1/auths/')['role'] == 'admin'
     return gate
 

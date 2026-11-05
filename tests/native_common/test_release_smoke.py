@@ -3,7 +3,7 @@ from importlib.metadata import PackageNotFoundError, version
 import unittest
 from uuid import uuid4
 
-from lite_handoff_router.owui_adapter import OWUIAdapter
+from lite_handoff_router.owui_adapter import OWUIAdapter, OWUI_VERSION
 
 
 class ReleaseSmokeTest(unittest.IsolatedAsyncioTestCase):
@@ -20,7 +20,7 @@ class ReleaseSmokeTest(unittest.IsolatedAsyncioTestCase):
             installed = version("open-webui")
         except PackageNotFoundError:
             installed = VERSION
-        self.assertEqual(installed, adapter.profile.version)
+        self.assertEqual(installed, OWUI_VERSION)
         for function in (models.check_model_access, tools.get_updated_tool_function,
                          tools.get_builtin_tools, filter.get_filter_functions,
                          filter.process_filter_functions, payload.apply_system_prompt_to_body):

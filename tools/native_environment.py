@@ -7,9 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def configure(name="helpers", owui_version="0.12.3", data_root=None):
+def configure(name="helpers", data_root=None):
     package = Path(find_spec("open_webui").origin).parent
-    data = Path(data_root or ROOT / ".native-data") / owui_version / name
+    data = Path(data_root or ROOT / ".native-data") / "0.12.5" / name
     data.mkdir(parents=True, exist_ok=True)
     os.environ.update({
         "DATA_DIR": str(data), "DATABASE_URL": "sqlite:///" + str(data / "webui.db"),

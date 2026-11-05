@@ -1,4 +1,4 @@
-"""Native terminal integration contracts on unchanged OWUI 0.12.3."""
+"""Native terminal integration contracts on unchanged OWUI 0.12.5."""
 
 import asyncio
 from copy import deepcopy
@@ -82,6 +82,8 @@ class NativeTerminalAdapterTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/workspace",loaded["run_command"]["spec"]["description"])
         self.assertEqual(loaded["run_command"]["tool_id"],"terminal:"+self.identifier)
         self.assertEqual(loaded["run_command"]["type"],"terminal")
+        self.assertEqual(set(loaded["display_file"]["spec"]["parameters"]["properties"]),
+                         {"path", "page", "inline"})
         with patch.object(tools,"ENABLE_TOOL_SERVERS",False):
             with self.assertRaisesRegex(ValueError,"unavailable"):
                 await self.load()

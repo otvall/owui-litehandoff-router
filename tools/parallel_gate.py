@@ -104,7 +104,7 @@ class Tools:
 
 def setup():
     assert ROOT == Path('/tmp/lhr-parallel-gate'), 'Run only in the disposable test directory'
-    assert api('/api/version')['version'] == '0.12.3'
+    assert api('/api/version')['version'] == '0.12.5'
     admin = api('/api/v1/auths/')
     assert admin['role'] == 'admin'
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
@@ -170,7 +170,7 @@ def setup():
             'config': {'enable': True, 'access_grants': grant},
             'info': {'id': 'pgate_' + letter, 'name': 'Parallel Gate MCP ' + letter.upper()}})
     api('/api/v1/configs/tool_servers', {'TOOL_SERVER_CONNECTIONS': connections})
-    print(json.dumps({'configured': True, 'owui': '0.12.3', 'user_id': state['user']['id'],
+    print(json.dumps({'configured': True, 'owui': '0.12.5', 'user_id': state['user']['id'],
                       'provider': 'loopback:8768', 'fixtures': ['agent-a-pgate', 'agent-b-pgate', 'other-pgate']}))
 
 

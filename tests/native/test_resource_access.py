@@ -279,3 +279,111 @@ class Tools:
                         await tools["identity"]["callable"]()
         finally:
             await Config.upsert({"tool_server.connections":previous})
+
+    async def test_openapi_aliases_dispatch_to_their_own_resources(self):
+        from open_webui.models.config import Config
+        from open_webui.models.models import Models
+        from open_webui.models.tools import Tools, ToolForm
+        from open_webui.utils.plugin import load_tool_module_by_id
+        from open_webui.utils.middleware import execute_tool_call
+        from open_webui.utils import tools as native
+
+        identifier='collision-'+self.suffix
+        content='''class Tools:
+    async def lookup(self, value: str, __user__: dict) -> str:
+        return "local:"+value+":"+__user__["id"]
+'''
+        module,_,_=await load_tool_module_by_id(identifier,content)
+        await Tools.insert_new_tool(self.agent_owner.id,ToolForm(id=identifier,name=identifier,content=content,meta={}),
+                                    native.get_tool_specs(module),module=module)
+        previous=await Config.get('tool_server.connections',[])
+        grants=[{'principal_type':'user','principal_id':self.agent_owner.id,'permission':'read'}]
+        servers=('one','two','s'*58,'t'*58)
+        connections=[{'type':'openapi','url':'http://'+s+'.test','auth_type':'session',
+                      'config':{'enable':True,'access_grants':grants}} for s in servers]
+        schemas=[{'id':s,'idx':i,'url':connections[i]['url'],'specs':[{'name':'lookup','parameters':{
+                     'type':'object','properties':{'value':{'type':'string'}},'required':['value']}}]} for i,s in enumerate(servers)]
+        self.request.state.token=SimpleNamespace(credentials='actor-'+self.one.id)
+        seen=[]
+
+        async def remote(**kwargs):
+            seen.append(kwargs)
+            return kwargs['url']+':'+kwargs['params']['value']
+
+        try:
+            await Config.upsert({'tool_server.connections':connections})
+            with patch.object(native,'get_tool_servers',AsyncMock(return_value=schemas)), \
+                 patch.object(native,'execute_tool_server',side_effect=remote):
+                cases=[('lookup',ids) for ids in ([identifier,'server:one'],['server:one','server:two'],
+                    ['server:two','server:one'],['server:one|lookup','server:two|lookup'],['server:one'])]
+                long_operation='x'*64
+                cases += [(long_operation,ids) for ids in (['server:one','server:two'],
+                    ['server:two','server:one'],['server:one|'+long_operation,'server:two|'+long_operation])]
+                cases.append(('lookup',['server:'+servers[2],'server:'+servers[3]]))
+                for operation,ids in cases:
+                    for schema in schemas:
+                        schema['specs'][0]['name']=operation
+                    baseline=json.dumps(schemas,sort_keys=True)
+                    with self.subTest(operation=operation,ids=ids):
+                        form=self.forms[self.model_ids[1]].model_copy(deep=True)
+                        form.meta=type(form.meta)(toolIds=ids,skillIds=[])
+                        await Models.update_model_by_id(form.id,form,user_id=self.agent_owner.id)
+                        draft,loaded=await self.prepare()
+                        names=[s['function']['name'] for s in draft['tools']]
+                        self.assertEqual(len(names),len(set(names)))
+                        self.assertEqual(set(names),set(loaded))
+                        for name,tool in loaded.items():
+                            self.assertEqual(name,tool['spec']['name'])
+                            self.assertLessEqual(len(name),64)
+                            self.assertRegex(name,r'^[a-zA-Z0-9_-]+$')
+                            params,result,*_=await execute_tool_call(draft,draft['metadata'],None,{
+                                'name':name,'call_id':uuid4().hex,'arguments':json.dumps({'value':'value'})})
+                            self.assertEqual(params,{'value':'value'})
+                            if tool['tool_id']==identifier:
+                                self.assertEqual(result,'local:value:'+self.one.id)
+                            else:
+                                server=tool['tool_id'].split(':')[-1].split('|')[0]
+                                self.assertEqual(result,'http://'+server+'.test:value')
+                                self.assertEqual(seen[-1]['name'],operation)
+                                self.assertEqual(seen[-1]['headers']['Authorization'],'Bearer actor-'+self.one.id)
+                        self.assertEqual(json.dumps(schemas,sort_keys=True),baseline)
+        finally:
+            await Config.upsert({'tool_server.connections':previous})
+
+    async def test_mcp_filter_changes_revoke_old_callable_and_refresh_catalog(self):
+        from open_webui.models.config import Config
+        from open_webui.utils import tools as native
+        from lite_handoff_router.capabilities import load_capabilities, close_mcp_sessions
+
+        server='filter-'+self.suffix
+        current={'type':'mcp','info':{'id':server},'url':'http://127.0.0.1/unused','auth_type':'none',
+                 'config':{'enable':True,'function_name_filter_list':'lookup','access_grants':[{
+                     'principal_type':'user','principal_id':self.agent_owner.id,'permission':'read'}]}}
+        calls,connects=[],[]
+        class Client:
+            def __init__(self,**kwargs): pass
+            async def connect(self,**kwargs): connects.append(True)
+            async def list_tool_specs(self):
+                return [{'name':n,'parameters':{'type':'object','properties':{}}} for n in ('lookup','other')]
+            async def call_tool(self,name,function_args): calls.append(name); return name
+            async def disconnect(self): pass
+        extra={'__user__':self.one.model_dump(),'__model__':{'id':self.model_ids[1]}}
+        previous=await Config.get('tool_server.connections',[])
+        try:
+            await Config.upsert({'tool_server.connections':[current]})
+            with patch.object(native,'MCPClient',Client):
+                first,_=await load_capabilities(self.adapter,self.request,['server:mcp:'+server],self.agent_owner,extra)
+                self.assertEqual(set(first),{server+'_lookup'})
+                current['config']['function_name_filter_list']='other'
+                await Config.upsert({'tool_server.connections':[current]})
+                # Check invoke-time revocation independently from re-preparation.
+                with self.assertRaisesRegex(ValueError,'function|permitted|allowed'):
+                    await first[server+'_lookup']['callable']()
+                self.assertEqual(calls,[])
+                second,_=await load_capabilities(self.adapter,self.request,['server:mcp:'+server],self.agent_owner,extra)
+                self.assertEqual(set(second),{server+'_other'})
+                self.assertEqual(await second[server+'_other']['callable'](),'other')
+                self.assertEqual(connects,[True])
+        finally:
+            await close_mcp_sessions(self.request.scope.get('lite_handoff_mcp',{}).values())
+            await Config.upsert({'tool_server.connections':previous})

@@ -8,7 +8,7 @@
 
 ### Requirement: A supported visualizer belongs to the selected agent
 
-Система SHALL поддерживать Inline Visualizer Tool и соответствующий Skill версии 2.2.3 в разрешённой Workspace Model работника на OWUI 0.12.3. Visualizer SHALL оставаться необязательным ресурсом выбранной модели. Неизменённая версия 2.1.1 SHALL NOT считаться подтверждённой совместимой конфигурацией.
+Система SHALL поддерживать Inline Visualizer Tool и соответствующий Skill версии 2.2.3 в разрешённой Workspace Model работника на единственном поддерживаемом релизе OWUI, заданном в `workspace-model-execution`. Visualizer SHALL оставаться необязательным ресурсом выбранной модели. Неизменённая версия 2.1.1 SHALL NOT считаться подтверждённой совместимой конфигурацией.
 
 #### Scenario: An allowed agent has the supported visualizer
 

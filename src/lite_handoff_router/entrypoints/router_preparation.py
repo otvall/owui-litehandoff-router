@@ -6,7 +6,6 @@ from ..owui_adapter import OWUIAdapter
 from ..registry import discover, ids
 from ..runtime import begin
 from ..parallel import prepare_worker
-from ..profiles import ROUTER_PROFILE
 
 AGENTS: dict[str, str] = {}
 
@@ -35,11 +34,11 @@ class Filter:
         adapter = OWUIAdapter()
         user = await adapter.user(__user__["id"])
         metadata = __metadata__ if __metadata__ is not None else body.setdefault("metadata", {})
-        if ROUTER_PROFILE.parallel and await prepare_worker(adapter, __request__, body, metadata, user):
+        if await prepare_worker(adapter, __request__, body, metadata, user):
             return body
         registry, diagnostics = await discover(adapter, __request__, user, AGENTS, body["model"])
         begin(__request__, body, metadata, user.id, registry, diagnostics,
               ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids),
-              max_parallel_tasks=self.valves.max_parallel_tasks if ROUTER_PROFILE.parallel else 0,
+              max_parallel_tasks=self.valves.max_parallel_tasks,
               parallel_timeout_seconds=self.valves.parallel_timeout_seconds)
         return body

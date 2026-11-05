@@ -1,267 +1,114 @@
 # OWUI compatibility
 
-Поддерживаются отдельные комплекты **Open WebUI 0.12.3 и 0.11.1**, Python 3.11/3.12. Все обращения
+Поддерживается только **Open WebUI 0.12.5**, Python 3.11/3.12. Все обращения
 к внутренним API находятся в `src/lite_handoff_router/owui_adapter.py`.
-Проверка версии выполняется до исполнения. Для pip используется package metadata,
-для официального Docker-образа без metadata — штатная `open_webui.env.VERSION`.
-Оба способа проверяют точное совпадение версии комплекта и сервера. Другие версии требуют отдельной проверки.
+Обе Functions проверяют точное совпадение версии до загрузки пользователей
+и ресурсов: package metadata для pip, `open_webui.env.VERSION` для официального
+source image. Другие версии отклоняются; автоматического выбора реализации нет.
 
-## Inline Visualizer (2026-10-23)
+`ReleaseProfile`, адаптер 0.11.1, отдельные legacy exports и выбор версии
+в builder/native runner удалены. Сохраняются три штатных Skill readers
+(`view_skill`, `read_skill_file`, `grep_skill_files`), обычный `lite_delegate`
+и параллельные задания с прежними defaults: 4 задания / 300 секунд.
+Отключение параллельных заданий через `max_parallel_tasks=0` сохраняется.
 
-Подтверждены Tool **2.2.3** и согласованный Skill из snapshot
-`bcc224db138b6901a8d4b99e7f8a8859bea5629b` Classic298/open-webui-plugins,
-OWUI 0.12.3 (Docker Python 3.11.17), Safari 27.0.1. URLs и SHA-256 —
-[manifest](../tools/fixtures/inline_visualizer/manifest.json). В Skill не требуется
-отдельное поле версии. Функция 2.2.3 — `visualize`; `render_visualization` 2.1.1
-используется только в отрицательном контроле и не считается совместимой.
+## Переход с 0.12.3
 
-**Runtime Router и оба exports не менялись.** Обновления Tool/Skill достаточно
-для проверенного child-chat пути. Native Tool возвращается за 5.02–5.05 с без
-callback основного чата; при отключённой настоящей сессии — за 0.011 с.
-Message-level embed сохраняется у child, модель продолжает HTML/SVG, родитель
-сохраняет прежние статусы/ссылки без embed работника. A+B и A+A сохраняют
-независимые визуализации.
+Проверены официальные [изменения 0.12.3 → 0.12.5](https://github.com/open-webui/open-webui/compare/v0.12.3...v0.12.5)
+и исходники установленного `open-webui==0.12.5`. Существенные изменения:
 
-Подтверждены открытие по штатной ссылке, loader→готовый SVG во время генерации,
-reload и новая socket-сессия того же пользователя без повторных model/Tool calls.
-Кнопка меняет DOM и цвет SVG. Viewer без прямых grants на ресурсы видит своё
-выполнение; постороннему child API отказывает, internal дети отсутствуют в истории.
+- Native MCP использует `mcp==2.3.0` и `httpx2`. Адаптер продолжает вызывать
+  штатный `MCPClient`; тестовые серверы переведены с `FastMCP` на `MCPServer`.
+  Реальный loopback transport проверяет actor auth, фильтрацию функций,
+  повторные вызовы, изоляцию двух пользователей и disconnect после отмены.
+- Helper `add_terminal_display_file_inline_param` удалён. Схема терминального
+  `display_file` теперь берётся через `get_builtin_tool_spec(display_file)`,
+  как в [native tools.py 0.12.5](https://github.com/open-webui/open-webui/blob/v0.12.5/backend/open_webui/utils/tools.py).
+  Параметр `page` по-прежнему не отправляется терминальному backend.
+- `execute_tool_call` принимает сохранённый `function_call` с полями `name`,
+  `arguments`, `call_id`. Native protocol tests используют этот формат;
+  provider Tool calls по-прежнему наблюдаются в их исходном формате.
+- Native `delegate` обновил передачу изображений, а сохранение Tool output
+  добавило поля времени. Проверены прежний grouped fixture против актуального
+  converter и streaming handoff через оба standalone exports.
 
-Условия: пользовательские iframe scripts/same-origin, Tool/Skill только у
-выбранного агента, локальный HTML/SVG, Valves `security_level=offline`,
-`chime=false`. Router не включает same-origin. Network Inspector показал только
-локальный OWUI и `about:srcdoc`; backend работал с подготовленным loopback provider.
-CDN, внешние данные, другие версии плагина/OWUI и браузеры не подтверждены.
+Новые встроенные возможности OWUI не добавляются в модель автоматически:
+набор ресурсов по-прежнему определяется настройками Router и Workspace Model.
+Права на модели проверяются от actor, права на Tools/Skills/подключения — от
+owner модели. UserValves, OAuth и обычные файлы сохраняют actor identity.
 
-Обычные A+B→C/A+A→C и следующий самостоятельный ответ Router повторно прошли.
-Отдельный Visualizer handoff в main сохранил embed; интерактивность проверена
-после загрузки сохранённого ответа. До reload live-main iframe оставался на
-loader; live-main rendering этим change не гарантируется. Проверка live-просмотра
-данного change относится к дочернему выполнению.
-Команды, IDs и раздельные backend/browser свидетельства —
-[acceptance.md](acceptance.md), [browser evidence](visualizer-browser-evidence.md)
-и [JSON](visualizer-evidence.json).
+## Автоматическая проверка 2026-11-05
 
-Обычные тесты и тесты двух самостоятельных exports:
-
-```sh
-PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
-```
-
-Проверки с настоящими импортированными helpers установленного OWUI:
+Изолированное окружение: macOS arm64, Python 3.12.10, официальный wheel
+`open-webui==0.12.5` с его зависимостями; отдельная свежая SQLite БД в `/tmp`.
+Исходники установленного OWUI не изменялись, рабочая БД не использовалась.
 
 ```sh
-.venv/bin/python tools/run_native_tests.py --owui-version 0.12.3
+python3 tools/build_functions.py
+PYTHONPATH=src /tmp/lhr-0125-venv/bin/python -m unittest discover -s tests -v
+/tmp/lhr-0125-venv/bin/python tools/run_native_tests.py --data-root /tmp/lhr-alias-native-20261105
 ```
 
-Runner создаёт отдельную БД `.native-data/`, использует frontend из wheel OWUI
-и отключает загрузку ML-моделей. Рабочую БД пользователя он не подключает.
-`tests/native/test_adapter.py` проверяет async-контракты, настоящее обновление
-callable и штатную подготовку промпта/параметров для повторного вызова.
-Это проверки helpers; сквозной native Tool loop и браузерная приёмка
-учитываются отдельно в `docs/acceptance.md`.
+Результат после `fix-router-mcp-and-tool-dispatch`: **73 unit/export и 51 native tests**, без пропусков. Проверены
+standalone import и guards, реальный native streaming Tool loop обычного
+handoff, промпты/параметры/inlet, приватные Tools/Skills и UserValves, refresh,
+MCP transport, терминальные контракты/отмена, native parallel API/worker binding,
+история и файловый доступ. Hashes установочных файлов и границы проверки —
+[owui-0125-validation.json](owui-0125-validation.json).
 
-Контракты сверены с [utils/tools.py](https://github.com/open-webui/open-webui/blob/v0.12.3/backend/open_webui/utils/tools.py),
-[utils/payload.py](https://github.com/open-webui/open-webui/blob/v0.12.3/backend/open_webui/utils/payload.py),
-[utils/chat.py](https://github.com/open-webui/open-webui/blob/v0.12.3/backend/open_webui/utils/chat.py)
-тега v0.12.3. Native continuation вызывает completion с
-`bypass_system_prompt=True`; Pipe самостоятельно готовит промпт выбранной модели
-и явно сохраняет этот флаг при вызове провайдера, чтобы не добавить его повторно.
+Native chain tests заменяют транспорт генерации и доставку browser events
+детерминированными fixtures. Терминальный backend в этой suite заменён
+проверяемыми вызовами. Полный HTTP сценарий A+B→C, настоящий shell backend,
+браузерная приёмка и Inline Visualizer на 0.12.5 в этом прогоне не выполнялись.
+В новых случаях native Tool loop использует оба rebuilt exports: проверены
+ordinary handoff, несколько MCP-продолжений, автоматическое закрытие после
+успеха/ошибок/Stop, смена фильтра и коллизии OpenAPI. MCP transport настоящий;
+OpenAPI discovery и HTTP transport заменены fixtures. Для проверки cleanup
+параллельной группы native child dispatch заменён тестовым адаптером, при этом
+код группы и MCP transport настоящие. Native parallel API и worker binding
+дополнительно проверены отдельными contracts.
 
-## Native parallel gate (2026-10-22)
+Старые HTTP/browser результаты не считаются подтверждением новой версии:
+[исторические проверки](compatibility-history.md), [приёмка](acceptance.md).
 
-Мост `subagents.delegate(background=False)` → публичная Router Pipe → заранее
-выбранный работник проверен в отдельном Docker OWUI 0.12.3. Прототип находится
-в `tools/parallel_gate*.py`; это экспериментальные Functions, не продуктовые
-exports. Он не меняет `CHAT_COMPLETION_HANDLER` и `app.state.MODELS`.
+## MCP lifecycle, фильтры и имена Tools
 
-У каждого дочернего запроса свой ASGI scope, registry callable и MCP-клиент.
-Переданный через серверный `chat_context` ticket связывается с владельцем,
-родительскими и дочерними chat/message IDs в Preparation. Router LLM в дочерних
-задачах не вызывается. A/B выполняют девять настоящих Tool calls с native
-continuations: три собственных Skill readers, три отказа чтения постороннего
-Skill, локальный lookup, MCP и создание файла. Промпты и температуры 0.2/0.4
-проверяет HTTP-провайдер; интервалы lookup перекрываются на 1.005 секунды.
+Сессия MCP живёт до окончания полного native запроса. Несколько генераций
+Router или handoff-агента сохраняют пригодное соединение. Stop, ошибка и
+окончательное завершение автоматически закрывают локальные MCP-задачи и native
+клиенты; активное ожидание и очередь завершаются без повторного исполнения.
+Общий бюджет закрытия — 5 секунд от первой остановки, включая незавершённое
+открытие и ожидание SDK cancellation. Отмена работника и disconnect выполняются
+параллельно под одним абсолютным deadline; повторный close не продлевает срок.
+Повторный cleanup безопасен; ошибка disconnect диагностируется. Завершение
+локального соединения не подтверждает отмену удалённого побочного действия.
 
-Native foreground summary ограничен настройкой `subagents.max_output`.
-Сборщик читает связанное сохранённое сообщение: получено 4211 символов вместо
-120 символов summary, оба CSV скачаны владельцем через native files endpoint.
-`done=False`, в том числе ожидание подтверждения, не считается успехом даже
-при строковом ответе native delegate «Sub-agent produced no output».
+Кэш транспорта хранит исходный каталог сервера. Текущий
+`function_name_filter_list` применяется при каждой подготовке и после ожидания
+в очереди перед отправкой операции. После асинхронной проверки прав повторно
+проверяются отмена вызова и остановка сессии: отменённый вызов не отправляется,
+даже пока владелец выполняет `finally`. Строка, список и правила allow/block
+обрабатываются штатным OWUI 0.12.5 helper. Отозванный callable не отправляет
+запрос; смена `identity` на `hidden` обновляет видимый набор без переподключения.
+Пустой фильтр сохраняет штатное разрешение, пустой разрешённый набор обязательного
+подключения вызывает ошибку подготовки. Owner ACL и actor auth проверяются
+независимо от фильтра и не расширяются этим механизмом.
 
-Поддерживаемый режим параллельного эксперимента — Tools approval `full`.
-Режим `ask` отклоняется до dispatch; принудительного переключения на `full`
-нет. Отдельная проверка с включённым native approval подтвердила сохранение
-паузы и отсутствие выполнения ожидающего Tool. Возобновление паузы через
-новый запрос не входит в выбранный протокол.
+При коллизиях local/OpenAPI и OpenAPI/OpenAPI Tools имя копии schema меняется
+вместе с ключом registry. Например, для `server:one` и `server:two` с операцией
+`lookup` доступны `lookup` и `server_two_lookup`. Вызов второго имени обращается
+к серверу `two` с исходной операцией `lookup` и авторизацией actor. Длинные
+публичные имена сокращаются до 64 символов с хешем полного кандидата; коллизия
+проверяется после сокращения, включая повторные коллизии. Исходное имя операции
+и аргументы сохраняются. Общие схемы
+native кэша не меняются; несовпадение имени и ключа после inlet вызывает отказ
+подготовки до публикации. Зарезервированные routing/Skill/terminal имена сохраняют
+прежние ограничения.
 
-Stop и общий deadline проверены отдельно при dispatch и внутри Tool.
-После каждого прогона нет native child tasks, tickets и открытых MCP-сессий.
-Cleanup должен переживать повторную отмену: native Stop может отменить и
-дочернюю задачу, и ожидающего родителя. Ticket отзывается до асинхронных
-операций; завершение cleanup ожидается через shield. Native события `source`
-для одного родительского сообщения сериализуются, иначе конкурентные записи
-могут потерять один источник.
+## Обновление установки
 
-Ссылки сохраняются native событием `source` с Markdown-документом
-`[Открыть выполнение](/c/<id>)`. В стандартном просмотре Markdown они кликабельны
-после Stop/reload. Относительный `source.url` сам по себе не становится ссылкой
-в заголовке citation modal OWUI. Никаких изменений frontend или отдельной папки
-не требуется. Браузерные наблюдения и команды — в [acceptance.md](acceptance.md).
-
-Для удалённого дочернего чата native API отказывает в чтении, а интерфейс
-возвращает на главную без уведомления. Это принятое поведение штатного
-[loadChat в OWUI 0.12.3](https://github.com/open-webui/open-webui/blob/v0.12.3/src/lib/components/chat/Chat.svelte#L2706-L2716),
-подтверждённое в Safari обычным пользователем. Просмотр не восстанавливает чат
-и не повторяет Tools; frontend-патч не нужен.
-
-## Условия продуктового lite_parallel
-
-Дополнение политики ресурсов сначала проверено отдельным native gate
-`tools/resource_access_gate.py` на собственной БД `.native-data/resource-access-gate`
-и временном loopback MCP. Два обычных пользователя без grants на ресурсы
-использовали приватный Tool с разными собственными UserValves, три Skill reader
-после настоящего refresh и MCP с пользовательскими OAuth/forwarded identity.
-Прямой доступ к ресурсам отклонён; отсутствие OAuth не использует токен владельца.
-Точки адаптации 0.12.3: ACL и UserValves в `get_tools`, ACL и построение заголовков
-в `connect_mcp_server`, отдельный контекст владельца только у Skill readers.
-Тем же gate повторно проверен продуктовый адаптер с настоящим MCP transport;
-установка двух exports с новой политикой подтверждена отдельно в отчёте приёмки.
-
-Актуальные два exports используют подтверждённый мост, без дополнительных
-runtime-пакетов. Параллельная работа требует сохранённого основного чата,
-пользователя с актуальными правами на модели, `subagents.enable=true`, режима Tools approval
-`full` и отключённого context compaction. Административные defaults — четыре
-задания и 300 секунд; `max_parallel_tasks=0` отключает новый Tool и сохраняет
-обычный handoff. Фактическая конкурентность зависит также от native лимитов
-OWUI и мощности провайдера. При неподдерживаемом режиме Tool не публикуется,
-а попытка старого callable всё равно проходит новую проверку условий.
-
-Общий deadline отменяет незавершённых работников. Cleanup ждёт освобождения
-ресурсов с отдельным ограничением 15 секунд, MCP graceful close — пять секунд
-с последующей отменой в задаче владельца SDK. Привязка chat metadata и запись
-ссылки тоже защищены от повторной отмены: нельзя оставлять незавершённую SQLite
-транзакцию при native каскадном удалении. Это проверено на SQLite WAL официального
-образа. Child tasks останавливаются штатным endpoint, включая pending approvals.
-
-Состояние и tickets существуют в процессе живого родительского запроса.
-Рестарт, фоновое resume и перенос группы между процессами не поддерживаются.
-Сохранённые чаты/результаты остаются доступными как данные. Контракт
-`lite_delegate` v2 не менялся. Ошибка или неполный исход группы запрещает handoff;
-контекстная ошибка C передаётся без пересказа, усечения и повторения работников.
-
-Ресурсы загружаются по правам владельца соответствующей Workspace Model,
-а UserValves, __user__, пользовательские OAuth/session auth и forwarded headers
-остаются у пользователя чата. Версионный адаптер использует native plugin loader,
-cache, административные Valves и binder локальных Tools, отдельно проверяя ACL
-владельца и загружая только UserValves исполнителя. Даже ошибочные UserValves
-владельца не влияют на запуск. Для MCP разделены ACL и построение заголовков
-`connect_mcp_server`; глобальные функции и каталоги OWUI не подменяются.
-OpenAPI серверные Tools используют native спецификации, фильтры имён,
-построение заголовков и исполнитель с тем же разделением ролей.
-
-Результаты: 44 обычные проверки, 25 native helpers/loop, HTTP A+B→C и A+A→C
-для двух групп, файлы, destination inlets, Stop/deadline/cascade delete,
-просмотр обеих групп в Safari. Все вызовы внутреннего OWUI API находятся в
-`owui_adapter.py`; native тест отдельно проверяет эту границу и version guard.
-
-## Выборочный серверный терминал
-
-Адаптер 0.12.3 использует `terminal_server.connections`, `get_terminal_servers`,
-`has_connection_access`, terminal context/URL helpers и `execute_tool_server`.
-ACL подключения проверяется у владельца модели с его группами. Для transport
-используются actor и native `build_tool_server_headers`; `X-User-Id` и chat/context
-заголовки закрепляются за фактическим исполнением. Поддержаны `bearer`, `session`,
-`system_oauth`, `none`; отсутствие обязательной пользовательской авторизации
-возвращает ошибку, а не токен владельца. Callables имеют native `type=terminal`
-и `tool_id=terminal:<id>`; серверные инструкции/cwd и terminal result schema
-сохраняются. Глобальные функции OWUI и его ACL не подменяются.
-
-`read_user_terminal` и `send_user_terminal_input` не предоставляются агентам.
-Терминальные Skills и AGENTS.md автоматически не импортируются: рабочие Skills
-по-прежнему определяет `meta.skillIds`. Терминальная панель пользователя для
-серверных команд не требуется. Прямые вызовы модели в обход Router этим
-механизмом не подготавливаются.
-
-Native проверки `tests/native/test_terminals.py` подтверждают сохранение metadata,
-owner/group ACL, запреты подключения/контекста, credentials/cookies двух actor,
-chat/context headers, исключение интерактивных Tools и native форму `display_file`.
-Эти native проверки transport используют управляемый ответ. Отдельный HTTP
-acceptance 2026-10-25 прошёл на двух exports с совместимым backend, реально
-выполняющим shell-команды и чтение файлов: handoff, смешанная группа, A+A,
-два пользователя, запрет прямого доступа, disabled/отозванное подключение и
-Stop/deadline/поздний результат. Это не stock Open Terminal и не production.
-
-В Safari через AX и UI раскрыты результаты основного и дочерних чатов без
-терминальной панели. Регрессия Inline Visualizer 2.2.3 сохранила child embed,
-показала SVG и отреагировала на клик `STATE=0`→`STATE=1` после включения штатных
-iframe prerequisites у одноразового пользователя. Native screenshot capture
-показывал пустую центральную область, поэтому пиксельная проверка не заявляется.
-Подробности и обезличенные hashes приведены в `docs/acceptance.md` и
-`docs/terminal-evidence.json`.
-
-## Профили 0.11.1 и 0.12.3
-
-Комплект фиксирует точную версию; metadata запроса, UserValves и сохранённые
-parallel Valves её не выбирают. Для 0.11.1 доступен обычный same-chat
-`lite_delegate`, локальные и серверные Tools, текстовые Skills (`view_skill`)
-и необязательный терминал модели. `lite_parallel` и worker bridge отключены
-до проверки native subagents, независимо от `subagents.enable` и лимитов.
-История и receipt не создают права на дочерний dispatch.
-
-Комплект 0.12.3 сохраняет три Skill readers, параллельные задания и defaults
-4 задания / 300 секунд. Legacy-комплект устанавливается отдельно; попытка
-запуска на другой версии завершается точной проверкой версии.
-
-
-
-### Серверные Tools и auth 0.11.1
-
-Локальные IDs берутся из Workspace Tools. OpenAPI принимает `server:<id>`
-или `server:openapi:<id>`, необязательный suffix `|function1,function2`
-пересекается с native `function_name_filter_list`. MCP использует
-`server:mcp:<info.id>`. Global gate 0.11.1 — `ENABLE_PLUGINS`, ACL подключения
-проверяется от owner отдельно от actor. Иерархия групп 0.12.3 не эмулируется.
-
-| Auth | OWUI 0.11.1 | Проверка |
-| --- | --- | --- |
-| `bearer` | Ключ серверного подключения | Native OpenAPI и terminal headers |
-| `session` | Token и cookies текущего request | Два actor; OpenAPI, terminal, реальный MCP token |
-| `system_oauth` | Native middleware helper для actor, доверенный `extra_params` | Native headers; реальный MCP с synthetic token fixture |
-| `none` | Без Authorization; cookies не копируются | Native OpenAPI и terminal headers |
-| `oauth_2.1` / `oauth_2.1_static` | Native OAuth manager для actor/server | Native OpenAPI manager fixture; реальный MCP `oauth_2.1` |
-
-Терминальная поверхность ограничена первыми четырьмя режимами. В 0.11.1
-cookies пересылаются только native режимами session/system OAuth;
-`forward_cookies` 0.12.3 этого поведения не меняет. Для system OAuth токен
-не читается из client metadata, аргументов Tools или owner. Отсутствующий
-обязательный actor auth отклоняет подготовку. Тесты с synthetic OAuth token
-проверяют связывание пользователя/транспорта, а не внешний authorization flow.
-
-Native suites: `tests/native_0111/test_servers_0111.py`,
-`tests/native_0111/test_terminals_0111.py`,
-`tests/native_common/test_mcp_transport.py`. Реальный MCP list/call/disconnect
-проверяется SDK каждой версии, включая error/Stop и отсутствие replay.
-У terminal `display_file` native 0.11.1 создаёт inline file result при
-`inline=true`; terminal path не становится обычным OWUI file ID.
-
-Stop отменяет ожидание и будущие команды. Backend-процесс и общий filesystem
-сохраняют native политику. Интерактивная terminal pane и копирование
-attachments в backend не добавляются; серверные Tools панели не публикуются.
-
-### Браузерная проверка 0.11.1 (2026-10-25)
-
-Safari, одноразовый actor `one`, `127.0.0.1:8767`. Открыты сохранённые чаты:
-terminal handoff `24b840bc-b64a-4051-8ae2-47760fe03d55` и обычный
-`9ee38e27-3055-431f-98a1-460233bb287f`. Через штатную кнопку подробностей раскрыты
-routing/working Skill, `lite_delegate`, local Tool, OpenAPI и настоящий MCP.
-В первом чате дополнительно раскрыты `run_command` с `printf`/`exit_code=0`
-и `read_file` с совпадающим `LEGACY_MARKER_a622093b-c1b5-43ff-85c9-7a60c488b961`.
-Второй чат не содержит terminal calls; local result показывает личный
-`region=one` и свой attachment, MCP result — `auth_matches_actor=true`.
-В первом сохранённом чате видно и следующее сообщение `LEGACY_GENERAL_OK`.
-
-Это наблюдения AX и подтверждённых UI-кликов без открытия terminal pane.
-Native screenshot capture возвращает пустую центральную область при наличии
-полного AX дерева и работающих кликов; пиксельная оценка не подтверждена.
-HTTP/SDK assertions и браузерные наблюдения учитываются раздельно.
+Обновите сервер до 0.12.5 и импортируйте согласованную пару
+`dist/router_preparation.py` / `dist/lite_handoff_router.py`, сохранив `AGENTS`
+и Valves. Оба файла содержат всё ядро; пакет Router на сервере не нужен.
+Обновление Functions не меняет БД и не выдаёт новые grants.
+Инструкции — [setup.md](setup.md).

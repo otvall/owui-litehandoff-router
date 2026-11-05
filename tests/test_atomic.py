@@ -13,6 +13,7 @@ from tests.test_router import User
 
 class AtomicAdapter(IsolatedAdapter):
     fail = False
+    bad_name = False
 
     async def tools(self, request, tool_ids, user, extra):
         tools = await super().tools(request, tool_ids, user, extra)
@@ -31,6 +32,8 @@ class AtomicAdapter(IsolatedAdapter):
         if self.fail:
             body["metadata"]["tools"].clear()
             raise ValueError("Destination filter failed")
+        if self.bad_name:
+            body["metadata"]["tools"]["a_tool"]["spec"]["name"] = "unregistered"
         return body
 
 
@@ -63,6 +66,13 @@ class AtomicTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(set(metadata["tools"]), old_names)
             self.assertNotIn("lite_handoff_preparing", request.scope)
             adapter.fail = False
+            adapter.bad_name = True
+            with self.assertRaisesRegex(ValueError, "schema name"):
+                await pipe.pipe(continuation, request, {"id": "u"}, metadata)
+            self.assertIsNone(state["active_agent"])
+            self.assertIs(metadata["tools"], old_tools)
+            self.assertEqual(set(metadata["tools"]), old_names)
+            adapter.bad_name = False
             await pipe.pipe(continuation, request, {"id": "u"}, metadata)
             observed = await metadata["tools"]["a_tool"]["callable"]()
             self.assertIn("INLET_EDIT", str(observed))

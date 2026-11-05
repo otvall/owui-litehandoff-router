@@ -1,7 +1,7 @@
 """Disposable native proof for owner authorization and execution-user identity.
 
 Checks the product adapter against real private resources and MCP transport.
-Run with the project's OWUI 0.12.3 virtualenv; it uses its own SQLite database
+Run with the project's OWUI 0.12.5 virtualenv; it uses its own SQLite database
 and an ephemeral loopback MCP endpoint, never the running OWUI database.
 """
 
@@ -36,7 +36,7 @@ async def private_mcp(request, server_id, owner, actor, extra):
 async def main():
     from fastapi import FastAPI
     from starlette.requests import Request
-    from mcp.server.fastmcp import FastMCP, Context
+    from mcp.server.mcpserver import MCPServer, Context
     import uvicorn
     from open_webui.models.users import Users
     from open_webui.models.models import Models, ModelForm
@@ -97,14 +97,14 @@ class Tools:
             result = json.loads(await call(id=skill_id, **args))
             assert "error" not in result, (name,result)
 
-    mcp = FastMCP("Resource identity", streamable_http_path="/", stateless_http=True, json_response=True)
+    mcp = MCPServer("Resource identity")
 
     @mcp.tool()
     async def identity(ctx: Context) -> str:
         headers = dict(ctx.request_context.request.headers)
         return json.dumps({"auth":headers.get("authorization"),"user":headers.get("x-openwebui-user-id")})
 
-    mcp_app = mcp.streamable_http_app()
+    mcp_app = mcp.streamable_http_app(streamable_http_path="/", stateless_http=True, json_response=True)
 
     @asynccontextmanager
     async def lifespan(app):

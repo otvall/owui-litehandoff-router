@@ -1,3 +1,3 @@
 """Skill-based same-chat routing. Runtime dependencies are supplied by OWUI."""
 
-SUPPORTED_OWUI = "0.12.3"
+from .owui_adapter import OWUI_VERSION as SUPPORTED_OWUI

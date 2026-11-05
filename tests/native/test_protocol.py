@@ -40,7 +40,8 @@ class NativeDelegateArgumentsTest(unittest.IsolatedAsyncioTestCase):
             calls.append({"id": "other-call", "type": "function", "function": {
                 "name": "view_skill", "arguments": '{"id":"route-a"}'}})
         observe_response({"choices": [{"message": {"tool_calls": calls}}]}, state, {"kind": "router"})
-        params, result, *_ = await execute_tool_call(body, metadata, None, call)
+        native_call = {"type": "function_call", "call_id": call["id"], **call["function"]}
+        params, result, *_ = await execute_tool_call(body, metadata, None, native_call)
         return params, result, state, body, call, tool
 
     async def test_native_filter_ignores_extra_task_and_handoff_uses_original_chat(self):

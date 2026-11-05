@@ -7,7 +7,8 @@ from ..owui_adapter import OWUIAdapter
 from ..protocol import confirmed_target
 from ..runtime import require, metadata_draft, publish
 from ..history import refresh_source
-from ..observation import observe_response, check_profile_calls
+from ..capabilities import close_mcp_sessions
+from ..observation import observe_response
 
 
 class Pipe:
@@ -22,7 +23,6 @@ class Pipe:
         adapter = OWUIAdapter()
         user = await adapter.user(__user__["id"])
         state = require(__request__, __metadata__, user.id)
-        check_profile_calls(state)
         refresh_source(state, body.get("messages", []))
         target = confirmed_target(state, state["source"])
         sessions_before = set(__request__.scope.get("lite_handoff_mcp", {}))
@@ -35,9 +35,7 @@ class Pipe:
             )
         except BaseException:
             sessions = __request__.scope.get("lite_handoff_mcp", {})
-            for key in list(sessions):
-                if key not in sessions_before:
-                    await sessions.pop(key).close()
+            await close_mcp_sessions(sessions.pop(key) for key in list(sessions) if key not in sessions_before)
             raise
         publish(__request__, __metadata__, draft["metadata"], tools)
         if target:

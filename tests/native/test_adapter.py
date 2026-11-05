@@ -14,17 +14,17 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
         from lite_handoff_router import owui_adapter
 
         with patch.object(owui_adapter, "version", side_effect=PackageNotFoundError("open-webui")):
-            with patch.object(env, "VERSION", "0.12.3"):
+            with patch.object(env, "VERSION", "0.12.5"):
                 OWUIAdapter()
             with patch.object(env, "VERSION", "0.12.4"):
-                with self.assertRaisesRegex(RuntimeError, "requires Open WebUI 0.12.3"):
+                with self.assertRaisesRegex(RuntimeError, "requires Open WebUI 0.12.5"):
                     OWUIAdapter()
 
     async def test_async_native_boundaries(self):
         from open_webui.utils import tools, models, filter, chat
         from open_webui.routers.skills import authorized_skill
 
-        self.assertEqual(version("open-webui"), "0.12.3")
+        self.assertEqual(version("open-webui"), "0.12.5")
         for function in (
             models.check_model_access, models.get_filtered_models, tools.get_tools,
             tools.connect_mcp_server, tools.get_builtin_tools,

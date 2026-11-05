@@ -21,15 +21,14 @@ class ExportsTest(unittest.TestCase):
     def test_reproducible_standalone_uploads(self):
         builder = self.builder()
         with tempfile.TemporaryDirectory() as folder:
-            for target in ('0.12.3', '0.11.1'):
-                self.check_target(builder, Path(folder) / target, target)
+            self.check_target(builder, Path(folder), '0.12.5')
 
     def check_target(self, builder, folder, target):
-        builder.build(folder, target)
+        builder.build(folder)
         paths = sorted(Path(folder).glob("*.py"))
         self.assertEqual([path.name for path in paths], ["lite_handoff_router.py", "router_preparation.py"])
         before = [hashlib.sha256(p.read_bytes()).hexdigest() for p in paths]
-        builder.build(folder, target)
+        builder.build(folder)
         self.assertEqual(before, [hashlib.sha256(p.read_bytes()).hexdigest() for p in paths])
         for path in paths:
             text = path.read_text()
@@ -43,24 +42,21 @@ class ExportsTest(unittest.TestCase):
             subprocess.run([
                 sys.executable, "-I", "-c",
                 "import runpy; d=runpy.run_path(" + repr(str(path)) + "); "
-                "assert d['ROUTER_PROFILE'].version == " + repr(target) + "; "
+                "assert d['OWUI_VERSION'] == " + repr(target) + "; "
                 "assert any(k in d for k in ('Filter','Pipe')); "
                 "from unittest.mock import patch; "
                 "p=patch.dict(d['OWUIAdapter'].__init__.__globals__, {'version': lambda _: " + repr(target) + "}); "
-                "p.start(); assert d['OWUIAdapter']().profile.version == " + repr(target),
+                "p.start(); d['OWUIAdapter']()",
             ], cwd=folder, env=env, check=True, capture_output=True)
 
-    def test_unknown_target_does_not_overwrite_or_create_output(self):
+    def test_checked_in_exports_match_source(self):
         builder = self.builder()
         with tempfile.TemporaryDirectory() as folder:
-            output = Path(folder) / 'output'
-            with self.assertRaisesRegex(ValueError, 'Unsupported'):
-                builder.build(output, '0.11.2')
-            self.assertFalse(output.exists())
-            builder.build(output)  # Preserve the original Python API default.
-            before = {p.name:p.read_bytes() for p in output.iterdir()}
-            with self.assertRaises(ValueError): builder.build(output, 'unknown')
-            self.assertEqual(before, {p.name:p.read_bytes() for p in output.iterdir()})
+            builder.build(folder)
+            for path in Path(folder).glob("*.py"):
+                self.assertEqual(path.read_bytes(), (ROOT / "dist" / path.name).read_bytes())
+                self.assertNotIn("ReleaseProfile", path.read_text())
+                self.assertNotIn("OWUI0111Adapter", path.read_text())
 
 
 if __name__ == "__main__":

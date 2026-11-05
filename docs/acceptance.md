@@ -1,4 +1,77 @@
+> Текущий комплект поддерживает только 0.12.5. В старых разделах сохранены
+> результаты для 0.12.3 и 0.11.1; они не подтверждают новую версию.
+
 # Фактическая приёмка
+
+## Длинные alias Tools — 2026-11-05, OWUI 0.12.5
+
+Закрыто оставшееся замечание: добавление namespace к длинному имени больше не
+публикует alias сверх лимита 64 символа. Общий helper сокращает имя с хешем,
+после чего регистрация проверяет коллизии; прежняя схема сокращения MCP сохранена.
+
+До исправления две unit-регрессии и четыре native subcase воспроизвели имена
+длиной 75 и 72 символа. После исправления прошли **73 unit/export и 51 native
+проверка**, без пропусков. Native executor подтвердил исходную серверную операцию,
+аргументы и actor auth для длинных имён, длинных server IDs, обратного порядка
+и subset IDs; unit-проверки покрыли повторные коллизии сокращённого alias.
+Оба exports пересобраны. Свежая БД — `/tmp/lhr-alias-native-20261105/0.12.5/helpers/webui.db`.
+OpenAPI HTTP/discovery заменены fixtures; внешний провайдер не вызывался.
+Актуальные результаты и SHA-256 — [owui-0125-validation.json](owui-0125-validation.json).
+
+## Исправления повторного ревью Spec — 2026-11-05, OWUI 0.12.5
+
+Закрыты оба замечания: общий deadline MCP теперь включает отмену открытия и
+активного вызова вместе с disconnect; после асинхронной проверки прав отменённая
+операция не отправляется. До исправления два unit-теста воспроизвели зависание
+закрытия и отправку отменённого `write`; native-тест воспроизвёл выход за бюджет
+в обоих случаях — `connect` и `list_tool_specs`.
+
+После исправления прошли **71 unit/export и 51 native проверка**, без пропусков,
+с финальными rebuilt exports. Native suite использовала неизменённый OWUI
+0.12.5 и свежую БД `/tmp/lhr-spec-review-fix-native-final-20261105/0.12.5/helpers/webui.db`.
+С настоящим SDK 2.3.0 проверена заблокированная служебная отправка при отмене:
+работник, native transport и active/queued futures завершаются по общему
+сроку. В timeout-регрессиях константа сокращена до 0.05 секунды; рабочий бюджет
+остаётся 5 секунд. Отдельно проверено сохранение исходной ошибки открытия при
+таймауте cleanup прямого вызова адаптера.
+
+Полный native Tool loop, изоляция пользователей и parallel cleanup повторно
+прошли. Границы замены generation/OpenAPI transport и browser events сохраняются,
+как описано ниже. Рабочая установка не изменялась; актуальные команды, hashes
+и результаты находятся в [owui-0125-validation.json](owui-0125-validation.json).
+
+## Router MCP и Tool dispatch — 2026-11-03, OWUI 0.12.5
+
+Реализован `fix-router-mcp-and-tool-dispatch`: **69 unit/export и 48 native
+проверок**, без пропусков. Неизменённый официальный wheel 0.12.5, Python
+3.12.10/macOS arm64, MCP 2.3.0/httpx2 2.16.0; полная native suite использовала
+свежую отдельную SQLite БД `/tmp/lhr-fix-native-full-1/0.12.5/helpers/webui.db`.
+
+До исправлений отдельные тесты подтвердили отсутствие MCP disconnect за
+5 секунд после Stop владельца, дублирование OpenAPI schema names и выполнение
+MCP callable после запрета функции. После исправлений прошли:
+
+- Native streaming Tool loop с обоими rebuilt exports: Router, обычный handoff,
+  два MCP-вызова через одно соединение, success/provider error/stream error/Stop
+  с автоматическим disconnect. Тест не вызывает close до проверки результата.
+- Коллизии local/OpenAPI и двух OpenAPI-серверов: уникальные имена, native
+  callable dispatch в правильный ресурс с исходным operation name и actor auth,
+  обратный порядок подключения, subset IDs и атомарный отказ неверной схемы.
+- Смена MCP-фильтра на открытом соединении: актуальный каталог, отказ старого
+  callable без отправки серверу, строка/list/allow-block/пустой фильтр, два actor
+  без прямых grants и отсутствие лишнего reconnect. Unit case проверяет также
+  отзыв разрешения во время ожидания операции в очереди.
+- Stop/deadline группы с реальными MCP-соединениями, повторный cleanup и
+  независимость сессий другого пользователя. Cleanup нескольких сессий
+  запускается одновременно; закрытие не повторяет удалённые операции.
+
+Generation transport, browser events и OpenAPI HTTP/discovery заменены
+детерминированными fixtures. Group cleanup использует настоящий код группы и
+MCP transport с тестовым native child dispatcher; native parallel API/worker
+binding проверены отдельно. Полный HTTP A+B→C, настоящий terminal shell,
+браузер и Inline Visualizer на 0.12.5 здесь не проверялись. Production не
+изменялась. Команды, точные версии, SHA-256 exports и проверка исходников OWUI
+по wheel RECORD — [owui-0125-validation.json](owui-0125-validation.json).
 
 ## Inline Visualizer: исходный gate 2026-10-23
 
@@ -515,6 +588,10 @@ viewer вышел из обеих сессий, тестовая вкладка 
 
 Последующее ревью выявило три P2 вне этой тестовой матрицы: OAuth/custom
 Authorization, schema fetch при global disable 0.11.1 и автоматическое закрытие
-зависшей MCP-сессии при Stop ordinary handoff. Задачи 3.1–3.2 открыты повторно;
-исторические успешные прогоны не означают готовность change к архиву.
-Подробности — [review.md](../openspec/changes/add-owui-0111-router/review.md).
+зависшей MCP-сессии при Stop ordinary handoff. На момент того ревью задачи 3.1–3.2 были открыты повторно;
+исторические успешные прогоны не означали готовность change к архиву.
+Подробности — [review.md](../openspec/changes/archive/2026-11-05-add-owui-0111-router/review.md).
+
+Закрытие 2026-11-05: `add-owui-0111-router` отменён / superseded решением
+поддерживать только OWUI 0.12.5. Две оставшиеся legacy-задачи отменены,
+а не выполнены; legacy delta specs в основные требования не переносились.
