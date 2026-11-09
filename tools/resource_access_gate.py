@@ -1,7 +1,7 @@
 """Disposable native proof for owner authorization and execution-user identity.
 
 Checks the product adapter against real private resources and MCP transport.
-Run with the project's OWUI 0.12.5 virtualenv; it uses its own SQLite database
+Run with the project's OWUI 0.13.0 virtualenv; it uses its own SQLite database
 and an ephemeral loopback MCP endpoint, never the running OWUI database.
 """
 

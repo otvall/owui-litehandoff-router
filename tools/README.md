@@ -1,11 +1,11 @@
-Build the two independent Functions for Open WebUI 0.12.5 with
+Build the two independent Functions for Open WebUI 0.13.0 with
 `python3 tools/build_functions.py`. Historical HTTP/browser reports in
 `docs/acceptance.md` describe their original releases; they do not establish
-0.12.5 acceptance.
+0.13.0 acceptance.
 
 ## Selective terminal acceptance
 
-Use only `owui-router-test` (OWUI 0.12.5). Copy `terminal_acceptance.py`,
+Use only `owui-router-test` (OWUI 0.13.0). Copy `terminal_acceptance.py`,
 `terminal_gate_provider.py`, `parallel_gate.py` and current `dist/` into
 `/tmp/lhr-terminal-gate/`. The provider binds container loopback 8770 and also
 provides a terminal-compatible backend: it actually executes subprocess shell
@@ -54,7 +54,7 @@ No build-time downloads are performed.
 
 ## Inline Visualizer native/browser gate
 
-Use only disposable `owui-router-test`, OWUI **0.12.5**. Prepare its existing
+Use only disposable `owui-router-test`, OWUI **0.13.0**. Prepare its existing
 OWUI dependencies and `fixtures/inline_visualizer/` before the offline run.
 The manifest records upstream URLs, commits, versions and SHA-256; every asset
 is checked before any HTTP request. A changed hash is rejected. The two current
@@ -279,7 +279,7 @@ container; no real external OAuth flow or authorization server is tested.
 A+B→C/A+A→C, same-chat reselection, own files, UserValves and execution-user MCP
 identity. Browser evidence remains a separate acceptance record.
 
-### Регрессия прежних product fixtures 0.12.5
+### Регрессия прежних product fixtures 0.13.0
 
 `compatibility_regression.py` запускается только из
 `/tmp/lhr-0123-compat-regression` с `ROUTER_COMPAT_DISPOSABLE=owui-router-test`.
@@ -297,3 +297,44 @@ OAuth sessions, проверяет A+B→C/A+A→C/files/fresh Router, зате�
 docker exec -e PYTHONPATH=/app/backend -e ROUTER_COMPAT_DISPOSABLE=owui-router-test \
   owui-router-test python /tmp/lhr-0123-compat-regression/compatibility_regression.py
 ```
+
+## Stock Open Terminal on 0.13.0
+
+The `stock` terminal action reuses the installed tgate models and routes their
+connections through a recording HTTP proxy to a real Open Terminal. Start a
+separate disposable Open Terminal first, pin its image digest, and set
+`OPEN_TERMINAL_API_KEY` to a disposable key. Do not mount production files or a
+Docker socket. This run used Open Terminal 0.17.6, slim image digest
+`sha256:379139c5e1860797b98362cf51c2d3c592a4764581f7c2ee41e02e381c5e96d3`.
+
+After the regular `check`, `controls` and `revocation`, stop only the fixture
+provider process. Restart `terminal_gate_provider.py` with
+`TG_STOCK_TERMINAL_URL` pointing to the real backend and
+`TG_STOCK_TERMINAL_KEY` containing its disposable key. Pass these as environment
+variables, keeping keys out of reports. The provider still binds loopback 8770.
+Run `terminal_acceptance.py stock`, followed by `controls` and `revocation`.
+It records `stock-terminal-evidence.json` separately from the subprocess fixture.
+`stock` changes only tgate connections; `restore` restores the original snapshot.
+Do not run other fixtures that replace OpenAI configuration concurrently.
+
+For the new disposable container `owui-router-0130-test`, replace the Docker
+container name in the commands above; retain `TERMINAL_DISPOSABLE=owui-router-test`
+as the fixture's fixed opt-in marker, and use `/tmp/lhr-terminal-gate` as before.
+A fresh instance needs a disposable admin and a mode-0600 `admin-token` issued
+by that instance. The old `bootstrap` is for the earlier prepared fixture owner;
+it does not create an admin on a fresh instance.
+
+The stock test uses absolute `/home/user/` paths, waits for asynchronous commands
+with `get_process_status`, reads the unique file, and calls `display_file`.
+Raw Open Terminal retains its shared runtime: the distinct A/C connection IDs
+are not separate filesystems. The recording proxy forwards real requests and
+results without replacing OpenAPI schemas, command execution or file reads.
+Session/user headers are recorded without auth tokens. Stock bearer auth is
+applied by the proxy; the separate native suite checks OWUI's bearer/session/
+system-OAuth header contracts. Do not claim a real external OAuth flow from this gate.
+For a text file, native `display_file` can return `displayed: false`; inspect
+its saved metadata and `read_file` contents rather than claiming an inline preview.
+
+OWUI release metadata is informational. Fixtures keep disposable-directory and
+admin safeguards, but do not reject a server by version number. The dependency
+pin in `requirements-native.txt` reproduces the tested environment only.

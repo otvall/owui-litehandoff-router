@@ -104,7 +104,6 @@ class Tools:
 
 def setup():
     assert ROOT == Path('/tmp/lhr-parallel-gate'), 'Run only in the disposable test directory'
-    assert api('/api/version')['version'] == '0.12.5'
     admin = api('/api/v1/auths/')
     assert admin['role'] == 'admin'
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
@@ -130,7 +129,11 @@ def setup():
             path = '/api/v1/models/model/update' if exists else '/api/v1/models/create'
         else:
             path = '/api/v1/' + collection + '/id/' + identifier + '/update' if exists else '/api/v1/' + collection + '/create'
-        return api(path, form)
+        result = api(path, form)
+        if collection == 'models' and exists and 'access_grants' in form:
+            return api('/api/v1/models/model/access/update',
+                       {'id': identifier, 'access_grants': form['access_grants']})
+        return result
 
     for letter in 'ab':
         identifier = 'pgate_lookup_' + letter
@@ -170,7 +173,7 @@ def setup():
             'config': {'enable': True, 'access_grants': grant},
             'info': {'id': 'pgate_' + letter, 'name': 'Parallel Gate MCP ' + letter.upper()}})
     api('/api/v1/configs/tool_servers', {'TOOL_SERVER_CONNECTIONS': connections})
-    print(json.dumps({'configured': True, 'owui': '0.12.5', 'user_id': state['user']['id'],
+    print(json.dumps({'configured': True, 'owui': api('/api/version')['version'], 'user_id': state['user']['id'],
                       'provider': 'loopback:8768', 'fixtures': ['agent-a-pgate', 'agent-b-pgate', 'other-pgate']}))
 
 
@@ -193,6 +196,8 @@ def install():
         'meta': {'filterIds': ['lhr_pgate_preparation'], 'toolIds': [], 'skillIds': []}, 'access_grants': grants}
     exists = any(row['id'] == 'lhr-pgate' for row in api('/api/v1/models/all'))
     api('/api/v1/models/model/update' if exists else '/api/v1/models/create', form)
+    if exists:
+        api('/api/v1/models/model/access/update', {'id': form['id'], 'access_grants': form['access_grants']})
     api('/api/models')
     print('Disposable gate Functions installed; LHR Functions unchanged')
 

@@ -1,4 +1,4 @@
-"""Real SDK transport and request-owned lifecycle, on Open WebUI 0.12.5."""
+"""Real SDK transport and request-owned lifecycle, on Open WebUI 0.13.0."""
 
 import asyncio
 from contextlib import ExitStack

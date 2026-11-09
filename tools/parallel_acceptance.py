@@ -51,7 +51,11 @@ def upsert(collection, identifier, form):
     exists = any(r['id'] == identifier for r in rows)
     path = ('/api/v1/models/model/update' if exists else '/api/v1/models/create') if collection == 'models' else (
         '/api/v1/' + collection + '/id/' + identifier + '/update' if exists else '/api/v1/' + collection + '/create')
-    return gate.api(path, form)
+    result = gate.api(path, form)
+    if collection == 'models' and exists and 'access_grants' in form:
+        return gate.api('/api/v1/models/model/access/update',
+                        {'id': identifier, 'access_grants': form['access_grants']})
+    return result
 
 
 def install():

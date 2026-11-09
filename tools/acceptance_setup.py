@@ -39,7 +39,6 @@ def api(path, data=None, token=None, method=None):
 
 
 def setup():
-    assert api("/api/version")["version"] == "0.12.5"
     assert api("/api/v1/auths/")["role"] == "admin"
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
     if "original_config" not in state:
@@ -111,6 +110,8 @@ class Tools:
         }, "meta": meta, "access_grants": grants(letters)}
         existing = next((item for item in api("/api/v1/models/all") if item["id"] == identifier), None)
         api("/api/v1/models/model/update" if existing else "/api/v1/models/create", form)
+        if existing:
+            api("/api/v1/models/model/access/update", {"id": identifier, "access_grants": form["access_grants"]})
 
     for identifier, letters in (("router-llm", "ab"), ("specialist-a", "a"), ("specialist-b", "b"), ("lhr_router", "ab")):
         model(identifier, identifier, None, "", 0.5, {"hidden": True}, letters)

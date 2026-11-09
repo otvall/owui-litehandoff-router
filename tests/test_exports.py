@@ -21,7 +21,7 @@ class ExportsTest(unittest.TestCase):
     def test_reproducible_standalone_uploads(self):
         builder = self.builder()
         with tempfile.TemporaryDirectory() as folder:
-            self.check_target(builder, Path(folder), '0.12.5')
+            self.check_target(builder, Path(folder), '0.13.0')
 
     def check_target(self, builder, folder, target):
         builder.build(folder)
@@ -33,7 +33,8 @@ class ExportsTest(unittest.TestCase):
         for path in paths:
             text = path.read_text()
             compile(text, str(path), "exec")
-            self.assertIn('required_open_webui_version: ' + target, text)
+            self.assertIn('developed_for_open_webui_version: ' + target, text)
+            self.assertNotIn('required_open_webui_version:', text)
             tree = ast.parse(text)
             definitions = [n.name for n in tree.body if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))]
             self.assertEqual(len(definitions), len(set(definitions)), 'inlined global symbols collide')
@@ -42,11 +43,9 @@ class ExportsTest(unittest.TestCase):
             subprocess.run([
                 sys.executable, "-I", "-c",
                 "import runpy; d=runpy.run_path(" + repr(str(path)) + "); "
-                "assert d['OWUI_VERSION'] == " + repr(target) + "; "
+                "assert 'OWUI_VERSION' not in d; "
                 "assert any(k in d for k in ('Filter','Pipe')); "
-                "from unittest.mock import patch; "
-                "p=patch.dict(d['OWUIAdapter'].__init__.__globals__, {'version': lambda _: " + repr(target) + "}); "
-                "p.start(); d['OWUIAdapter']()",
+                "d['OWUIAdapter']()",
             ], cwd=folder, env=env, check=True, capture_output=True)
 
     def test_checked_in_exports_match_source(self):

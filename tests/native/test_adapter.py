@@ -1,6 +1,5 @@
 import copy
 import inspect
-from importlib.metadata import PackageNotFoundError, version
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -9,22 +8,10 @@ from lite_handoff_router.owui_adapter import OWUIAdapter
 
 
 class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
-    async def test_official_source_image_version_without_distribution_metadata(self):
-        from open_webui import env
-        from lite_handoff_router import owui_adapter
-
-        with patch.object(owui_adapter, "version", side_effect=PackageNotFoundError("open-webui")):
-            with patch.object(env, "VERSION", "0.12.5"):
-                OWUIAdapter()
-            with patch.object(env, "VERSION", "0.12.4"):
-                with self.assertRaisesRegex(RuntimeError, "requires Open WebUI 0.12.5"):
-                    OWUIAdapter()
-
     async def test_async_native_boundaries(self):
         from open_webui.utils import tools, models, filter, chat
         from open_webui.routers.skills import authorized_skill
 
-        self.assertEqual(version("open-webui"), "0.12.5")
         for function in (
             models.check_model_access, models.get_filtered_models, tools.get_tools,
             tools.connect_mcp_server, tools.get_builtin_tools,

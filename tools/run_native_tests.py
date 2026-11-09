@@ -1,4 +1,4 @@
-"""Isolated contracts for the supported Open WebUI 0.12.5 release."""
+"""Isolated contracts for the supported Open WebUI 0.13.0 release."""
 
 import argparse
 from pathlib import Path
@@ -16,12 +16,11 @@ def main():
     args = parser.parse_args()
     configure(data_root=args.data_root)
     sys.path.insert(0, str(ROOT / "src"))
-    from lite_handoff_router.owui_adapter import OWUIAdapter, OWUI_VERSION
-    OWUIAdapter()  # Fail before discovery if the environment is wrong.
+    from open_webui.env import VERSION
     # Native startup/config owns migrations. Initialize it before fixture writes.
     from open_webui import config as native_config
 
-    print(f"Native target={OWUI_VERSION} suite={args.suite}", flush=True)
+    print(f"Native installed={VERSION} suite={args.suite}", flush=True)
     suite = unittest.TestSuite()
     suite.addTests(unittest.TestLoader().discover(str(ROOT / "tests/native_common")))
     if args.suite == "full":

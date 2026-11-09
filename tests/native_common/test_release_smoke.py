@@ -1,26 +1,19 @@
 import inspect
-from importlib.metadata import PackageNotFoundError, version
 import unittest
 from uuid import uuid4
 
-from lite_handoff_router.owui_adapter import OWUIAdapter, OWUI_VERSION
+from lite_handoff_router.owui_adapter import OWUIAdapter
 
 
 class ReleaseSmokeTest(unittest.IsolatedAsyncioTestCase):
     async def test_native_version_model_payload_filter_and_binder(self):
         from fastapi import FastAPI
         from starlette.requests import Request
-        from open_webui.env import VERSION
         from open_webui.models.models import Models, ModelForm
         from open_webui.models.users import Users
         from open_webui.utils import tools, models, payload, filter
 
         adapter = OWUIAdapter()
-        try:
-            installed = version("open-webui")
-        except PackageNotFoundError:
-            installed = VERSION
-        self.assertEqual(installed, OWUI_VERSION)
         for function in (models.check_model_access, tools.get_updated_tool_function,
                          tools.get_builtin_tools, filter.get_filter_functions,
                          filter.process_filter_functions, payload.apply_system_prompt_to_body):

@@ -1,16 +1,13 @@
-"""All imports of Open WebUI 0.12.5 internal APIs live behind this boundary."""
+"""All imports of Open WebUI internal APIs live behind this boundary."""
 
 import asyncio
 from copy import deepcopy
-from importlib.metadata import PackageNotFoundError, version
 import json
 import logging
 from uuid import UUID
 
 from .binding import bind_tool_context
 from .capabilities import MCP_CLOSE_TIMEOUT, bounded_tool_name
-
-OWUI_VERSION = "0.12.5"
 
 
 def as_dict(value):
@@ -26,18 +23,6 @@ def register_model_tool(registry, name, tool, namespace):
 
 
 class OWUIAdapter:
-    def __init__(self):
-        try:
-            installed_version = version("open-webui")
-        except PackageNotFoundError:
-            # The official Docker image runs the source checkout, not a wheel.
-            from open_webui.env import VERSION
-
-            installed_version = VERSION
-        if installed_version != OWUI_VERSION:
-            raise RuntimeError("Lite Handoff Router requires Open WebUI " + OWUI_VERSION
-                               + "; installed version: " + str(installed_version))
-
     async def user(self, user_id):
         from open_webui.models.users import Users
 
@@ -160,7 +145,7 @@ class OWUIAdapter:
             return
         row = await Tools.get_tool_by_id(identifier) if self.local_tools_enabled() else None
         groups = await self.member_groups(owner)
-        if row is None or not ((owner.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL)
+        if row is None or not row.is_active or not ((owner.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL)
                 or row.user_id == owner.id or await AccessGrants.has_access(
                     user_id=owner.id, resource_type="tool", resource_id=identifier,
                     permission="read", user_group_ids=groups)):

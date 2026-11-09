@@ -120,7 +120,8 @@ def check():
                 time.sleep(0.05)
             else:
                 raise AssertionError("Handoff gate was not reached")
-            api("/api/v1/models/model/update", {**saved_model, "access_grants": []})
+            api("/api/v1/models/model/access/update", {"id": saved_model["id"], "access_grants": []})
+            assert not api("/api/v1/models/model?id=agent-a-lhr")["access_grants"]
             release.touch()
             revoked_chat, _, message = future.result()
             assert "Tool execution failed" in str(message.get("error")), message
@@ -129,7 +130,8 @@ def check():
             result["revoked_before_handoff"] = {"chat_id": revoked_chat, "passed": True}
         finally:
             release.touch()
-            api("/api/v1/models/model/update", saved_model)
+            api("/api/v1/models/model/access/update", {
+                "id": saved_model["id"], "access_grants": saved_model["access_grants"]})
 
     Path(ROOT / "results.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
     print(json.dumps(result, ensure_ascii=False))

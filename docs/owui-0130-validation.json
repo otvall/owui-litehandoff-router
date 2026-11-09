@@ -1,0 +1,311 @@
+{
+  "date": "2026-11-09",
+  "owui": {
+    "version": "0.13.0",
+    "image": "openwebui/open-webui:0.13-slim",
+    "digest": "sha256:283efb20756785229a388bcd1e56a052f5284ae8c861717eed5eaaa3bba6b20a",
+    "commit": "c38885a1a737da4968f157092f304f3b5481d0bf",
+    "container": "owui-router-0130-test",
+    "source_modified": false
+  },
+  "open_terminal": {
+    "version": "0.17.6",
+    "image": "ghcr.io/open-webui/open-terminal:slim",
+    "digest": "sha256:379139c5e1860797b98362cf51c2d3c592a4764581f7c2ee41e02e381c5e96d3",
+    "container": "lhr-open-terminal-0130",
+    "type": "raw shared runtime",
+    "transport": "loopback recording HTTP proxy to real backend",
+    "auth": "proxy uses disposable bearer; native suite separately checks actor auth modes"
+  },
+  "unit": {
+    "passed": 76,
+    "skipped": 0
+  },
+  "native": {
+    "passed": 55,
+    "skipped": 0,
+    "data_root": "/tmp/lhr-native-0130-final/0.13.0/helpers"
+  },
+  "version_guard_before_migration": {
+    "both_exports_rejected": true,
+    "message": "requires Open WebUI 0.12.5; installed version: 0.13.0"
+  },
+  "regressions": {
+    "terminal_fingerprint_scope": "red then green in model preparation/continuations",
+    "disabled_local_tool": "native red then green, preparation and refreshed callable",
+    "model_grants_endpoint": "HTTP revocation red with config update; green with dedicated access update"
+  },
+  "terminal_fixture": {
+    "passed": true,
+    "backend": "terminal-compatible actual subprocess shell; not stock Open Terminal",
+    "reports": [
+      {
+        "chat_id": "14befd4d-67e3-4ac1-8229-890e3c42aff8",
+        "message_id": "baf34a90-c78f-4656-8ae8-5206a38050cd",
+        "user": "one",
+        "question": "handoff terminal run=baf34a90-c78f-4656-8ae8-5206a38050cd",
+        "children": [],
+        "content": "A_OK_7cd4591bbdd34f3e86f712efba957144"
+      },
+      {
+        "chat_id": "f5985b07-075d-4631-af82-ae1aa85901e6",
+        "message_id": "5113646e-a298-4132-ad03-f434458c4ade",
+        "user": "one",
+        "question": "mixed terminal run=5113646e-a298-4132-ad03-f434458c4ade",
+        "children": [
+          "fb9dd18c-3d2d-46a7-84b8-2a3165b5dc92",
+          "6bb23151-0e26-444e-875d-9251a2a88cc5"
+        ],
+        "content": "FINAL_OK C_OK_b61941d3ad3849cfb7694195b88fe6e0"
+      },
+      {
+        "chat_id": "796c53a5-6965-4153-bbd9-96f7590d3a90",
+        "message_id": "38c5c951-a789-450e-a020-30c20e80ddd0",
+        "user": "one",
+        "question": "same terminal run=38c5c951-a789-450e-a020-30c20e80ddd0",
+        "children": [
+          "b791edf2-2dff-41b3-a6de-c475837dc603",
+          "84d35245-5885-4ffe-934b-c380e1968399"
+        ],
+        "content": "FINAL_OK C_OK_8f79651f01fe429e962f8f76d2aa5f42"
+      },
+      {
+        "chat_id": "ac297d98-2691-422a-927a-3eb36b463370",
+        "message_id": "00197aa0-8d6d-4eeb-b5b5-ff98c66b6825",
+        "user": "one",
+        "question": "general terminal run=00197aa0-8d6d-4eeb-b5b5-ff98c66b6825",
+        "children": [],
+        "content": "GENERAL_OK"
+      },
+      {
+        "chat_id": "a18fd37f-dab1-4fba-a272-53ce4d559a1e",
+        "message_id": "ed914a2c-f284-4946-9585-3cfadf6a5f13",
+        "user": "one",
+        "question": "mixed concurrent run=ed914a2c-f284-4946-9585-3cfadf6a5f13",
+        "children": [
+          "31ffde7c-1d0d-4808-aed8-c0a2aaf38aee",
+          "0128205e-3be2-4f1b-9e28-8e98da05a928"
+        ],
+        "content": "FINAL_OK C_OK_854cb69736f04115b3b792ae59510820"
+      },
+      {
+        "chat_id": "5819b45c-3548-4add-8d3f-60b37e72a5ad",
+        "message_id": "9aa6a950-87f1-4938-ab38-ad13ae0df3f8",
+        "user": "two",
+        "question": "mixed concurrent run=9aa6a950-87f1-4938-ab38-ad13ae0df3f8",
+        "children": [
+          "1fa8cbab-69dd-4c7f-ad1a-b55bd4c5b006",
+          "1d2a0e93-478e-404a-a176-345cf581053d"
+        ],
+        "content": "FINAL_OK C_OK_a90b0ec162fa4946add969542e97e187"
+      }
+    ],
+    "commands": 10,
+    "production_modified": false
+  },
+  "stock_terminal": {
+    "passed": true,
+    "backend": "stock Open Terminal through recording HTTP proxy; raw shared runtime",
+    "reports": [
+      {
+        "chat_id": "d33062d7-ee37-4c31-8d79-ac28aee8d415",
+        "message_id": "5e648f0f-0b39-4bcd-aaec-77f14867bc1c",
+        "user": "one",
+        "question": "handoff terminal run=5e648f0f-0b39-4bcd-aaec-77f14867bc1c",
+        "children": [],
+        "content": "A_OK_bc4abd96382a4caa94d0f62625e1b6d0"
+      },
+      {
+        "chat_id": "280a288d-eb0d-4209-826d-e67b0f59f0bf",
+        "message_id": "509fe742-bc9d-4752-8f35-80a553c15b34",
+        "user": "one",
+        "question": "mixed terminal run=509fe742-bc9d-4752-8f35-80a553c15b34",
+        "children": [
+          "f355dc4d-e461-4c01-98ee-ba8273d734c5",
+          "17268d37-d1da-418a-92ed-6d0058d9caa3"
+        ],
+        "content": "FINAL_OK C_OK_3b16b4d895a24a709dfbed3344dcfb02"
+      },
+      {
+        "chat_id": "359a639b-bb8d-42a5-9cdb-dc912d81737a",
+        "message_id": "1004d4ed-c17d-4f96-8e1b-9aa1fb62e428",
+        "user": "one",
+        "question": "same terminal run=1004d4ed-c17d-4f96-8e1b-9aa1fb62e428",
+        "children": [
+          "c9d6744a-596a-4bc3-8754-179ce9b67516",
+          "d8489a28-5c93-49e7-aea7-ba9ef74dd9d5"
+        ],
+        "content": "FINAL_OK C_OK_fa768c9b71b34aa7be24fd3fc3743261"
+      },
+      {
+        "chat_id": "11110692-226b-4386-8447-c9e624d4e7d2",
+        "message_id": "e9cc862c-0b03-408e-8c8a-7f991fcb742a",
+        "user": "one",
+        "question": "general terminal run=e9cc862c-0b03-408e-8c8a-7f991fcb742a",
+        "children": [],
+        "content": "GENERAL_OK"
+      },
+      {
+        "chat_id": "0b3f9c5b-f407-422e-a46d-fc916a819790",
+        "message_id": "602764b1-9792-4ba8-94c3-933136669071",
+        "user": "one",
+        "question": "mixed concurrent run=602764b1-9792-4ba8-94c3-933136669071",
+        "children": [
+          "5d88f85b-941b-4e19-adbf-e2b360113b18",
+          "acda5b44-43fd-4698-98c1-92f1890a65e8"
+        ],
+        "content": "FINAL_OK C_OK_7bd208be0e984c3fb1253bd8fc2b3882"
+      },
+      {
+        "chat_id": "cc099ce0-f895-4642-9f4d-671eaab30bad",
+        "message_id": "baae7935-69b1-44b3-abe3-6b580a8c599f",
+        "user": "two",
+        "question": "mixed concurrent run=baae7935-69b1-44b3-abe3-6b580a8c599f",
+        "children": [
+          "2aa1f855-78b2-496d-990a-14c58ac33caa",
+          "4acd9166-d360-4e3f-b0f9-77d91e65cfd2"
+        ],
+        "content": "FINAL_OK C_OK_3b37a13d4c7f4f44a30427bea0a819a5"
+      }
+    ],
+    "commands": 10,
+    "production_modified": false
+  },
+  "stock_controls": {
+    "disabled_resource": true,
+    "lifecycle": [
+      {
+        "mode": "stop",
+        "chat_id": "a4011ad6-80c3-4426-a89d-ec0f7394322f",
+        "children": [
+          "7bba6fa9-a6fb-4564-bf4d-a945f4285da9",
+          "af5d6928-3839-4df5-bf7d-81e2502b8975"
+        ],
+        "no_replay": true
+      },
+      {
+        "mode": "deadline",
+        "chat_id": "e4d357ed-0cf5-4145-8172-e6d1c6e60ed2",
+        "children": [
+          "3ea26894-9cc6-4adc-8812-91ead989c464",
+          "e73989e7-ecad-4896-a1be-51e2bc8dce4f"
+        ],
+        "no_replay": true
+      }
+    ]
+  },
+  "stock_revocation": {
+    "owner_access_revoked": true,
+    "chat_id": "86fd2daa-7483-45f2-a5ee-930d37e214be",
+    "message_id": "ccff290a-ed2d-47a1-b719-1dcdeec6ebe5",
+    "user": "one",
+    "question": "mixed owner access revoked run=ccff290a-ed2d-47a1-b719-1dcdeec6ebe5",
+    "children": [
+      "9e7c0778-5647-4e7f-803b-9cf398b7b77c",
+      "80d147e8-1717-46ae-ae14-b80502f7d31c"
+    ]
+  },
+  "http_regression": {
+    "no_workspace_delegate_tool": true,
+    "parallel_a": {
+      "chat_id": "84d99b88-5019-411d-99e4-95699de69cec",
+      "answer_id": "0e3f4a88-6a58-422b-8785-a29ee00622fb",
+      "passed": true
+    },
+    "parallel_b": {
+      "chat_id": "2737dd3a-4f73-4ec1-811b-c4234484288b",
+      "answer_id": "86ac64eb-90a1-4ba6-a889-aa1dd2215259",
+      "passed": true
+    },
+    "personal_registry": true,
+    "explicit_empty_tools": true,
+    "a_b_router": {
+      "chat_id": "ad088db3-cf1e-4f59-a20e-484295ca9ab1",
+      "passed": true
+    },
+    "provider error": true,
+    "overflow": true,
+    "no_action_replay": true,
+    "required_resource_error": true,
+    "revoked_before_handoff": {
+      "chat_id": "1f7b5b7a-3fbd-4439-80c6-00fc3a0f8b7f",
+      "passed": true
+    }
+  },
+  "browser": {
+    "method": "Safari native accessibility via CUA",
+    "actor": "fixture one",
+    "main_chat": "f8003e25-7649-46e9-91d4-f3c8d58ca4f7",
+    "child_chat": "8208e843-745b-4364-a9ef-d111e901ac0e",
+    "main_marker": "FINAL_OK C_OK_30cfa9adbaa945949af31d8adb145f91",
+    "child_marker": "A_OK_b573b7d597084f15b4f59dcccec39962",
+    "file_result": {
+      "exists": true,
+      "source": "open_terminal",
+      "terminal_id": "tgate-terminal-a",
+      "session_id": "8208e843-745b-4364-a9ef-d111e901ac0e",
+      "displayed": false
+    },
+    "read_file_content_verified": true,
+    "main_and_child_reloaded": true,
+    "command_count_before": 35,
+    "command_count_after": 35,
+    "terminal_pane_opened": false,
+    "password_saved": false
+  },
+  "limits": [
+    "Deterministic LLM fixtures do not measure routing quality.",
+    "Raw terminal connection IDs A/C share one real filesystem.",
+    "Orchestrator context and session/system OAuth are native contract tests, not external services.",
+    "Text display_file metadata is visible; inline preview/download not established.",
+    "User production installation was not modified or reproduced."
+  ],
+  "exports": {
+    "lite_handoff_router.py": "0e6fbfba19b32fbb1921376f90e7f627de39cbb5f15550924f7e074c8eafa3ef",
+    "router_preparation.py": "04fbcb58035f958d9a7248ef1ff67e1715f6e74a1f9c6a8f293c9bfc2669436c"
+  },
+  "parallel_product": {
+    "passed": true,
+    "runs": [
+      {
+        "chat_id": "02364729-278d-49b1-9619-48ba04a7a645",
+        "message_id": "c3054600-045e-420f-a79e-73c73f59ca07",
+        "user_key": "user"
+      },
+      {
+        "chat_id": "a37995d3-619e-4f5e-b38e-cf3eca016018",
+        "message_id": "e4ec6686-b619-4e2a-bb82-c0f3175a3d38",
+        "user_key": "user2"
+      }
+    ],
+    "fresh_router_followup": "024950fb-1309-4ba3-ada2-b4555cf6d0fe"
+  },
+  "cleanup": {
+    "shared_configuration_restored": true,
+    "tool_server_snapshot_restored": true,
+    "new_disposable_containers_stopped": true,
+    "fixture_data_retained_in_stopped_container": true,
+    "previous_container_untouched": true
+  },
+  "metadata_only_followup": {
+    "runtime_version_guard": false,
+    "required_open_webui_version_present": false,
+    "metadata": {
+      "developed_for_open_webui_version": "0.13.0"
+    },
+    "unit": {
+      "passed": 76,
+      "skipped": 0
+    },
+    "native_smoke": {
+      "passed": 10,
+      "skipped": 0,
+      "installed_owui": "0.13.0",
+      "data_root": "/tmp/lhr-native-no-version-guard/helpers"
+    },
+    "exports": {
+      "lite_handoff_router.py": "ea00c8da97c92ee51ddd58071ddfdedf8b31b900009dc5e7e457d96d18973f4a",
+      "router_preparation.py": "eb6afbf162d9119e20c732cfcd474a8a5ed1b40fe7c86403f3e5702b614baf85"
+    }
+  }
+}

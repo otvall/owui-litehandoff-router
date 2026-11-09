@@ -30,7 +30,6 @@ def save(value): gate.private_json(STATE,value)
 def disposable():
     assert ROOT==Path('/tmp/lhr-terminal-gate')
     assert os.environ.get('TERMINAL_DISPOSABLE')=='owui-router-test'
-    assert gate.api('/api/version')['version']=='0.12.5'
 
 
 def create(collection,form):
@@ -184,6 +183,25 @@ def private_access():
         else: raise AssertionError('Direct terminal access unexpectedly allowed')
 
 
+def stock():
+    """Use the provider's recording proxy to a real Open Terminal, with raw shared context semantics."""
+    disposable()
+    ready()
+    before=gate.api('/api/v1/configs/terminal_servers')
+    for connection in before['TERMINAL_SERVER_CONNECTIONS']:
+        if connection['id'].startswith('tgate-terminal-'):
+            letter=connection['id'].removeprefix('tgate-terminal-')
+            connection['url']='http://127.0.0.1:8770/stock/'+letter
+            connection.pop('policy_id',None)
+            connection.pop('server_type',None)
+            connection['config'].pop('contexts',None)
+    gate.api('/api/v1/configs/terminal_servers',before)
+    value=state()
+    value['stock_terminal']='stock Open Terminal through recording HTTP proxy; raw shared runtime'
+    save(value)
+    check()
+
+
 def check():
     disposable()
     private_access()
@@ -206,7 +224,9 @@ def check():
         assert 'FINAL_OK' in report['message'].get('content','') and not report['message'].get('error'),report
     reports+=concurrent
     value=state()
-    command_records=[r for r in traces() if r['kind']=='command_start']
+    run_ids={r['run']['chat_id'] for r in reports}
+    run_ids.update(child for r in reports for child in r['children'])
+    command_records=[r for r in traces() if r['kind']=='command_start' and r.get('chat_id') in run_ids]
     for report in reports:
         run=report['run']
         ids={run['chat_id'],*report['children']}
@@ -214,12 +234,12 @@ def check():
         if 'general' in run['question']: assert not actual
         else:
             assert actual and all(r['actor']==value['users'][run['user']]['id'] for r in actual)
-            assert all(r['context']=='chat:'+r['chat_id'] for r in actual)
+            assert all(r['context']==(None if value.get('stock_terminal') else 'chat:'+r['chat_id']) for r in actual)
     private_access()
-    evidence={'passed':True,'backend':'terminal-compatible actual subprocess shell; not stock Open Terminal',
+    evidence={'passed':True,'backend':value.get('stock_terminal') or 'terminal-compatible actual subprocess shell; not stock Open Terminal',
               'reports':[{**r['run'],'children':r['children'],'content':r['message'].get('content','')} for r in reports],
               'commands':len(command_records),'production_modified':False}
-    gate.private_json(ROOT/'terminal-evidence.json',evidence)
+    gate.private_json(ROOT/('stock-terminal-evidence.json' if value.get('stock_terminal') else 'terminal-evidence.json'),evidence)
     print(json.dumps({'passed':True,'runs':len(reports),'commands':len(command_records)}))
 
 
@@ -376,7 +396,7 @@ def cleanup():
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['bootstrap','install','check','controls','revocation','visualizer','restore','cleanup'])
+    parser.add_argument('action',choices=['bootstrap','install','check','stock','controls','revocation','visualizer','restore','cleanup'])
     action=parser.parse_args().action
     if action=='bootstrap':
         assert ROOT==Path('/tmp/lhr-terminal-gate')

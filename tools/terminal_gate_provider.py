@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import time
 from uuid import uuid4
@@ -13,6 +14,7 @@ ROOT=Path(__file__).resolve().parent
 WORK=ROOT/'work'
 app=FastAPI()
 PHASES={}
+STOCK_URL=os.environ.get('TG_STOCK_TERMINAL_URL', '').rstrip('/')
 
 
 def trace(kind,**data):
@@ -91,7 +93,9 @@ Visualization regression complete.''')
             return reply(model,tool='tgate_echo')
         assert 'B_OK' in str(results['tgate_echo'])
         return reply(model,'B_OK')
-    assert {'run_command','read_file'} <= names and systems.count('TG_TERMINAL_GUIDE')==1
+    assert {'run_command','read_file'} <= names
+    if not STOCK_URL:
+        assert systems.count('TG_TERMINAL_GUIDE')==1
     if letter=='c':
         packet=next(m['content'] for m in messages if str(m.get('content','')).startswith('Confirmed parallel task results.'))
         assert 'A_OK' in packet
@@ -100,8 +104,13 @@ Visualization regression complete.''')
     phase,marker=PHASES.get(key,(0,letter.upper()+'_OK_'+uuid4().hex))
     if letter=='a' and 'view_skill' not in results:
         return reply(model,tool='view_skill',args={'id':'tgate-work-a'})
+    if STOCK_URL and phase==1:
+        process=json.loads(results.get('get_process_status') or results['run_command'])
+        if process.get('status')=='running':
+            await asyncio.sleep(.1)
+            return reply(model,tool='get_process_status',args={'process_id':process['id']})
     PHASES[key]=(phase+1,marker)
-    path=marker+'.txt'
+    path=('/home/user/' if STOCK_URL else '')+marker+'.txt'
     if phase==0:
         delay='sleep 5; ' if 'slow' in assignment and letter=='a' else ''
         return reply(model,tool='run_command',args={'command':delay+"printf '%s' '"+marker+"' > '"+path+"'"})
@@ -109,7 +118,34 @@ Visualization regression complete.''')
         assert 'run_command' in results and 'exit_code' in str(results['run_command'])
         return reply(model,tool='read_file',args={'path':path})
     assert marker in str(results.get('read_file'))
+    if STOCK_URL and phase==2:
+        return reply(model,tool='display_file',args={'path':path})
+    if STOCK_URL:
+        assert 'display_file' in results
     return reply(model,('FINAL_OK ' if letter=='c' else '')+marker)
+
+
+@app.api_route('/stock/{letter}/{path:path}',methods=['GET','POST'])
+async def stock_terminal(letter:str,path:str,request:Request):
+    """Record dispatch while forwarding unchanged requests to a real disposable Open Terminal."""
+    import aiohttp
+    from fastapi import HTTPException, Response
+    if not STOCK_URL:
+        raise HTTPException(404)
+    operation={'execute':'run_command','files/read':'read_file','files/display':'display_file'}.get(path)
+    who=identity(request,letter,operation)
+    if operation:
+        trace('command_start' if operation=='run_command' else operation,**who)
+    headers={k:v for k,v in request.headers.items() if k.lower() not in {'host','content-length','authorization'}}
+    headers['Authorization']='Bearer '+os.environ['TG_STOCK_TERMINAL_KEY']
+    async with aiohttp.ClientSession() as session:
+        async with session.request(request.method,STOCK_URL+'/'+path,params=request.query_params,
+                                   data=await request.body(),headers=headers,allow_redirects=False) as response:
+            content=await response.read()
+            if operation=='run_command':
+                trace('command_end',**who,status=response.status)
+            return Response(content,status_code=response.status,
+                            media_type=response.headers.get('Content-Type','application/json'))
 
 
 @app.get('/p/{letter}/openapi.json')

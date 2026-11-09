@@ -9,11 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def configure(name="helpers", data_root=None):
     package = Path(find_spec("open_webui").origin).parent
-    data = Path(data_root or ROOT / ".native-data") / "0.12.5" / name
+    # Wheels bundle frontend/; official source images keep it at /app/build.
+    frontend = next((path for path in (package / "frontend", package.parent.parent / "build")
+                     if (path / "static").is_dir()), package / "frontend")
+    data = Path(data_root or ROOT / ".native-data") / name
     data.mkdir(parents=True, exist_ok=True)
     os.environ.update({
         "DATA_DIR": str(data), "DATABASE_URL": "sqlite:///" + str(data / "webui.db"),
-        "FRONTEND_BUILD_DIR": str(package / "frontend"),
+        "FRONTEND_BUILD_DIR": str(frontend),
         "STATIC_DIR": str(data / "static"), "OFFLINE_MODE": "true",
         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
         "WEBUI_SECRET_KEY": "isolated-router-tests-only",

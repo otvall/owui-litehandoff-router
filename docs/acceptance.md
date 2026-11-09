@@ -1,7 +1,97 @@
-> Текущий комплект поддерживает только 0.12.5. В старых разделах сохранены
-> результаты для 0.12.3 и 0.11.1; они не подтверждают новую версию.
+> Текущий комплект нацелен только на 0.13.0. В старых разделах сохранены
+> результаты для 0.12.5, 0.12.3 и 0.11.1; они не подтверждают новую версию.
 
 # Фактическая приёмка
+
+## Уточнение: metadata версии без runtime guard — 2026-11-09
+
+По запросу пользователя удалены проверки номера OWUI из адаптера, обеих Functions,
+native runner и acceptance fixtures. В заголовках exports осталось информационное
+`developed_for_open_webui_version: 0.13.0`; обязательного поля
+`required_open_webui_version` больше нет. Native pin в requirements служит только
+воспроизводимости тестов. Никакой выбор release profile не добавлен.
+76 unit/export tests прошли; отдельная native smoke-проверка новой пары записана
+в `metadata_only_followup` файла [owui-0130-validation.json](owui-0130-validation.json).
+Ниже сохранён отчёт предыдущего этапа, где version guard ещё присутствовал;
+он не описывает текущие ограничения запуска.
+
+## Совместимость 0.13.0 и Open Terminal — 2026-11-09
+
+Изолированный контейнер `owui-router-0130-test`: официальный source image
+`openwebui/open-webui:0.13-slim`, runtime **0.13.0**, commit
+`c38885a1a737da4968f157092f304f3b5481d0bf`, Python 3.12. Образ закреплён digest
+`sha256:283efb20756785229a388bcd1e56a052f5284ae8c861717eed5eaaa3bba6b20a`.
+Рабочий остановленный контейнер прежней версии и production DB не использовались.
+Исходники OWUI не патчились; пакет Router в контейнер не устанавливался.
+Обе Functions загружены из автономных exports, только fixture `AGENTS` настроен отдельно.
+
+Настоящий Open Terminal **0.17.6**, отдельный `lhr-open-terminal-0130`, slim digest
+`sha256:379139c5e1860797b98362cf51c2d3c592a4764581f7c2ee41e02e381c5e96d3`.
+Использовались raw server connections A/C, `auth_type=none` до локального
+recording proxy, далее disposable bearer до backend. Подключения доступны только
+владельцу модели; actor имеет модельные grants. Proxy передаёт реальные OpenAPI,
+команды, файлы и результаты, записывает actor/chat IDs без токенов.
+Это **общий raw runtime**, разные terminal IDs не создают разные файловые системы.
+Orchestrator policy/chat contexts и bearer/session/system OAuth headers проверены
+отдельными native contracts, не настоящим внешним orchestrator/OAuth-сервисом.
+
+До переноса обе старые Functions отклоняли 0.13.0 с `requires Open WebUI 0.12.5`.
+После переноса version guard terminal dispatch заработал без переписывания
+протокола терминального адаптера. Дополнительно устранены две воспроизведённые
+регрессии: terminal skill fingerprints сохранялись при смене модели; новый
+`Tool.is_active` игнорировался при подготовке и refresh. Тесты сначала упали,
+после исправлений прошли. HTTP fixtures переведены на отдельный native endpoint
+изменения model access grants; config update на 0.13.0 больше не отзывает их.
+
+Результаты окончательных проверок:
+
+- **76 unit/export tests**, без пропусков: воспроизводимая сборка, точные guards
+  и автономный холодный импорт обоих файлов.
+- **55 native tests**, без пропусков: настоящие API 0.13.0, streaming handoff,
+  MCP transport/cleanup, Skills, owner/actor, refresh, terminal auth/file results,
+  disabled Tools, native parallel worker context и отмена. Native suite использует
+  отдельную БД `/tmp/lhr-native-0130-final/0.13.0/helpers/webui.db`.
+- Terminal-compatible subprocess fixture: **6 HTTP сценариев, 10 команд**.
+- Настоящий Open Terminal: **6 HTTP сценариев, 10 команд и 10 display_file**
+  в финальном прогоне: обычный handoff, A(T)+B(no terminal)→C(T2), A+A→C,
+  самостоятельный Router и два concurrent пользователя. Реально создаются и
+  читаются уникальные файлы, затем продолжается генерация. Terminal pane не открывалась.
+- На fixture backend и настоящем терминале прошли disabled connection,
+  Stop/deadline/late result controls и отзыв доступа владельца до dispatch.
+  Отмена не повторяет команды и не останавливает общий backend; поздний результат
+  не запускает финального агента. Grants и временные Valves восстановлены.
+- Общая HTTP-регрессия: реальный MCP, Tools/Skills, две группы, A→B→Router,
+  явный пустой `tools`, ошибки/overflow, отсутствие replay, missing resource и
+  реальный отзыв модели между discovery и handoff.
+- Продуктовые A+B→C и A+A→C: создаются CSV-файлы работников и HTML-файл финального
+  агента, проверены чтение файлов, доступ владельца/отказ постороннему и свежий Router.
+  Интервалы локальных Tools перекрываются примерно на 1 секунду.
+
+Browser-проверка проведена отдельно в Safari через native accessibility:
+основной чат `f8003e25-7649-46e9-91d4-f3c8d58ca4f7` показал `FINAL_OK C_OK_…`,
+source A открыл дочерний `8208e843-745b-4364-a9ef-d111e901ac0e` с `A_OK_…`.
+В подробностях `read_file` виден правильный уникальный маркер, `display_file`
+показывает `exists=true`, `source=open_terminal`, terminal ID A и session ID
+дочернего чата. Основной и дочерний чаты повторно загружены: ответ сохранился,
+счётчик команд до/после просмотра — **35/35** (накопительный счётчик на тот момент).
+Пароль в Safari не сохранялся. Для `.txt` native возвращает `displayed=false`:
+подтверждены сохранённые metadata/содержимое, inline preview и скачивание не заявляются.
+
+Команды (native выполняется внутри нового контейнера с checkout-копией в `/tmp`):
+
+```sh
+python3 tools/build_functions.py
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
+docker exec -w /tmp/lhr-project -e PYTHONPATH=/app/backend owui-router-0130-test python tools/run_native_tests.py --suite full --data-root /tmp/lhr-native-0130-final
+```
+
+HTTP commands и подготовка stock backend описаны в [tools/README.md](../tools/README.md).
+Fixtures запускаются последовательно: они временно меняют provider config.
+Версии, SHA-256 exports, обезличенные результаты и browser-наблюдения находятся в
+[owui-0130-validation.json](owui-0130-validation.json). Общие настройки и список Tool servers восстановлены, два созданных
+контейнера остановлены; тестовые данные сохранены в них для аудита. Исторические
+отчёты ниже не переписывались. Детерминированный provider проверяет инфраструктуру, не качество
+маршрутизации LLM; пользовательская production-установка этим прогоном не проверена.
 
 ## Длинные alias Tools — 2026-11-05, OWUI 0.12.5
 

@@ -1,4 +1,4 @@
-"""Recheck prepared 0.12.5 product fixtures with new exports, then restore them."""
+"""Recheck prepared 0.13.0 product fixtures with new exports, then restore them."""
 
 import ast
 import asyncio
@@ -18,7 +18,6 @@ import parallel_acceptance as product
 gate.TOKEN=ROOT/'admin-token'
 gate.STATE=ROOT/'parallel-private-state.json'
 product.ROOT=ROOT
-assert gate.api('/api/version')['version']=='0.12.5'
 def cleanup_reports(state):
     # Remove only chats and artifacts recorded in this private directory. Existing
     # prepared models/users/Tools/Skills/MCP services are baseline fixtures.

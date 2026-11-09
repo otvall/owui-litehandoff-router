@@ -50,7 +50,9 @@ class TerminalExecutionTest(unittest.IsolatedAsyncioTestCase):
                    {"role":"user","content":"task"}],"terminal_id":"client"}
         self.metadata={"chat_id":"main","message_id":"message","terminal_id":"parent",
                        "tool_servers":[{"is_terminal":True,"url":"browser-terminal"}],
-                       "terminal_skills":["foreign"]}
+                       "terminal_skills":["foreign"],
+                       "chat_context":{"terminal_skill_fingerprints":{"parent":{"skill":"hash"}},
+                                       "unrelated":"preserved"}}
         self.state=begin(self.request,self.body,self.metadata,"u",{},[],["base"],[])
 
     async def prepare(self,target):
@@ -65,6 +67,8 @@ class TerminalExecutionTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("CLIENT_TERMINAL_GUIDE",str(draft["messages"]))
             self.assertNotIn("browser-terminal",str(draft["metadata"].get("tool_servers")))
             self.assertNotIn("terminal_skills",draft["metadata"])
+            self.assertNotIn("terminal_skill_fingerprints",draft["metadata"]["chat_context"])
+            self.assertEqual(draft["metadata"]["chat_context"]["unrelated"],"preserved")
             for guide in ("GUIDE_t1","GUIDE_t2"):
                 self.assertEqual(str(draft["messages"]).count(guide),int(guide=="GUIDE_"+str(terminal)))
             publish(self.request,self.metadata,draft["metadata"],tools)

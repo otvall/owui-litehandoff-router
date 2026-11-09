@@ -196,6 +196,23 @@ class Tools:
         with self.assertRaisesRegex(ValueError,"owner is unavailable"):
             await self.prepare()
 
+    async def test_disabled_tool_blocks_preparation_and_prepared_callable_after_refresh(self):
+        from open_webui.models.tools import Tools
+
+        _, prepared = await self.prepare()
+        tool_id = self.tool_ids[1]
+        await Tools.toggle_tool_by_id(tool_id)
+        try:
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                await self.prepare()
+            refreshed = await self.adapter.refresh(prepared["identity"]["callable"], {
+                "__user__": self.one.model_dump(), "__messages__": [], "__files__": [],
+            })
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                await refreshed()
+        finally:
+            await Tools.toggle_tool_by_id(tool_id)
+
     async def test_model_revocation_blocks_existing_tool_and_client_owner_is_ignored(self):
         from open_webui.models.access_grants import AccessGrants
 

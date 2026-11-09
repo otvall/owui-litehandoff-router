@@ -25,13 +25,13 @@ def is_terminal_tool(tool):
 
 
 def prepare_terminal_scope(metadata, identifier):
-    for key in ("terminal_id", "terminal_skills"):
+    for key in ("terminal_id", "terminal_skills", "terminal_skill_fingerprints"):
         metadata.pop(key, None)
     if isinstance(metadata.get("tool_servers"), list):
         metadata["tool_servers"] = [s for s in metadata["tool_servers"]
                                     if not isinstance(s, dict) or s.get("is_terminal") is not True]
     context = dict(metadata.get("chat_context") or {})
-    for key in ("terminal_id", "terminal_skills"):
+    for key in ("terminal_id", "terminal_skills", "terminal_skill_fingerprints"):
         context.pop(key, None)
     if "chat_context" in metadata:
         metadata["chat_context"] = context

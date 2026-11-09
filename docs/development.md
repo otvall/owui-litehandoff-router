@@ -1,6 +1,6 @@
 # Development
 
-Целевая среда: Open WebUI **0.12.5**, Python 3.11 или 3.12. Runtime
+Целевая среда: Open WebUI **0.13.0**, Python 3.11 или 3.12. Runtime
 использует стандартную библиотеку и библиотеки установленного OWUI;
 дополнительный сервис и библиотеки оркестрации не требуются.
 
@@ -22,8 +22,8 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 Это установка пакета для разработки. Для сервера OWUI используются два
 самостоятельных файла `dist/`, которым этот пакет и checkout не нужны.
 
-Native runner использует отдельную БД `.native-data/0.12.5/helpers/webui.db`.
-Он проверяет точную native версию до discovery и завершает проверку ошибкой
+Native runner использует отдельную БД `.native-data/helpers/webui.db`.
+Он выводит фактическую версию установленного OWUI и завершает проверку ошибкой
 при пропущенных cases:
 
 ```sh
@@ -44,9 +44,9 @@ python3 tools/build_functions.py
 python3 tools/build_functions.py --destination /tmp/lhr-exports
 ```
 
-В destination — ровно две `.py` Functions для 0.12.5. Python API —
+В destination — ровно две `.py` Functions для 0.13.0. Python API —
 `build(destination=None)`. Выбора версии, `ReleaseProfile` и legacy exports нет.
 Unit export checks проверяют воспроизводимость, совпадение `dist/` с исходниками,
 отсутствие конфликтующих inlined symbols и холодный импорт без checkout.
-Native export checks загружают собранные файлы с настоящими API OWUI 0.12.5.
+Native export checks загружают собранные файлы с настоящими API OWUI 0.13.0.
 Установка и rollback описаны в [setup.md](setup.md).

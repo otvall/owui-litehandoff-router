@@ -38,7 +38,6 @@ def disposable():
     assert ROOT == Path('/tmp/lhr-visualizer-gate'), 'Use the disposable container directory'
     assert os.environ.get('VISUALIZER_DISPOSABLE') == 'owui-router-test'
     gate = transport()
-    assert gate.api('/api/version')['version'] == '0.12.5'
     assert gate.api('/api/v1/auths/')['role'] == 'admin'
     return gate
 
@@ -73,7 +72,11 @@ def upsert(collection, identifier, form, token=None):
         path = '/api/v1/models/model/update' if exists else '/api/v1/models/create'
     else:
         path = f'/api/v1/{collection}/id/{identifier}/update' if exists else f'/api/v1/{collection}/create'
-    return gate.api(path, form, token=token)
+    result = gate.api(path, form, token=token)
+    if collection == 'models' and exists and 'access_grants' in form:
+        return gate.api('/api/v1/models/model/access/update',
+                        {'id': identifier, 'access_grants': form['access_grants']}, token=token)
+    return result
 
 
 # Test boundary only. The original source above this suffix remains byte-identical.
