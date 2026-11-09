@@ -74,6 +74,21 @@ class TerminalExecutionTest(unittest.IsolatedAsyncioTestCase):
             publish(self.request,self.metadata,draft["metadata"],tools)
         self.assertEqual(self.adapter.executions,[])
 
+    async def test_native_card_supplies_tools_and_disabling_revokes_existing_callable(self):
+        meta=self.request.app.state.MODELS["a"]["info"]["meta"]
+        meta.pop("lite_handoff")
+        meta.update(terminalId="t1",capabilities={"terminal":True})
+        draft,tools=await self.prepare("a")
+        self.assertEqual(draft["metadata"]["terminal_id"],"t1")
+        self.assertEqual(await tools["run_command"]["callable"](),"t1")
+        meta["capabilities"]["terminal"]=False
+        with self.assertRaisesRegex(ValueError,"detached"):
+            await tools["run_command"]["callable"]()
+        draft,tools=await self.prepare("a")
+        self.assertNotIn("terminal_id",draft["metadata"])
+        self.assertNotIn("run_command",tools)
+        self.assertEqual(len(self.adapter.executions),1)
+
     async def test_current_scope_blocks_stale_callable_and_other_tools_keep_working(self):
         draft,tools=await self.prepare("a")
         self.assertEqual(await tools["a_tool"]["callable"](),"result")

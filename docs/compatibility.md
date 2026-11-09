@@ -12,6 +12,13 @@
 и параллельные задания с прежними defaults: 4 задания / 300 секунд.
 Отключение параллельных заданий через `max_parallel_tasks=0` сохраняется.
 
+## Терминал из карточки модели
+
+Агент получает терминал из штатного `meta.terminalId` (Default terminal).
+Выключение Terminal отключает эту привязку. Legacy `meta.lite_handoff.terminal_id`
+сохраняется только как fallback, если `terminalId` отсутствует. Проверки владельца,
+actor identity и отзыв подготовленных callable сохраняются.
+
 ## Переход с 0.12.5 на 0.13.0
 
 Metadata обоих exports указывает версию разработки. Native dependency pin

@@ -307,5 +307,24 @@
       "lite_handoff_router.py": "ea00c8da97c92ee51ddd58071ddfdedf8b31b900009dc5e7e457d96d18973f4a",
       "router_preparation.py": "eb6afbf162d9119e20c732cfcd474a8a5ed1b40fe7c86403f3e5702b614baf85"
     }
+  },
+  "native_model_card_followup": {
+    "unit": {
+      "passed": 79,
+      "skipped": 0
+    },
+    "native_full": {
+      "passed": 55,
+      "skipped": 0,
+      "installed_owui": "0.13.0",
+      "data_root": "/tmp/lhr-native-card-check/helpers"
+    },
+    "regression": "Native terminalId was ignored before fix; binding, disable/revocation and native ModelMeta roundtrip pass after fix",
+    "precedence": "native terminalId, including empty selection, takes precedence over legacy binding",
+    "exports": {
+      "lite_handoff_router.py": "70179664ca163e9937070d5cb0177f89a5763b1eb978a430758777b20ad4bc7f",
+      "router_preparation.py": "7762ec9566840b6a48d93d32072764ab910cdc4ebe1edb7db109ebc3e7ab905f"
+    },
+    "limits": "New model-card wiring verified by unit/native tests; no additional real-LLM or browser run for this follow-up."
   }
 }

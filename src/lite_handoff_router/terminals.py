@@ -3,6 +3,15 @@
 
 def terminal_binding(model):
     meta = model.get("info", {}).get("meta") or {}
+    # The native model editor's Default terminal overrides legacy settings,
+    # including an explicitly cleared selection.
+    if "terminalId" in meta:
+        identifier = meta["terminalId"]
+        if identifier is not None and not isinstance(identifier, str):
+            raise ValueError("Model terminalId must be a string or null")
+        if (meta.get("capabilities") or {}).get("terminal") is False:
+            return None
+        return (identifier or "").strip() or None
     settings = meta.get("lite_handoff", {})
     if not isinstance(settings, dict):
         raise ValueError("Model lite_handoff settings must be an object")

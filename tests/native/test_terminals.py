@@ -11,6 +11,16 @@ from lite_handoff_router.owui_adapter import OWUIAdapter
 
 
 class NativeTerminalMetadataTest(unittest.TestCase):
+    def test_native_card_roundtrip_selects_terminal_without_custom_metadata(self):
+        from open_webui.models.models import ModelMeta
+        from lite_handoff_router.terminals import terminal_binding
+
+        meta = ModelMeta(terminalId="internal-analysis", capabilities={"terminal": True})
+        saved = ModelMeta(**meta.model_dump()).model_dump()
+        self.assertEqual(terminal_binding({"info": {"meta": saved}}), "internal-analysis")
+        saved["capabilities"]["terminal"] = False
+        self.assertIsNone(terminal_binding({"info": {"meta": saved}}))
+
     def test_workspace_model_roundtrip_preserves_optional_binding(self):
         from open_webui.models.models import ModelMeta
 

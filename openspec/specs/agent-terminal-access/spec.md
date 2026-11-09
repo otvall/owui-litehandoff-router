@@ -8,7 +8,7 @@
 
 ### Requirement: Terminal access is an explicit optional agent binding
 
-Система SHALL включать терминал только агенту с явно заданной серверной привязкой к одному подключению OWUI. Отсутствующая или пустая привязка SHALL означать отсутствие терминала. Публичный Router SHALL оставаться без терминала. Один лишь штатный флаг capability Terminal SHALL NOT создавать привязку.
+Система SHALL читать выбранный в карточке модели Default terminal из `meta.terminalId`. При выключенном capability Terminal штатная привязка SHALL быть отключена. При отсутствии `terminalId` SHALL поддерживаться legacy `meta.lite_handoff.terminal_id`. Пустой штатный выбор SHALL NOT восстанавливать legacy-привязку. Без выбранного подключения терминал SHALL отсутствовать. Публичный Router SHALL оставаться без терминала.
 
 #### Scenario: Only selected agents have a terminal
 
@@ -23,9 +23,9 @@
 
 #### Scenario: Native terminal capability conflicts with a binding
 
-- **WHEN** у A задана непустая привязка, но capability Terminal явно выключен
-- **THEN** подготовка A возвращает понятную ошибку конфигурации до генерации
-- **AND** система не включает терминал в обход запрета и не игнорирует обязательную привязку
+- **WHEN** у A выбран штатный Default terminal, но capability Terminal явно выключен
+- **THEN** A запускается без терминальных Tools
+- **AND** ранее подготовленные callable этого терминала больше не исполняются
 
 ### Requirement: Terminal selection comes only from trusted model configuration
 

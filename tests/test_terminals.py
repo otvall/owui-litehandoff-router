@@ -8,6 +8,20 @@ class TerminalBindingTest(unittest.TestCase):
     def model(self, settings):
         return {"info": {"meta": settings}}
 
+    def test_native_model_card_binding_takes_precedence(self):
+        meta = {"terminalId": " native ", "capabilities": {"terminal": True},
+                "lite_handoff": {"terminal_id": "legacy"}}
+        self.assertEqual(terminal_binding(self.model(meta)), "native")
+        for value in ("", "  ", None):
+            self.assertIsNone(terminal_binding(self.model({**meta, "terminalId": value})))
+        meta["capabilities"]["terminal"] = False
+        self.assertIsNone(terminal_binding(self.model(meta)))
+
+    def test_invalid_native_binding_is_rejected(self):
+        for value in (False, 1, [], {}):
+            with self.assertRaisesRegex(ValueError, "terminalId"):
+                terminal_binding(self.model({"terminalId": value}))
+
     def test_absent_null_and_empty_binding_are_disabled(self):
         for meta in ({}, {"capabilities": {"terminal": True}}, {"lite_handoff": {}},
                      {"lite_handoff": {"terminal_id": None}},

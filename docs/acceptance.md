@@ -3,6 +3,23 @@
 
 # Фактическая приёмка
 
+## Штатный Default terminal модели — 2026-11-09
+
+Исправлено игнорирование штатного `meta.terminalId` карточки модели. Теперь
+выбранное подключение используется без кастомной metadata; выключение capability
+Terminal отключает Tools и блокирует ранее подготовленный callable. Пустой
+штатный выбор не восстанавливает legacy-привязку. Без штатного поля сохранён
+fallback `lite_handoff.terminal_id`. Публичный Router терминал не получает.
+
+До исправления новые unit-проверки воспроизвели отсутствие terminal Tools и
+неверный приоритет привязок. После исправления прошли **79 unit/export и 55 native
+тестов**, без пропусков, на неизменённом OWUI 0.13.0. Проверен native ModelMeta
+roundtrip. Оба exports пересобраны; hashes — в `native_model_card_followup`
+[отчёта](owui-0130-validation.json). Дополнительная browser/real-LLM приёмка этого
+уточнения не проводилась. Штатные поля подтверждены исходниками
+[ModelEditor](https://github.com/open-webui/open-webui/blob/v0.13.0/src/lib/components/workspace/Models/ModelEditor.svelte)
+и [TerminalSelector](https://github.com/open-webui/open-webui/blob/v0.13.0/src/lib/components/workspace/Models/TerminalSelector.svelte).
+
 ## Уточнение: metadata версии без runtime guard — 2026-11-09
 
 По запросу пользователя удалены проверки номера OWUI из адаптера, обеих Functions,
