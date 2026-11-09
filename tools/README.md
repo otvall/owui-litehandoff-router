@@ -338,3 +338,16 @@ its saved metadata and `read_file` contents rather than claiming an inline previ
 OWUI release metadata is informational. Fixtures keep disposable-directory and
 admin safeguards, but do not reject a server by version number. The dependency
 pin in `requirements-native.txt` reproduces the tested environment only.
+
+## Native context HTTP gate 0.13.3
+
+`native_context_http.py` requires the existing isolated tgate fixtures in
+`lhr-0133-checks-20261109`, current exports in `/tmp/lhr-terminal-gate/dist/`,
+and the loopback terminal provider. It refuses other directories and requires
+`NATIVE_CONTEXT_DISPOSABLE=lhr-0133-checks-20261109` plus
+`TERMINAL_DISPOSABLE=owui-router-test`. Run from `/app/backend` with its PYTHONPATH.
+It snapshots Functions/config, measures actual provider payloads, uses a
+synthetic server memory reader, runs ten provenance/lifecycle scenarios and
+terminal check/controls/revocation with the current exports, then restores the
+reader, Functions and config. Raw tokens/payloads remain private in the fixture;
+export only sanitized evidence. It is not a real LLM or embeddings evaluation.

@@ -1,0 +1,118 @@
+{
+  "passed": true,
+  "owui": "0.13.3",
+  "runs": [
+    {
+      "chat_id": "ae573e82-4c2d-4967-8885-f574ccf2e871",
+      "message_id": "cbd59961-0e1c-4fa2-9be6-97344b718fc7",
+      "actor": "8dd1d3cd-dee0-4584-a8e2-9333a1b16790",
+      "target": "tgate-agent-a",
+      "memory": true
+    },
+    {
+      "chat_id": "91d9f3d8-cd6e-4581-b21e-f0e9d172645a",
+      "message_id": "dd11a809-3226-4bf6-8a45-c9a040d92487",
+      "actor": "8dd1d3cd-dee0-4584-a8e2-9333a1b16790",
+      "target": "tgate-agent-a",
+      "memory": true
+    },
+    {
+      "chat_id": "7235e49b-3ab3-4db7-8378-3216710dba9b",
+      "message_id": "08d1a87c-734f-46a3-bcc8-825dccfe1d84",
+      "actor": "552d5517-2fd6-4d35-997e-b6a706666339",
+      "target": "tgate-agent-a",
+      "memory": true
+    },
+    {
+      "chat_id": "bc5f95d3-343b-427c-8eab-2ea5d5d9cacf",
+      "message_id": "f4f7aeb5-58c7-40de-a67e-2bfb74a74079",
+      "actor": "552d5517-2fd6-4d35-997e-b6a706666339",
+      "target": "tgate-agent-a",
+      "memory": true
+    },
+    {
+      "chat_id": "0fcb3633-2e8d-4e61-be8b-ec5460025239",
+      "message_id": "101b3cc0-9cb8-4767-a25d-23088e043127",
+      "actor": "8dd1d3cd-dee0-4584-a8e2-9333a1b16790",
+      "target": "tgate-agent-c",
+      "memory": true
+    },
+    {
+      "chat_id": "e799e9b7-2e49-451f-8836-fa6c998e6857",
+      "message_id": "801d646f-c396-45e9-9d5c-410ee0244243",
+      "actor": "8dd1d3cd-dee0-4584-a8e2-9333a1b16790",
+      "target": "tgate-agent-c",
+      "memory": true
+    },
+    {
+      "chat_id": "c674d54a-54e2-4769-a9aa-70ac56f0a56b",
+      "message_id": "d879aec0-efe2-463d-85e1-84a844b2c8cc",
+      "actor": "8dd1d3cd-dee0-4584-a8e2-9333a1b16790",
+      "target": "tgate-agent-c",
+      "memory": true
+    },
+    {
+      "chat_id": "f0122734-a9da-4cdc-943c-1d7edb598e9e",
+      "message_id": "82ad4df9-d772-4599-9e5b-d944aef6822b",
+      "actor": "552d5517-2fd6-4d35-997e-b6a706666339",
+      "target": "tgate-agent-c",
+      "memory": true
+    },
+    {
+      "chat_id": "ae573e82-4c2d-4967-8885-f574ccf2e871",
+      "message_id": "b6c27697-5ead-421a-8926-82d0c77f6331",
+      "actor": "8dd1d3cd-dee0-4584-a8e2-9333a1b16790",
+      "target": "tgate-agent-a",
+      "memory": true
+    },
+    {
+      "chat_id": "ae573e82-4c2d-4967-8885-f574ccf2e871",
+      "message_id": "42f5ecd0-894a-4e3f-acdd-f76291760b6c",
+      "actor": "8dd1d3cd-dee0-4584-a8e2-9333a1b16790",
+      "target": "tgate-agent-a",
+      "memory": false
+    }
+  ],
+  "real_endpoint_preprocessing_and_native_loop": true,
+  "current_actor_memory_in_destination_payload": true,
+  "forged_metadata_and_results_excluded_from_destination": true,
+  "cross_actor_native_pair_replay_excluded": true,
+  "no_recall_callable_added": true,
+  "llm": "scripted provider",
+  "memory": "deterministic server read fixture",
+  "terminal_regressions": {
+    "check": {
+      "passed": true,
+      "runs": 6,
+      "actual_shell_commands": 10
+    },
+    "controls": {
+      "disabled_resource": true,
+      "lifecycle": [
+        {
+          "mode": "stop",
+          "chat_id": "fd95e8e0-897a-42c0-aea6-3cdce423c617",
+          "children": [
+            "75be45cd-78b5-49ce-bffa-9cd9396c26a5",
+            "d0e6e410-7078-45a8-b4a0-6164fc645f79"
+          ],
+          "no_replay": true
+        },
+        {
+          "mode": "deadline",
+          "chat_id": "296698bc-46f3-479c-876b-098ece846316",
+          "children": [
+            "e2f70033-4a41-4118-8e71-4f549ce05ce5",
+            "c6896142-6562-458b-8655-54e30b019929"
+          ],
+          "no_replay": true
+        }
+      ]
+    },
+    "revocation": {
+      "owner_access_revoked": true,
+      "no_terminal_dispatch": true
+    },
+    "backend": "actual subprocess shell; not stock Open Terminal"
+  }
+}

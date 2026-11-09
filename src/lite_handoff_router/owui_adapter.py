@@ -8,6 +8,7 @@ from uuid import UUID
 
 from .binding import bind_tool_context
 from .capabilities import MCP_CLOSE_TIMEOUT, bounded_tool_name
+from .native_context import scoped_knowledge_result
 
 
 def as_dict(value):
@@ -23,6 +24,91 @@ def register_model_tool(registry, name, tool, namespace):
 
 
 class OWUIAdapter:
+    async def native_memory_allowed(self, metadata, model, user):
+        from open_webui.models.config import Config
+        from open_webui.utils.access_control import has_permission
+        from open_webui.utils.memory import model_allows_memory
+
+        return (bool((metadata.get("features") or {}).get("memory"))
+                          and await Config.get("memories.enable")
+                          and await Config.get("memories.system_context.enable")
+                          and model_allows_memory(model)
+                          and (user.role == "admin" or await has_permission(
+                              user.id, "features.memories", await Config.get("user.permissions"))))
+
+    async def native_resume_context(self, request, metadata, state, user):
+        approval = getattr(request.state, "tool_approval_resume", None)
+        if (user.id != state["user_id"] or not isinstance(approval, (tuple, list)) or len(approval) != 3
+                or tuple(approval[:2]) != (state["chat_id"], metadata.get("assistant_message_id"))
+                or metadata.get("tool_approval_resume") != approval[2]
+                or metadata.get("assistant_message_id") != state["message_id"]):
+            return []
+        model = metadata.get("model") or {}
+        if not await self.native_memory_allowed(metadata, model, user):
+            return []
+        from open_webui.utils.middleware import preload_memory
+        output = await preload_memory(request, deepcopy(state["source"]), user, model)
+        request.scope["lite_handoff_metadata"]["initial_output"] = output
+        return self.native_context_messages(request, metadata, state)
+
+    async def native_context_policy(self, request, metadata, state, model, user):
+        allowed = {}
+        context = state.get("native_context") or {}
+        identity = tuple(state.get(k) for k in ("request_id", "user_id", "chat_id", "message_id"))
+        if user.id != state["user_id"] or context.get("identity") != identity:
+            return allowed
+        memory_enabled = await self.native_memory_allowed(metadata, model, user)
+        for record in (state.get("native_context") or {}).get("records", []):
+            if record["name"] == "recall_memories" and memory_enabled:
+                allowed[record["key"]] = deepcopy(record["result"])
+            elif record["name"] == "list_attached_knowledge":
+                from open_webui.utils.tools import get_attached_knowledge
+                meta = model.get("info", {}).get("meta") or {}
+                if not (meta.get("builtinTools") or {}).get("knowledge", True):
+                    continue
+                eligible = {(item.get("type"), item.get("id"), item.get("source"))
+                            for item in get_attached_knowledge(model, metadata)}
+                async def check(kind, identifier):
+                    return await self.native_knowledge_access(request, user, kind, identifier)
+                result = await scoped_knowledge_result(record, eligible, check)
+                if result:
+                    allowed[record["key"]] = result
+        return allowed
+
+    async def native_knowledge_access(self, request, user, kind, identifier):
+        from fastapi import HTTPException
+        try:
+            if kind == "collection":
+                from open_webui.routers.knowledge import get_knowledge_by_id
+                return await get_knowledge_by_id(identifier, user=user, db=None) is not None
+            if kind == "file":
+                await self.file(identifier, user)
+                return True
+            if kind == "note":
+                from open_webui.routers.notes import get_note_by_id
+                return await get_note_by_id(request, identifier, user=user, db=None) is not None
+        except (HTTPException, ValueError):
+            return False
+        return False
+
+    def native_context_messages(self, request, metadata, state):
+        from open_webui.utils.misc import convert_output_to_messages
+
+        root = request.scope.get("lite_handoff_metadata")
+        if (not isinstance(root, dict) or root.get("user_id", state["user_id"]) != state["user_id"]
+                or any(root.get(k) != state.get(k) for k in ("chat_id", "message_id"))):
+            return []
+        output = root.get("initial_output")
+        if not isinstance(output, list):
+            return []
+        calls = [item for item in output if isinstance(item, dict) and item.get("type") == "function_call"]
+        allowed = {item.get("call_id") for item in calls
+                   if item.get("hidden") is True and item.get("status") == "completed"}
+        verified = [item for item in output if isinstance(item, dict) and item.get("call_id") in allowed
+                    and item.get("status") == "completed"
+                    and item.get("type") in {"function_call", "function_call_output"}]
+        return convert_output_to_messages(deepcopy(verified), raw=True) if verified else []
+
     async def user(self, user_id):
         from open_webui.models.users import Users
 

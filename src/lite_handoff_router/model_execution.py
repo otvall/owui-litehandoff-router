@@ -11,6 +11,8 @@ from .protocol import delegate_tool
 from .parallel import parallel_tool, ROUTING_TOOLS, downstream_data
 from .resources import ResourceScope
 from .terminals import terminal_binding, prepare_terminal_scope, is_terminal_tool
+from .native_context import native_record, context_pair_key
+from .protocol import completed_pairs
 
 ENVELOPE = frozenset({"stream", "stream_options", "files"})
 WORKER_PROMPT = (
@@ -115,6 +117,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
                 raise ValueError("Reserved Skill reader collision: " + name)
             tools[name] = await scoped_reader(adapter, builtins[name], skill_ids, owner,
                                                draft["messages"], check_scope=resources.skill)
+    if (state.get("native_context") or {}).get("records"):
+        state["native_context_allowed"] = await adapter.native_context_policy(
+            request, metadata, state, model, user)
     if target:
         history = agent_projection(state, target, set(tools), skill_ids)
     else:
@@ -131,6 +136,12 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     metadata["tools"] = tools
     metadata["model_id"] = model["id"]
     metadata["model"] = deepcopy(model)
+    native_snapshot = deepcopy(state.get("native_context"))
+    native_allowed_snapshot = deepcopy(state.get("native_context_allowed"))
+    native_output_snapshot = deepcopy(metadata.get("initial_output"))
+    native_view_keys = sorted(context_pair_key(draft["messages"][i]["tool_calls"][n], draft["messages"][r])
+                              for i, n, r in completed_pairs(draft["messages"])
+                              if native_record(state, draft["messages"][i]["tool_calls"][n], draft["messages"][r]))
     if target:
         previous_metadata = getattr(request.state, "metadata", None)
         request.state.metadata = metadata
@@ -142,9 +153,20 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
             request.state.metadata = previous_metadata
     if not isinstance(draft, dict) or not isinstance(draft.get("messages"), list):
         raise ValueError("Destination inlet returned an invalid request")
+    if (state.get("native_context") != native_snapshot
+            or state.get("native_context_allowed") != native_allowed_snapshot):
+        raise ValueError("Destination inlet changed protected native context")
+    final_native_keys = sorted(context_pair_key(draft["messages"][i]["tool_calls"][n], draft["messages"][r])
+                             for i, n, r in completed_pairs(draft["messages"])
+                             if native_record(state, draft["messages"][i]["tool_calls"][n], draft["messages"][r]))
+    if final_native_keys != native_view_keys:
+        raise ValueError("Destination inlet changed protected native messages")
     final_metadata = draft.get("metadata")
     if not isinstance(final_metadata, dict) or any(final_metadata.get(key) != value for key, value in identity.items()):
         raise ValueError("Destination inlet changed request identity")
+    if ((state.get("native_context") or {}).get("records")
+            and final_metadata.get("initial_output") != native_output_snapshot):
+        raise ValueError("Destination inlet changed protected native output")
     tools = final_metadata.get("tools")
     if not isinstance(tools, dict):
         raise ValueError("Destination inlet returned an invalid Tool registry")
@@ -177,6 +199,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         elif identifier and name not in READERS | ROUTING_TOOLS:
             async def check(arguments, identifier=identifier):
                 await resources.tool(identifier)
-        tools[name] = await bind_tool_context(adapter, tool, draft["messages"], check=check)
+        pinned_context = ({"__metadata__": {k: v for k, v in final_metadata.items() if k != "initial_output"}}
+                          if (state.get("native_context") or {}).get("records") else None)
+        tools[name] = await bind_tool_context(adapter, tool, draft["messages"], check=check, pinned=pinned_context)
     draft["tools"] = [{"type": "function", "function": tool["spec"]} for tool in tools.values()]
     return draft, tools

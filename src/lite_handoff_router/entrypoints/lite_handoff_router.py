@@ -9,6 +9,7 @@ from ..runtime import require, metadata_draft, publish
 from ..history import refresh_source
 from ..capabilities import close_mcp_sessions
 from ..observation import observe_response
+from ..native_context import capture_native_context
 
 
 class Pipe:
@@ -24,6 +25,13 @@ class Pipe:
         user = await adapter.user(__user__["id"])
         state = require(__request__, __metadata__, user.id)
         refresh_source(state, body.get("messages", []))
+        if state.get("native_context") is None:
+            converted = (adapter.native_context_messages(__request__, __metadata__, state)
+                         if __request__.scope["lite_handoff_metadata"].get("initial_output") else [])
+            if not converted and getattr(getattr(__request__, "state", None), "tool_approval_resume", None):
+                converted = await adapter.native_resume_context(__request__, __metadata__, state, user)
+                state["source"].extend(converted)
+            capture_native_context(__request__, __metadata__, state, converted)
         target = confirmed_target(state, state["source"])
         sessions_before = set(__request__.scope.get("lite_handoff_mcp", {}))
         try:

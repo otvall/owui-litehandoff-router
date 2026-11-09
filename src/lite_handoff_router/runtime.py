@@ -27,6 +27,7 @@ def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, ski
         "user_boundary": next((i for i in range(len(body.get("messages", [])) - 1, -1, -1)
                                if body["messages"][i].get("role") == "user"), -1),
         "generation": 0, "audit": [],
+        "native_context": None,
         "parallel": group_state(max_parallel_tasks, parallel_timeout_seconds),
     }
     request.scope[SCOPE_KEY] = state
@@ -38,6 +39,9 @@ def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, ski
         metadata.pop(field, None)
         body.pop(field, None)
     metadata.pop("lite_skill_scope", None)
+    # Native preprocessing fills this AFTER Preparation. Never attest a client
+    # value or a parent's copied context as a fresh server-generated result.
+    metadata.pop("initial_output", None)
     metadata[RECEIPT] = {k: deepcopy(state[k]) for k in (
         "request_id", "user_id", "chat_id", "message_id", "router_id", "registry",
         "diagnostics", "base_tool_ids", "base_skill_ids",
