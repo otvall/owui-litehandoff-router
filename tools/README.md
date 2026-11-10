@@ -1,11 +1,11 @@
-Build the two independent Functions for Open WebUI 0.13.0 with
+Build the two independent Functions for Open WebUI 0.13.3 with
 `python3 tools/build_functions.py`. Historical HTTP/browser reports in
 `docs/acceptance.md` describe their original releases; they do not establish
-0.13.0 acceptance.
+0.13.3 acceptance. See `docs/owui-0133-context-validation.md` for the 0.13.3 results.
 
 ## Selective terminal acceptance
 
-Use only `owui-router-test` (OWUI 0.13.0). Copy `terminal_acceptance.py`,
+The original OWUI 0.13.0 run used `owui-router-test`. Use only this disposable fixture setup. Copy `terminal_acceptance.py`,
 `terminal_gate_provider.py`, `parallel_gate.py` and current `dist/` into
 `/tmp/lhr-terminal-gate/`. The provider binds container loopback 8770 and also
 provides a terminal-compatible backend: it actually executes subprocess shell
@@ -54,7 +54,7 @@ No build-time downloads are performed.
 
 ## Inline Visualizer native/browser gate
 
-Use only disposable `owui-router-test`, OWUI **0.13.0**. Prepare its existing
+The original run used disposable `owui-router-test`, OWUI **0.13.0**. Prepare its existing
 OWUI dependencies and `fixtures/inline_visualizer/` before the offline run.
 The manifest records upstream URLs, commits, versions and SHA-256; every asset
 is checked before any HTTP request. A changed hash is rejected. The two current

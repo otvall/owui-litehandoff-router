@@ -1,6 +1,6 @@
 # Development
 
-Целевая среда: Open WebUI **0.13.0**, Python 3.11 или 3.12. Runtime
+Целевая среда: Open WebUI **0.13.3**, Python 3.11 или 3.12. Runtime
 использует стандартную библиотеку и библиотеки установленного OWUI;
 дополнительный сервис и библиотеки оркестрации не требуются.
 
@@ -44,9 +44,9 @@ python3 tools/build_functions.py
 python3 tools/build_functions.py --destination /tmp/lhr-exports
 ```
 
-В destination — ровно две `.py` Functions для 0.13.0. Python API —
+В destination — ровно две `.py` Functions для 0.13.3. Python API —
 `build(destination=None)`. Выбора версии, `ReleaseProfile` и legacy exports нет.
 Unit export checks проверяют воспроизводимость, совпадение `dist/` с исходниками,
 отсутствие конфликтующих inlined symbols и холодный импорт без checkout.
-Native export checks загружают собранные файлы с настоящими API OWUI 0.13.0.
+Native export checks загружают собранные файлы с настоящими API OWUI 0.13.3.
 Установка и rollback описаны в [setup.md](setup.md).

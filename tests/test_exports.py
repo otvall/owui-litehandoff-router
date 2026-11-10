@@ -21,7 +21,7 @@ class ExportsTest(unittest.TestCase):
     def test_reproducible_standalone_uploads(self):
         builder = self.builder()
         with tempfile.TemporaryDirectory() as folder:
-            self.check_target(builder, Path(folder), '0.13.0')
+            self.check_target(builder, Path(folder), '0.13.3')
 
     def check_target(self, builder, folder, target):
         builder.build(folder)

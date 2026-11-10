@@ -1,4 +1,4 @@
-"""Isolated contracts for the supported Open WebUI 0.13.0 release."""
+"""Isolated contracts for the supported Open WebUI 0.13.3 release."""
 
 import argparse
 from pathlib import Path

@@ -1,4 +1,4 @@
 # Prepare on a connected build machine, then transfer its wheelhouse.
-open-webui==0.13.0
+open-webui==0.13.3
 setuptools==80.9.0
 wheel==0.45.1

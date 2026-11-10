@@ -1,6 +1,6 @@
 # Промпт Router, routing Skills и общие ресурсы
 
-Инструкция для **Open WebUI 0.13.0**. Базовая установка двух Functions описана
+Инструкция для **Open WebUI 0.13.3**. Базовая установка двух Functions описана
 в [setup.md](setup.md).
 
 Готовые тексты:

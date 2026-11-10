@@ -1,4 +1,4 @@
-"""Native terminal integration contracts on unchanged OWUI 0.13.0."""
+"""Native terminal integration contracts on unchanged OWUI 0.13.3."""
 
 import asyncio
 from copy import deepcopy
