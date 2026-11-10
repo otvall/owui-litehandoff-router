@@ -87,6 +87,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
             draft["messages"].insert(0, {"role": "system", "content": terminal_prompt})
     if READERS.intersection(tools):
         raise ValueError("Reserved Skill reader collision: " + ", ".join(sorted(READERS.intersection(tools))))
+    native_delegate = tools.get("delegate_task")
+    if native_delegate and native_delegate.get("tool_id") == "builtin:delegate_task" and native_delegate.get("type") == "builtin":
+        tools.pop("delegate_task")
     if "lite_parallel" in tools or "delegate_task" in tools:
         raise ValueError("Reserved routing Tool collision: " + ", ".join(sorted(ROUTING_TOOLS.intersection(tools))))
     for instruction in mcp_instructions:
@@ -103,7 +106,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
             if reason:
                 draft["messages"].insert(0, {"role": "system", "content": reason})
             else:
-                tools["lite_parallel"] = parallel_tool(adapter, request, user, metadata, state, events)
+                tools["delegate_task"] = parallel_tool(adapter, request, user, metadata, state, events)
     else:
         for name in ROUTING_TOOLS:
             tools.pop(name, None)

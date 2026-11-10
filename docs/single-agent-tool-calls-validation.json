@@ -1,0 +1,120 @@
+{
+  "change": "single-agent-tool-calls",
+  "owui": "0.13.3",
+  "container": "lhr-0133-checks-20261109",
+  "unit": {
+    "passed": 90,
+    "skipped": 0
+  },
+  "native": {
+    "passed": 65,
+    "skipped": 0
+  },
+  "http": [
+    {
+      "suite": "http",
+      "passed": true,
+      "chat_id": "53c17c79-cb1b-4d02-844d-6bc8b6233bfc",
+      "message_id": "02c8c645-f4d2-4218-a7a9-ebbb8b026cf2",
+      "user_key": "user",
+      "overlap_seconds": 0.939965208999979,
+      "children": [
+        "db1286cc-494b-439f-a28c-dd6fc2b7a2d0",
+        "a8ec8243-7f4d-4ef5-a8ce-059dc83b5f05",
+        "80bbb242-b628-4f68-9570-32b9bd4efd14",
+        "f552f6bc-bd11-4768-be6d-d00544c8d09a"
+      ],
+      "file_access_and_isolation": true
+    },
+    {
+      "suite": "http",
+      "passed": true,
+      "chat_id": "a6202472-3ce2-4fb1-af48-4ef851393eec",
+      "message_id": "bf82f8eb-b985-4075-b8db-bd610f3a6b11",
+      "user_key": "user2",
+      "overlap_seconds": 0.9569897089999699,
+      "children": [
+        "0e8b7c26-6399-4d00-8126-4ca4b6abf58e",
+        "c8ba1f8b-5b1e-4d1d-b1af-85773fe9ef54",
+        "563bba30-52e9-4884-a678-f2721b9a03fe",
+        "4938f7ea-fe3f-4d9e-bc90-b1065cd35443"
+      ],
+      "file_access_and_isolation": true
+    },
+    {
+      "suite": "lifecycle",
+      "passed": true,
+      "lifecycle": "stop",
+      "chat_id": "5eb30371-6ce7-4c7a-b923-75f238bfc9dd",
+      "message_id": "5b89369e-f917-4014-9325-3f43221c4cf2",
+      "user_key": "user",
+      "children": [
+        "ecfa1457-52df-43ec-a195-0434590cfe79",
+        "65a66eaa-182b-46e6-ae99-44b068b99306",
+        "6fa347b0-0654-41f2-9385-535ea1540b42",
+        "d15ae70f-f54c-4825-894d-8d58e956a550"
+      ]
+    },
+    {
+      "suite": "lifecycle",
+      "passed": true,
+      "lifecycle": "timeout",
+      "chat_id": "1042c72a-544c-4519-9500-49035c1c3850",
+      "message_id": "65e6f220-c424-4be2-8bbb-7209b1943fc9",
+      "user_key": "user",
+      "children": [
+        "cb818571-9417-4720-a124-06295a1e8bdf",
+        "267d2cf7-3292-4862-ba01-f231f95f7744",
+        "f3abd851-a4a9-4c3e-8d6d-a801220893f6",
+        "dce06a4a-59e6-49fa-96d6-2f6c5e6bc8a2"
+      ]
+    },
+    {
+      "suite": "lifecycle",
+      "passed": true,
+      "lifecycle": "delete",
+      "chat_id": "beb417b4-d0db-4e4f-9a6a-a16f346cbd91",
+      "message_id": "71af8f21-6aee-479e-8397-08e6841b423d",
+      "user_key": "user",
+      "children": [
+        "07a1bde5-59f9-4827-9f08-e45a45e5d2c0",
+        "404c8d05-6587-4acb-8ff5-4f47e143493f",
+        "76875be3-bc0f-40e1-a563-72d583c50d03",
+        "0b92bc5f-33ea-46f0-8fa0-5d45942f507e"
+      ]
+    },
+    {
+      "suite": "controls",
+      "passed": true,
+      "disabled_zero_and_same_chat_a_b_router": "54f5f5dd-4ed0-40ad-a4f3-2d178d88b10e"
+    },
+    {
+      "suite": "controls",
+      "passed": true,
+      "missing_required_worker_resource": "9139851a-5a95-4f07-807b-72d4010c7459"
+    },
+    {
+      "suite": "controls",
+      "passed": true,
+      "explicit_destination_overflow": "d7d1928d-e555-4a7a-a9ba-72e8dacec128"
+    }
+  ],
+  "browser": {
+    "passed": true,
+    "browser": "Safari via native CUA",
+    "parent_chat_id": "53c17c79-cb1b-4d02-844d-6bc8b6233bfc",
+    "child_chat_id": "db1286cc-494b-439f-a28c-dd6fc2b7a2d0",
+    "visible_sources": 4,
+    "observed_flow": [
+      "expand 4 sources",
+      "select 1. agent-a-pgate",
+      "citation window",
+      "Open execution",
+      "navigate to child /c/ page"
+    ],
+    "child_result_visible": true,
+    "child_file_visible": "forecast-A.csv",
+    "opens_in_subagent_side_panel": false,
+    "provider": "scripted local fixture; OpenRouter not used"
+  }
+}

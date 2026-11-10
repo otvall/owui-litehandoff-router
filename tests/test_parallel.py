@@ -116,8 +116,78 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
         return request, metadata, state, user
 
     async def invoke(self, adapter, request, metadata, state, user, assignments):
-        observe(state, call("lite_parallel", "parallel", {"tasks": assignments}))
-        return json.loads(await parallel_tool(adapter, request, user, metadata, state, {})["callable"](assignments))
+        observe(state, *(call("delegate_task", "parallel-" + str(i), item)
+                         for i, item in enumerate(assignments)))
+        tool = parallel_tool(adapter, request, user, metadata, state, {})["callable"]
+        outcomes = await asyncio.gather(*(tool(**{k: v for k, v in item.items() if k in {"agent_id", "task", "file_ids"}}) for item in assignments), return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, Exception) and not isinstance(outcome, TimeoutError):
+                raise outcome
+        return {"status": state["parallel"]["status"], "results": state["parallel"]["results"]}
+
+    async def test_single_and_four_calls_return_only_their_own_results(self):
+        for count in (1, 4):
+            request, metadata, state, user = self.setup_request(maximum=count)
+            adapter = GroupAdapter()
+            items = [{"agent_id": "a", "task": "same"} for _ in range(count)]
+            observe(state, *(call("delegate_task", str(i), item) for i, item in enumerate(items)))
+            tool = parallel_tool(adapter, request, user, metadata, state, {})["callable"]
+            outputs = [json.loads(value) for value in await asyncio.gather(*(tool(**item) for item in items))]
+            self.assertEqual(len(adapter.started), count)
+            self.assertEqual(len({o["chat_url"] for o in outputs}), count)
+            self.assertTrue(all("results" not in o and o["status"] == "completed" for o in outputs))
+            self.assertEqual(outputs, state["parallel"]["results"])
+            if count == 4:
+                self.assertLess(max(t for _, t in adapter.started), min(t for _, t in adapter.ended))
+            with self.assertRaisesRegex(ValueError, "excess"):
+                await tool(**items[0])
+
+    async def test_cancel_before_all_participants_enter_does_not_hang(self):
+        request, metadata, state, user = self.setup_request()
+        adapter = GroupAdapter()
+        items = [{"agent_id": "a", "task": "dispatch-slow"}, {"agent_id": "b", "task": "missing"}]
+        observe(state, *(call("delegate_task", str(i), item) for i, item in enumerate(items)))
+        tool = parallel_tool(adapter, request, user, metadata, state, {})["callable"]
+        work = asyncio.create_task(tool(**items[0]))
+        while not adapter.started:
+            await asyncio.sleep(0)
+        work.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(work, 1)
+        self.assertEqual(state["parallel"]["status"], "cancelled")
+        self.assertTrue(all(r is not None for r in state["parallel"]["results"]))
+        self.assertEqual(run_registry(request), {})
+
+    async def test_legacy_and_duplicate_ids_are_rejected_before_dispatch(self):
+        for calls in ([call("delegate_task", "legacy", {"tasks": []})],
+                      [call("delegate_task", "dup", {"agent_id": "a", "task": "same"})] * 2):
+            request, metadata, state, user = self.setup_request()
+            adapter = GroupAdapter()
+            observe(state, *calls)
+            with self.assertRaises(ValueError):
+                await parallel_tool(adapter, request, user, metadata, state, {})["callable"]("a", "same")
+            self.assertEqual(adapter.started, [])
+
+    async def test_native_builtin_is_replaced_but_custom_collision_is_rejected(self):
+        request, metadata, state, user = self.setup_request()
+        adapter = GroupAdapter()
+        regular = adapter.tools
+        async def native(*args):
+            tools = await regular(*args)
+            tools["delegate_task"] = {"tool_id": "builtin:delegate_task", "type": "builtin",
+                                       "spec": {"name": "delegate_task", "parameters": {}}, "callable": lambda: None}
+            return tools
+        adapter.tools = native
+        _, tools = await prepare_model(adapter, request, {}, user, metadata, state, "llm", {})
+        self.assertEqual(tools["delegate_task"]["spec"]["parameters"]["required"], ["agent_id", "task"])
+        self.assertNotIn("lite_parallel", tools)
+        async def custom(*args):
+            tools = await native(*args)
+            tools["delegate_task"]["tool_id"] = "custom"
+            return tools
+        adapter.tools = custom
+        with self.assertRaisesRegex(ValueError, "Reserved routing"):
+            await prepare_model(adapter, request, {}, user, metadata, state, "llm", {})
 
     async def test_batch_validation_is_atomic(self):
         for invalid in ({"agent_id": "route-b", "task": "x"}, {"agent_id": "b", "task": " "},
@@ -129,12 +199,49 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "assignment 2"):
                 await self.invoke(adapter, request, metadata, state, user, [{"agent_id": "a", "task": "x"}, invalid])
             self.assertEqual(adapter.started, [])
-            self.assertEqual(state["parallel"]["status"], "idle")
+            self.assertIn(state["parallel"]["status"], {"idle", "failed"})
+        request, metadata, state, user = self.setup_request()
         with self.assertRaisesRegex(ValueError, "between"):
             await self.invoke(adapter, request, metadata, state, user, [{"agent_id": "a", "task": "x"}] * 5)
         metadata['files'] = None  # Actual native empty attachment representation.
         self.assertEqual(len(await validate_batch(adapter, request, user, metadata, state,
             [{"agent_id": "a", "task": "x"}] * 2)), 2)
+
+    async def test_rejected_second_generation_blocks_handoff_and_preserves_results(self):
+        request, metadata, state, user = self.setup_request()
+        adapter = GroupAdapter()
+        item = {"agent_id": "a", "task": "first forecast"}
+        observe(state, call("delegate_task", "first", item))
+        tool = parallel_tool(adapter, request, user, metadata, state, {})["callable"]
+        first = json.loads(await tool(**item))
+        observe(state, call("delegate_task", "second", item))
+        with self.assertRaisesRegex(ValueError, "one parallel group"):
+            await tool(**item)
+        self.assertEqual(len(adapter.started), 1)
+        self.assertEqual(state["parallel"]["results"], [first])
+        observe(state, call("lite_delegate", "final", {"agent_id": "a"}))
+        with self.assertRaisesRegex(ValueError, "rejected"):
+            await delegate_tool(adapter, request, user, metadata, state)["callable"]("a")
+        self.assertEqual(state["pending"], [])
+        self.assertIsNone(await downstream_data(adapter, user, metadata, state))
+        # A fresh user request does not inherit the previous rejection.
+        request, metadata, state, user = self.setup_request()
+        observe(state, call("lite_delegate", "fresh", {"agent_id": "a"}))
+        await delegate_tool(adapter, request, user, metadata, state)["callable"]("a")
+        self.assertEqual(len(state["pending"]), 1)
+
+    async def test_followup_rejected_by_native_argument_filter_still_blocks_handoff(self):
+        request, metadata, state, user = self.setup_request()
+        adapter = GroupAdapter()
+        item = {"agent_id": "a", "task": "forecast"}
+        observe(state, call("delegate_task", "first", item))
+        await parallel_tool(adapter, request, user, metadata, state, {})["callable"](**item)
+        # Native dispatch can reject missing required arguments before entering our callable.
+        observe(state, call("delegate_task", "malformed", {"tasks": [item]}))
+        observe(state, call("lite_delegate", "final", {"agent_id": "a"}))
+        with self.assertRaisesRegex(ValueError, "rejected"):
+            await delegate_tool(adapter, request, user, metadata, state)["callable"]("a")
+        self.assertIsNone(await downstream_data(adapter, user, metadata, state))
 
     async def test_overlap_order_same_agent_and_full_output(self):
         request, metadata, state, user = self.setup_request()
@@ -212,9 +319,9 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
                       call("lite_parallel", "p2", {"tasks": assignments}), call("view_skill", "s", {"id": "route-a"})):
             request, metadata, state, user = self.setup_request()
             adapter = GroupAdapter()
-            observe(state, call("lite_parallel", "p", {"tasks": assignments}), extra)
-            with self.assertRaisesRegex(ValueError, "only Tool call"):
-                await parallel_tool(adapter, request, user, metadata, state, {})["callable"](assignments)
+            observe(state, call("delegate_task", "p", assignments[0]), extra)
+            with self.assertRaisesRegex(ValueError, "only Tool"):
+                await parallel_tool(adapter, request, user, metadata, state, {})["callable"](**assignments[0])
             with self.assertRaisesRegex(ValueError, "only Tool call"):
                 await delegate_tool(adapter, request, user, metadata, state)["callable"]("a")
             self.assertEqual(adapter.started, [])
@@ -347,18 +454,18 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, reason):
                 await self.invoke(adapter, request, metadata, state, user,
                                   [{"agent_id": "a", "task": "x"}] * 2)
-            self.assertEqual(state["parallel"]["status"], "idle")
+            self.assertEqual(state["parallel"]["status"], "failed")
 
     async def test_inline_schema_uses_personal_enum_and_reserved_collision(self):
         request, metadata, state, user = self.setup_request()
         adapter = GroupAdapter()
         state["base_tool_ids"] = ["base"]
         body, tools = await prepare_model(adapter, request, {}, user, metadata, state, "llm", {})
-        self.assertEqual(tools["lite_parallel"]["spec"]["parameters"]["properties"]["tasks"]["items"]
-                         ["properties"]["agent_id"]["enum"], ["a", "b"])
+        self.assertEqual(tools["delegate_task"]["spec"]["parameters"]["properties"]["agent_id"]["enum"], ["a", "b"])
         state["parallel"]["max_tasks"] = 0
         body, tools = await prepare_model(adapter, request, {}, user, metadata, state, "llm", {})
         self.assertNotIn("lite_parallel", tools)
+        self.assertNotIn("delegate_task", tools)
         self.assertIn("lite_delegate", tools)
         regular = adapter.tools
         async def collision(*args):
@@ -462,7 +569,7 @@ class ParallelPolicyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(empty["parallel"]["status"], "idle")
 
     def test_invalid_limits_are_rejected(self):
-        for maximum in (-1, 1, 2.5, True, "4"):
+        for maximum in (-1, 2.5, True, "4"):
             with self.subTest(maximum=maximum), self.assertRaises(ValidationError):
                 router_preparation.Filter.Valves(max_parallel_tasks=maximum)
         for timeout in (0, -1, True, "300"):

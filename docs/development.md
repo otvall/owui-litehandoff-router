@@ -50,3 +50,9 @@ Unit export checks проверяют воспроизводимость, сов
 отсутствие конфликтующих inlined symbols и холодный импорт без checkout.
 Native export checks загружают собранные файлы с настоящими API OWUI 0.13.3.
 Установка и rollback описаны в [setup.md](setup.md).
+
+Специализированный `delegate_task` использует штатный dispatch OWUI 0.13.3:
+`process_chat_response` запускает вызовы этого имени через `asyncio.gather`
+и сам связывает outputs с исходными call IDs. ID не передаётся callable.
+Native contract `test_native_delegate_dispatch_owns_parallelism_and_call_ids`
+проверяет перекрытие двух одинаковых назначений и оба сохранённых call IDs.

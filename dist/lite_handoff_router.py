@@ -325,8 +325,8 @@ async def load_capabilities(adapter, request, tool_ids, user, extra):
 """Request-owned group policy and routing control guards."""
 
 def group_state(maximum=4, timeout=300):
-    if type(maximum) is not int or maximum < 0 or maximum == 1:
-        raise ValueError('max_parallel_tasks must be 0 or an integer >= 2')
+    if type(maximum) is not int or maximum < 0:
+        raise ValueError('max_parallel_tasks must be 0 or an integer >= 1')
     if type(timeout) is not int or timeout <= 0:
         raise ValueError('parallel_timeout_seconds must be a positive integer')
     return {'status': 'idle', 'max_tasks': maximum, 'timeout_seconds': timeout, 'results': [], 'unavailable_reason': None}
@@ -345,10 +345,33 @@ def control_generation(state, name, arguments):
     if not isinstance(observed, dict) or {key: value for key, value in observed.items() if key in arguments} != arguments:
         raise ValueError(name + ' arguments do not match the observed Tool call')
 
+def rejected_followup(state):
+    group = state.get('parallel') or {}
+    generation = group.get('generation')
+    return bool(group.get('rejected_followup') or (generation is not None and any((call.get('generation', -1) > generation and call.get('name') == 'delegate_task' and (call.get('executor') == {'kind': 'router'}) for call in state.get('audit', [])))))
+
 def handoff_barrier(state):
-    status = (state.get('parallel') or {}).get('status', 'idle')
+    group = state.get('parallel') or {}
+    if rejected_followup(state):
+        raise ValueError('Cannot hand off: additional parallel group was rejected. Report the actual completed results and the missing work.')
+    status = group.get('status', 'idle')
     if status not in {'idle', 'completed'}:
         raise ValueError('Cannot hand off: parallel group is incomplete (' + status + ')')
+
+def group_calls(state):
+    if state.get('active_agent') or state.get('worker'):
+        raise ValueError('Nested delegation is disabled')
+    calls = [c for c in state.get('audit', []) if c.get('generation') == state.get('generation')]
+    if not calls or any((c.get('name') != 'delegate_task' or c.get('executor') != {'kind': 'router'} for c in calls)):
+        raise ValueError('delegate_task must be the only Tool kind in its actual generation')
+    ids = [c.get('id') for c in calls]
+    if not all(ids) or len(set(ids)) != len(ids):
+        raise ValueError('Ambiguous parallel Tool call IDs')
+    for index, call in enumerate(calls, 1):
+        arguments = call.get('arguments')
+        if not isinstance(arguments, dict) or not {'agent_id', 'task'} <= set(arguments) or set(arguments) - {'agent_id', 'task', 'file_ids'}:
+            raise ValueError('Invalid parallel assignment ' + str(index) + ': only agent_id, task and file_ids are accepted')
+    return calls
 
 # Source: runtime
 """Trusted lifecycle state shared by independent uploads through the ASGI scope.
@@ -889,8 +912,8 @@ async def validate_batch(adapter, request, user, metadata, state, tasks):
     reason = await adapter.parallel_reason(request, metadata, user)
     if reason:
         raise ValueError(reason)
-    if not isinstance(tasks, list) or not 2 <= len(tasks) <= group['max_tasks']:
-        raise ValueError('tasks must contain between 2 and ' + str(group['max_tasks']) + ' assignments')
+    if not isinstance(tasks, list) or not 1 <= len(tasks) <= group['max_tasks']:
+        raise ValueError('tasks must contain between 1 and ' + str(group['max_tasks']) + ' assignments')
     available = {input_file_id(f) for f in metadata.get('files') or [] if isinstance(f, dict)} - {None}
     validated = []
     for index, item in enumerate(tasks, 1):
@@ -1015,9 +1038,7 @@ async def collect_result(adapter, user, entry, native_result):
     result['status'] = 'completed'
     return result
 
-async def execute_group(adapter, request, user, metadata, state, assignments, events):
-    group = state['parallel']
-    group['status'] = 'running'
+def worker_runtime(adapter, request, user, metadata, state, events):
     registry = run_registry(request)
     entries = []
     event_lock = asyncio.Lock()
@@ -1066,6 +1087,7 @@ async def execute_group(adapter, request, user, metadata, state, assignments, ev
         except Exception as error:
             entry['result'] = {'agent_id': entry['agent_id'], 'task': entry['task'], 'status': 'failed', 'result': '', 'files': [], 'error': str(error)}
         finally:
+            entry['result']['task_id'] = entry['task_id']
             registry.pop(ticket, None)
 
             async def cleanup():
@@ -1082,6 +1104,12 @@ async def execute_group(adapter, request, user, metadata, state, assignments, ev
             if await finish_cleanup(cleanup()):
                 raise asyncio.CancelledError
         return entry['result']
+    return (one, entries)
+
+async def execute_group(adapter, request, user, metadata, state, assignments, events):
+    group = state['parallel']
+    group['status'] = 'running'
+    one, entries = worker_runtime(adapter, request, user, metadata, state, events)
     workers = [asyncio.create_task(one(i, assignment)) for i, assignment in enumerate(assignments)]
     collection = asyncio.gather(*workers)
     cancelled = False
@@ -1107,8 +1135,6 @@ async def execute_group(adapter, request, user, metadata, state, assignments, ev
                     entry['result'].update(status='failed', error='Execution cleanup failed: ' + str(outcome))
                 if timed_out and entry['result']['status'] == 'cancelled':
                     entry['result'].update(status='timed_out', error='Parallel group deadline exceeded')
-                    async with event_lock:
-                        await progress(entry, 'timed_out')
             group['results'] = [deepcopy(e['result']) for e in ordered]
             successes = sum((r['status'] == 'completed' for r in group['results']))
             group['status'] = 'cancelled' if cancelled else 'timed_out' if timed_out else 'completed' if successes == len(assignments) else 'partial' if successes else 'failed'
@@ -1119,20 +1145,88 @@ async def execute_group(adapter, request, user, metadata, state, assignments, ev
 
 def parallel_tool(adapter, request, user, metadata, state, events):
 
-    async def lite_parallel(tasks: list) -> str:
-        actor = await adapter.user(user.id)
-        if require(request, metadata, actor.id) is not state:
+    async def delegate_task(agent_id: str, task: str, file_ids: list=None) -> str:
+        arguments = {'agent_id': agent_id, 'task': task}
+        if file_ids is not None:
+            arguments['file_ids'] = file_ids
+        if require(request, metadata, user.id) is not state:
             raise ValueError('Stale parallel request context')
-        control_generation(state, 'lite_parallel', {'tasks': tasks})
-        if state['pending'] or state['parallel']['status'] != 'idle':
+        calls = group_calls(state)
+        group = state['parallel']
+        generation = state['generation']
+        if 'generation' in group and group['generation'] != generation:
+            group['rejected_followup'] = True
+            raise ValueError('Only one parallel group before handoff is allowed per request. Additional group rejected; handoff is blocked. Report the actual completed results and the missing work without inventing another result.')
+        if state['pending']:
             raise ValueError('Only one parallel group before handoff is allowed per request')
-        assignments = await validate_batch(adapter, request, actor, metadata, state, tasks)
-        return json.dumps(await execute_group(adapter, request, actor, metadata, state, assignments, events), ensure_ascii=False)
-    return {'spec': {'name': 'lite_parallel', 'description': 'Run self-contained agent assignments concurrently and wait for all results. Workers receive only their task and selected files, without the parent conversation. Manage the group here; do not ask workers to repeat the group or launch other agents. Call alone, then optionally hand off.', 'parameters': {'type': 'object', 'additionalProperties': False, 'properties': {'tasks': {'type': 'array', 'minItems': 2, 'maxItems': state['parallel']['max_tasks'], 'items': {'type': 'object', 'additionalProperties': False, 'properties': {'agent_id': {'type': 'string', 'enum': list(state['registry'])}, 'task': {'type': 'string', 'minLength': 1, 'description': 'Self-contained assignment: action, necessary input facts, exact dates/values/IDs, constraints and expected result. Include relevant context explicitly; the worker cannot see the parent conversation. Group scheduling and number of runs belong to Router.'}, 'file_ids': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Available input attachment IDs needed by this assignment. Explain their use in task.'}}, 'required': ['agent_id', 'task']}}}, 'required': ['tasks']}}, 'callable': lite_parallel}
+        if 'generation' in group and group['status'] in {'failed', 'cancelled', 'timed_out'}:
+            raise ValueError('Parallel group has already terminated')
+        if 'generation' not in group:
+            group['generation'] = generation
+            group['status'] = 'validating'
+            group['claimed'] = set()
+            group['results'] = [None] * len(calls)
+            group['participants'] = set()
+            group['terminal'] = asyncio.Event()
+            group['deadline'] = asyncio.get_running_loop().time() + group['timeout_seconds']
+            group['one'], group['entries'] = worker_runtime(adapter, request, user, metadata, state, events)
+
+            async def preflight():
+                actor = await adapter.user(user.id)
+                return await validate_batch(adapter, request, actor, metadata, state, [c['arguments'] for c in calls])
+            group['preflight'] = asyncio.create_task(preflight())
+        index = next((i for i, c in enumerate(calls) if i not in group['claimed'] and c['arguments'] == arguments), None)
+        if index is None:
+            raise ValueError('Unobserved or excess parallel assignment')
+        group['claimed'].add(index)
+        participant = asyncio.current_task()
+        group['participants'].add(participant)
+        try:
+            async with asyncio.timeout_at(group['deadline']):
+                assignments = await asyncio.shield(group['preflight'])
+                group['status'] = 'running'
+                result = await group['one'](index, assignments[index])
+                group['results'][index] = result
+                if all((r is not None for r in group['results'])):
+                    successes = sum((r['status'] == 'completed' for r in group['results']))
+                    group['status'] = 'completed' if successes == len(calls) else 'partial' if successes else 'failed'
+                    group['terminal'].set()
+                await group['terminal'].wait()
+                return json.dumps(deepcopy(result), ensure_ascii=False)
+        except (asyncio.CancelledError, TimeoutError):
+            group['status'] = 'timed_out' if asyncio.get_running_loop().time() >= group['deadline'] else 'cancelled'
+            for other in group['participants']:
+                if group['status'] == 'cancelled' and other is not participant and (not other.done()):
+                    other.cancel()
+            group['preflight'].cancel()
+            for missing, observed in enumerate(calls):
+                if missing not in group['claimed']:
+                    group['results'][missing] = {'agent_id': observed['arguments']['agent_id'], 'task': observed['arguments']['task'], 'status': group['status'], 'result': '', 'files': [], 'error': 'Participant did not enter before group termination'}
+            group['terminal'].set()
+            if group['status'] == 'timed_out':
+                entry = next((e for e in group['entries'] if e['index'] == index), None)
+                result = deepcopy(entry['result']) if entry and 'result' in entry else {'agent_id': agent_id, 'task': task, 'result': '', 'files': []}
+                if result.get('status') != 'completed':
+                    result.update(status='timed_out', error='Parallel group deadline exceeded')
+                group['results'][index] = result
+                return json.dumps(result, ensure_ascii=False)
+            raise
+        except Exception:
+            group['status'] = 'failed'
+            group['terminal'].set()
+            raise
+        finally:
+            group['participants'].discard(participant)
+            if group['results'][index] is None:
+                entry = next((e for e in group['entries'] if e['index'] == index), None)
+                group['results'][index] = deepcopy(entry['result']) if entry and 'result' in entry else {'agent_id': agent_id, 'task': task, 'status': group['status'], 'result': '', 'files': [], 'error': 'Parallel execution did not complete'}
+                if group['status'] == 'timed_out' and group['results'][index]['status'] == 'cancelled':
+                    group['results'][index].update(status='timed_out', error='Parallel group deadline exceeded')
+    return {'spec': {'name': 'delegate_task', 'description': 'Run ONE self-contained assignment in the selected agent. For four assignments issue four delegate_task calls in the SAME generation; OWUI runs them concurrently. Do not mix with other Tools. Workers see only their assignment and selected files. After all results, optionally hand off with a separate lite_delegate call.', 'parameters': {'type': 'object', 'additionalProperties': False, 'properties': {'agent_id': {'type': 'string', 'enum': list(state['registry'])}, 'task': {'type': 'string', 'minLength': 1, 'description': 'Self-contained task with all relevant facts, constraints and expected output.'}, 'file_ids': {'type': 'array', 'items': {'type': 'string'}}}, 'required': ['agent_id', 'task']}}, 'callable': delegate_task}
 
 async def downstream_data(adapter, user, metadata, state):
     group = state.get('parallel') or {}
-    if group.get('status') != 'completed' or state.get('worker'):
+    if group.get('status') != 'completed' or rejected_followup(state) or state.get('worker'):
         return None
     packet = deepcopy(group['results'])
     attached = {input_file_id(f): f for f in metadata.get('files') or [] if isinstance(f, dict)}
@@ -1200,6 +1294,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
             draft['messages'].insert(0, {'role': 'system', 'content': terminal_prompt})
     if READERS.intersection(tools):
         raise ValueError('Reserved Skill reader collision: ' + ', '.join(sorted(READERS.intersection(tools))))
+    native_delegate = tools.get('delegate_task')
+    if native_delegate and native_delegate.get('tool_id') == 'builtin:delegate_task' and (native_delegate.get('type') == 'builtin'):
+        tools.pop('delegate_task')
     if 'lite_parallel' in tools or 'delegate_task' in tools:
         raise ValueError('Reserved routing Tool collision: ' + ', '.join(sorted(ROUTING_TOOLS.intersection(tools))))
     for instruction in mcp_instructions:
@@ -1215,7 +1312,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
             if reason:
                 draft['messages'].insert(0, {'role': 'system', 'content': reason})
             else:
-                tools['lite_parallel'] = parallel_tool(adapter, request, user, metadata, state, events)
+                tools['delegate_task'] = parallel_tool(adapter, request, user, metadata, state, events)
     else:
         for name in ROUTING_TOOLS:
             tools.pop(name, None)
@@ -1848,9 +1945,8 @@ def observe_response(response, state, executor):
             try:
                 arguments = json.loads(call['arguments'])
             except (TypeError, ValueError):
-                continue
-            if call['id'] and call['name'] and isinstance(arguments, dict):
-                state.setdefault('audit', []).append({**call, 'arguments': arguments, 'generation': generation, 'executor': deepcopy(executor)})
+                arguments = None
+            state.setdefault('audit', []).append({**call, 'arguments': arguments, 'generation': generation, 'executor': deepcopy(executor)})
     if isinstance(response, dict):
         event(response)
         for ordinal, item in enumerate(response.get('output') or []):

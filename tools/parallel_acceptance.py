@@ -27,7 +27,7 @@ PRESENTATION_TOOL = '''class Tools:
         packet = next(m['content'] for m in __messages__ if m['role']=='user'
                       and str(m.get('content','')).startswith('Confirmed parallel task results.'))
         values = json.loads(packet.split('\\n',1)[1])
-        assert len(values)==2 and all(len(v['result'])>3000 for v in values)
+        assert len(values)==4 and all(len(v['result'])>3000 for v in values)
         assert {f['id'] for v in values for f in v['files']} <= {f.get('id') for f in __files__}
         assert 'PGATE_C_PROMPT' in str(__messages__) and 'OWN_WORKING_A' not in str(__messages__)
         document = '<!doctype html><meta charset="utf-8"><title>Forecast presentation</title>'
@@ -116,7 +116,7 @@ def install():
                                        'meta':{},'access_grants':all_grants})
     for identifier in ('route-c-pgate','work-c-pgate'):
         upsert('skills',identifier,{'id':identifier,'name':identifier,'description':'Presentation task',
-            'content':'Use lite_delegate for final presentation; use lite_parallel for independent forecasts.',
+            'content':'Use lite_delegate for final presentation; use one delegate_task per independent forecast in the same generation.',
             'meta':{},'access_grants':all_grants})
     for identifier, base, prompt, temperature, meta in (
         ('pgate-c',None,'',0.5,{'hidden':True}),
@@ -169,9 +169,13 @@ def finish(run):
 
 
 def group_result(message):
-    call=next(o for o in message['output'] if o.get('name')=='lite_parallel')
-    output=next(o for o in message['output'] if o['type']=='function_call_output' and o['call_id']==call['call_id'])
-    return json.loads(''.join(p.get('text','') for p in output['output']))
+    calls = [o for o in message['output'] if o.get('type') == 'function_call' and o.get('name') == 'delegate_task']
+    results = [json.loads(''.join(p.get('text', '') for p in next(
+        o for o in message['output'] if o['type'] == 'function_call_output' and o['call_id'] == call['call_id'])['output']))
+        for call in calls]
+    successes = sum(r.get('status') == 'completed' for r in results)
+    return {'status': 'timed_out' if any(r.get('status') == 'timed_out' for r in results) else 'completed' if successes == len(results) and results else 'partial' if successes else 'failed',
+            'results': results}
 
 
 def download(url,token):
@@ -186,12 +190,12 @@ def verify(report):
     message=report['message']
     assert not message.get('error')
     calls=[o for o in message['output'] if o['type']=='function_call']
-    assert [c['name'] for c in calls]==['view_skill','lite_parallel','lite_delegate','make_presentation']
+    assert [c['name'] for c in calls]==['view_skill']+['delegate_task']*4+['lite_delegate','make_presentation']
     assert all(c['status']=='completed' for c in calls)
     group=group_result(message)
-    assert group['status']=='completed' and len(group['results'])==2
+    assert group['status']=='completed' and len(group['results'])==4
     assert 'ticket' not in json.dumps(group) and 'nonce' not in json.dumps(group)
-    expected=['agent-a-pgate','agent-b-pgate'] if report['user_key']=='user' else ['agent-a-pgate']*2
+    expected=['agent-a-pgate','agent-b-pgate']*2 if report['user_key']=='user' else ['agent-a-pgate']*4
     assert [r['agent_id'] for r in group['results']]==expected
     intervals=[]
     trace=[json.loads(line) for line in (ROOT/'tool-trace.jsonl').read_text().splitlines()]
@@ -205,7 +209,7 @@ def verify(report):
         assert meta['parent_message_id']==report['message_id'] and correlation['task_index']==index
         assert correlation['agent_id']==result['agent_id']
         saved=child['chat']['history']['messages'][correlation['message_id']]
-        own_calls=[o for o in saved['output'] if o['type']=='function_call']
+        own_calls=[o for o in saved['output'] if o['type']=='function_call' and o.get('name')!='list_available_skills']
         assert len(own_calls)==9 and [o['status'] for o in own_calls]==['completed']*3+['failed']*3+['completed']*3
         assert saved['content']==result['result'] and saved['done'] and not saved.get('error')
         for file in result['files']:
@@ -224,8 +228,8 @@ def verify(report):
     listed=gate.api('/api/v1/chats/?include_folders=true',token=owner)
     searched=gate.api('/api/v1/chats/search?text=Assigned%20task',token=owner)
     assert not set(ids)&{c['id'] for c in listed+searched}
-    assert len(message.get('sources',[]))==2
-    assert len(report['children'])==2
+    assert len(message.get('sources',[]))==4
+    assert len(report['children'])==4
     assert message['files'] and b'<section>' in download(message['files'][0]['url'],owner)
     print(json.dumps({'passed':True,**{k:report[k] for k in ('chat_id','message_id','user_key')},
                       'overlap_seconds':overlap,'children':ids,'file_access_and_isolation':True}))
@@ -238,7 +242,7 @@ def check():
         verify(report); reports.append(report)
     first=reports[0]
     follow=finish(start('general question after C',chat_id=first['chat_id'],parent_id=first['message_id']))
-    assert 'General answer' in follow['message']['content'] and len(follow['children'])==2
+    assert 'General answer' in follow['message']['content'] and len(follow['children'])==4
     assert not [o for o in follow['message']['output'] if o['type']=='function_call']
     gate.private_json(ROOT/'product-evidence.json',{'passed':True,'runs':[
         {k:r[k] for k in ('chat_id','message_id','user_key')} for r in reports],
@@ -255,16 +259,22 @@ def lifecycle():
             run=start('parallel product slow own answer')
             for _ in range(200):
                 ids=gate.children(run['chat_id'])
-                if len(ids)==2: break
+                if len(ids)==4: break
                 time.sleep(.05)
-            assert len(ids)==2
+            assert len(ids)==4
             if action=='stop':
                 gate.api('/api/tasks/chat/'+run['chat_id']+'/stop',{},token=owner)
             elif action=='delete':
                 gate.api('/api/v1/chats/'+run['chat_id'],token=owner,method='DELETE')
             if action!='delete':
                 report=finish(run)
-                assert len(report['message'].get('sources',[]))==2
+                # Stop marks the parent done before owned cleanup persists late-bound source links.
+                for _ in range(100):
+                    report['message'] = gate.api('/api/v1/chats/'+run['chat_id'],token=owner)['chat']['history']['messages'][run['message_id']]
+                    if len(report['message'].get('sources',[])) == 4:
+                        break
+                    time.sleep(.1)
+                assert len(report['message'].get('sources',[]))==4
                 assert not any(o.get('name')=='lite_delegate' for o in report['message'].get('output',[]))
                 if action=='timeout':
                     assert group_result(report['message'])['status']=='timed_out'

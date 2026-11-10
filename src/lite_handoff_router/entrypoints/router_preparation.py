@@ -1,6 +1,6 @@
 """Mandatory request preparation for the public Router Workspace Model."""
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from ..owui_adapter import OWUIAdapter
 from ..registry import discover, ids
@@ -18,12 +18,6 @@ class Filter:
         max_parallel_tasks: int = Field(default=4, ge=0, strict=True)
         parallel_timeout_seconds: int = Field(default=300, gt=0, strict=True)
 
-        @field_validator("max_parallel_tasks")
-        @classmethod
-        def parallel_minimum(cls, value):
-            if value == 1:
-                raise ValueError("max_parallel_tasks must be 0 or >= 2")
-            return value
 
     def __init__(self):
         self.valves = self.Valves()

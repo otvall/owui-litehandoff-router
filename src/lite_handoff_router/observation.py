@@ -49,10 +49,9 @@ def observe_response(response, state, executor):
             try:
                 arguments = json.loads(call["arguments"])
             except (TypeError, ValueError):
-                continue
-            if call["id"] and call["name"] and isinstance(arguments, dict):
-                state.setdefault("audit", []).append({**call, "arguments": arguments,
-                    "generation": generation, "executor": deepcopy(executor)})
+                arguments = None
+            state.setdefault("audit", []).append({**call, "arguments": arguments,
+                "generation": generation, "executor": deepcopy(executor)})
 
     if isinstance(response, dict):
         event(response)

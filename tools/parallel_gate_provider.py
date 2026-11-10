@@ -102,20 +102,25 @@ def router_reply(body):
         if 'view_skill' not in results:
             return tool_reply(body['model'],'view_skill',{'id':'route-'+letter+'-pgate'})
         return tool_reply(body['model'],'lite_delegate',{'agent_id':'agent-'+letter+'-pgate'})
-    if 'lite_parallel' in results:
-        result = json.loads(results['lite_parallel'])
-        if result.get('status') != 'completed' or 'own answer' in question:
-            return stream_reply(body['model'], {'role': 'assistant', 'content': 'Group outcome: ' + str(result.get('status') or result)}, 'stop')
+    completed = [json.loads(m['content']) for m in messages
+                 if m.get('role') == 'tool' and calls.get(m.get('tool_call_id')) == 'delegate_task']
+    if completed:
+        if not all(r.get('status') == 'completed' for r in completed) or 'own answer' in question:
+            return stream_reply(body['model'], {'role': 'assistant', 'content': 'Group outcome: ' +
+                ('completed' if all(r.get('status') == 'completed' for r in completed) else 'partial')}, 'stop')
         return tool_reply(body['model'], 'lite_delegate', {'agent_id': 'agent-c-pgate'})
-    if 'lite_parallel' not in names:
+    if 'delegate_task' not in names:
         return stream_reply(body['model'], {'role': 'assistant', 'content': 'Parallel capability unavailable'}, 'stop')
     if 'view_skill' not in results:
         return tool_reply(body['model'], 'view_skill', {'id': 'route-a-pgate'})
-    permitted = names['lite_parallel']['parameters']['properties']['tasks']['items']['properties']['agent_id']['enum']
+    permitted = names['delegate_task']['parameters']['properties']['agent_id']['enum']
     second = 'agent-b-pgate' if 'agent-b-pgate' in permitted else 'agent-a-pgate'
-    return tool_reply(body['model'], 'lite_parallel', {'tasks': [
-        {'agent_id': 'agent-a-pgate', 'task': 'Forecast A. ' + question},
-        {'agent_id': second, 'task': 'Forecast second sphere. ' + question}]})
+    assignments = [{'agent_id': agent, 'task': 'Forecast ' + str(i) + '. ' + question}
+                   for i, agent in enumerate(['agent-a-pgate', second] * 2)]
+    return stream_reply(body['model'], {'role': 'assistant', 'content': None, 'tool_calls': [
+        {'index': i, 'id': 'gate_' + uuid4().hex, 'type': 'function',
+         'function': {'name': 'delegate_task', 'arguments': json.dumps(item)}}
+        for i, item in enumerate(assignments)]}, 'tool_calls')
 
 
 def presentation_reply(body):
@@ -129,7 +134,7 @@ def presentation_reply(body):
     packet = next(m['content'] for m in messages if m['role'] == 'user'
                   and str(m.get('content', '')).startswith('Confirmed parallel task results.'))
     values = json.loads(packet.split('\n', 1)[1])
-    assert len(values) == 2 and all(len(v['result']) > 3000 and v['files'] for v in values)
+    assert len(values) == 4 and all(len(v['result']) > 3000 and v['files'] for v in values)
     assert not {'lite_delegate', 'lite_parallel', 'profile_lookup'} & {
         c['function']['name'] for m in messages for c in m.get('tool_calls', [])}
     assert 'OWN_WORKING_A' not in str(messages) and 'OWN_WORKING_B' not in str(messages)

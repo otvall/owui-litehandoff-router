@@ -351,3 +351,13 @@ synthetic server memory reader, runs ten provenance/lifecycle scenarios and
 terminal check/controls/revocation with the current exports, then restores the
 reader, Functions and config. Raw tokens/payloads remain private in the fixture;
 export only sanitized evidence. It is not a real LLM or embeddings evaluation.
+
+
+### Single-assignment delegate_task
+
+Текущий product gate использует четыре отдельных `delegate_task` одной генерации,
+штатный конкурентный dispatch OWUI 0.13.3 и индивидуальные Tool outputs.
+`parallel_acceptance.py install`, затем `run` и `check` проверяют экспортированный
+комплект на изолированных fixtures; `lifecycle` и `controls` проверяют отмену и ошибки.
+Старый `parallel_gate_pipe.py` — исторический самостоятельный batch-эксперимент,
+он не проверяет текущий product-контракт и не должен использоваться как его приёмка.
