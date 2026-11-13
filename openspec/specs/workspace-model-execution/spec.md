@@ -194,30 +194,13 @@ Router SHALL получать базовые Tools и Skills из админис
 
 ### Requirement: Standalone offline installation on the supported version
 
-Комплект SHALL устанавливаться как один Filter и один Pipe со встроенным `lite_delegate` в OWUI v0.12.5. Отдельный Workspace Tool делегирования и его read-grant SHALL NOT требоваться. После установки эти файлы SHALL работать без импорта модулей данного репозитория и без доступа к интернету, используя заранее установленные зависимости и доступные внутри контура модели и сервисы.
+Комплект SHALL устанавливаться как один Filter и один Pipe со встроенным `lite_delegate` на проверенном релизе OWUI. Отдельный Workspace Tool делегирования и его read-grant SHALL NOT требоваться. После установки эти файлы SHALL работать без импорта модулей данного репозитория и без доступа к интернету, используя заранее установленные зависимости и доступные внутри контура модели и сервисы.
 
 #### Scenario: Installation into an isolated OWUI instance
 
-- **WHEN** два установочных файла загружены в OWUI v0.12.5, а модели и ресурсы заранее настроены внутри контура
+- **WHEN** два установочных файла загружены на проверенном релизе OWUI, а модели и ресурсы заранее настроены внутри контура
 - **THEN** самостоятельный ответ и handoff выполняются без внешних загрузок и отдельного сервиса оркестрации
 - **AND** отсутствие рабочего каталога этого репозитория на сервере не нарушает импорт Functions
-
-### Requirement: Single supported release
-
-Текущей целевой и единственной поддерживаемой версией SHALL быть Open WebUI 0.12.5. Обе установочные Functions SHALL проверять точное совпадение версии до загрузки пользователей и ресурсов. Код и сборка SHALL NOT содержать выбор release profile, адаптеры прежних версий или отдельные legacy-комплекты.
-
-#### Scenario: Another server version cannot select compatibility behavior
-
-- **WHEN** Filter или Pipe запускается на версии OWUI, отличной от 0.12.5
-- **THEN** выполнение завершается явной ошибкой версии до загрузки пользователей и ресурсов
-- **AND** metadata, Valves и пользовательские параметры не могут изменить целевую версию
-
-#### Scenario: Current supported release uses one installation bundle
-
-- **WHEN** согласованная пара Filter/Pipe установлена в Open WebUI 0.12.5
-- **THEN** проверка версии разрешает выполнение единственного комплекта
-- **AND** заголовки обоих установочных файлов указывают `required_open_webui_version: 0.12.5`
-- **AND** для запуска не требуется профиль совместимости или комплект другой версии
 
 ### Requirement: Published tool names resolve to their own callable
 
@@ -249,3 +232,18 @@ Router SHALL получать базовые Tools и Skills из админис
 - **WHEN** подготовка не может сформировать непротиворечивые имена и callable обязательных Tools
 - **THEN** генерация выбранной модели не начинается с неоднозначным набором
 - **AND** ранее опубликованные возможности не заменяются частично подготовленными
+
+### Requirement: OWUI release metadata is informational
+
+Установочные Functions SHALL указывать версию разработки OWUI только в информационной metadata `developed_for_open_webui_version`. Runtime SHALL NOT проверять номер установленной версии либо отклонять запуск из-за его несовпадения. Metadata SHALL NOT задавать обязательную минимальную версию OWUI.
+
+#### Scenario: Adapter starts without version metadata
+
+- **WHEN** адаптер создаётся без доступной distribution metadata OWUI
+- **THEN** создание не требует чтения версии и не вызывает отказ из-за версии
+
+#### Scenario: Both exports describe their development release
+
+- **WHEN** собраны оба установочных файла
+- **THEN** их заголовки содержат `developed_for_open_webui_version` с фактической версией разработки комплекта
+- **AND** `required_open_webui_version` и runtime version guard отсутствуют

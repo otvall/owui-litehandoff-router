@@ -3,6 +3,12 @@ Build the two independent Functions for Open WebUI 0.13.3 with
 `docs/acceptance.md` describe their original releases; they do not establish
 0.13.3 acceptance. See `docs/owui-0133-context-validation.md` for the 0.13.3 results.
 
+The optional routing Skill author has its own build:
+`python3 tools/build_authoring_agent.py`. It produces a standalone Workspace
+Tool and two ZIP packages; do not install its Python file as a Function.
+See [setup and permissions](../docs/routing-author-agent.md) and
+[build and test contracts](../docs/development.md#комплект-автора-routing-skills).
+
 ## Selective terminal acceptance
 
 The original OWUI 0.13.0 run used `owui-router-test`. Use only this disposable fixture setup. Copy `terminal_acceptance.py`,

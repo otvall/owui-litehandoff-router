@@ -130,8 +130,11 @@ async def manifest(adapter, skill_ids, user, registry=None):
         entries.append(entry)
     for route in routing:
         skill = skills[route['skill_id']]
-        entries.append({'skill_id': route['skill_id'], 'agent_id': route['agent_id'], 'name': skill['name'], 'description': skill.get('description') or ''})
-    return 'Available skills (read instructions with view_skill using skill_id):\n' + json.dumps(entries, ensure_ascii=False) if entries else ''
+        entries.append({'skill_id': route['skill_id'], 'agent_id': route['agent_id'], 'agent_name': route.get('agent_name') or route['agent_id'], 'name': skill['name'], 'description': skill.get('description') or ''})
+    guidance = 'When asked about your capabilities (for example, "что ты можешь", "что ты умеешь", or "which agents are available"), answer directly in the user\'s language and list all available agents by agent_name from the current manifest. Use descriptions to briefly explain their capabilities; name is the routing Skill name, not the agent name. Do not delegate merely to describe capabilities. Only list agents from this manifest; if none have agent_id, explicitly say that no agents are currently available.\n' if registry is not None else ''
+    if not entries and registry is None:
+        return ''
+    return guidance + ('Available skills (read instructions with view_skill using skill_id):\n' + json.dumps(entries, ensure_ascii=False))
 
 # Source: capabilities
 """Native Tools and authenticated MCP sessions owned by one request."""

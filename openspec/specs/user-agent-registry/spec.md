@@ -8,7 +8,7 @@
 
 ### Requirement: Explicit agent to routing skill catalog
 
-Система SHALL принимать конфигурационный словарь Workspace Model ID агента → ID существующего routing Skill OWUI. Система SHALL использовать явно заданные соответствия без генерации routing Skills из описаний моделей.
+Система SHALL принимать конфигурационный словарь Workspace Model ID агента → ID существующего routing Skill OWUI. Runtime Router SHALL использовать явно заданные соответствия без генерации routing Skills при обработке запроса. Отдельный помощник MAY подготовить и сохранить Skill после согласования профиля с автором; это SHALL NOT автоматически добавлять модель в реестр.
 
 #### Scenario: Administrator registers an existing agent and skill
 
@@ -62,12 +62,13 @@
 
 ### Requirement: Aligned manifest and delegate schema
 
-Система SHALL формировать манифест routing Skills и `enum` обязательного строкового аргумента `lite_delegate.agent_id` из одного персонального реестра. Каждая запись манифеста SHALL содержать отдельные `skill_id`, `agent_id`, имя и описание Skill. `agent_id` SHALL быть точным Workspace Model ID.
+Система SHALL формировать манифест routing Skills и `enum` обязательного строкового аргумента `lite_delegate.agent_id` из одного персонального реестра. Каждая запись манифеста SHALL содержать отдельные `skill_id`, `agent_id`, `agent_name`, имя и описание Skill. `agent_id` SHALL быть точным Workspace Model ID. `agent_name` SHALL содержать название Workspace Model из реестра; для записи без названия SHALL использоваться `agent_id`. Поле `name` SHALL сохранять название routing Skill.
 
 #### Scenario: Skill id differs from agent id
 
 - **WHEN** зарегистрировано `agent-a: route-agent-a` и агент доступен пользователю
 - **THEN** манифест показывает `skill_id=route-agent-a` и `agent_id=agent-a`
+- **AND** `agent_name` содержит название модели A отдельно от `name` routing Skill
 - **AND** `enum` содержит `agent-a`, не подменяя его идентификатором Skill
 - **AND** загрузка `route-agent-a` возвращает написанные администратором инструкции
 
@@ -77,6 +78,28 @@
 - **THEN** routing Skills не публикуются и `lite_delegate` не предлагается модели
 - **AND** схема с пустым `enum` не отправляется провайдеру
 - **AND** Router сохраняет возможность отвечать своими средствами
+
+### Requirement: Capability inquiries describe the current agents
+
+Router SHALL получать инструкцию отвечать на вопросы о возможностях самостоятельно на языке пользователя, перечисляя всех агентов текущего персонального каталога по `agent_name` с назначением по описаниям. Инструкция SHALL запрещать подмену названий именами Skills, перечисление агентов вне каталога и передачу только ради описания возможностей. Блок SHALL присутствовать при пустом реестре Router и SHALL NOT добавляться в рабочий контекст агента.
+
+#### Scenario: User asks what the router can do
+
+- **WHEN** пользователь спрашивает о возможностях Router и в текущем каталоге есть A и B с отличающимися от Skills названиями
+- **AND** запрос сформулирован как «что ты можешь», «что ты умеешь», «какие агенты доступны» или аналогично
+- **THEN** манифест содержит названия обоих агентов и инструкцию перечислить их в самостоятельном ответе
+- **AND** для описания возможностей инструкция не требует `lite_delegate` или `delegate_task`
+
+#### Scenario: Empty registry still has capability guidance
+
+- **WHEN** реестр Router пуст, независимо от наличия базовых Skills
+- **THEN** Router получает инструкцию прямо сообщить, что сейчас доступных агентов нет
+- **AND** базовые Skills не выдаются за агентов и пустая delegate-схема не публикуется
+
+#### Scenario: Agent receives its own working context
+
+- **WHEN** готовится контекст выбранной модели агента
+- **THEN** её рабочий манифест не содержит инструкции перечислять агентов Router
 
 ### Requirement: Registry isolation between concurrent requests
 
