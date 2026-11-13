@@ -40,8 +40,8 @@ class RoutingSkillRendererTests(unittest.TestCase):
         metadata = yaml.safe_load(result.split("---", 2)[1])
         self.assertEqual(metadata["description"], fields()["routing_description"])
         self.assertEqual(metadata["name"], "route-forecast")
-        self.assertEqual(metadata["metadata"], {"agent_id": fields()["agent_model_id"],
-                                                "agent_name": fields()["agent_name"]})
+        self.assertEqual(metadata, {"name": fields()["skill_name"],
+                                    "description": fields()["routing_description"]})
         self.assertIn("`forecast/model-1`", result)
         for key in ("positive_examples", "negative_examples"):
             self.assertIn("- " + fields()[key][0], result)
@@ -49,12 +49,12 @@ class RoutingSkillRendererTests(unittest.TestCase):
             self.assertIn(fields()[key], result)
         self.assertNotIn("{{", result)
 
-    def test_agent_metadata_quotes_do_not_change_plain_markdown_identity(self):
+    def test_agent_identity_stays_in_markdown_without_extra_yaml_fields(self):
         import yaml
         values = {**fields(), "agent_name": 'Агент: "Прогноз" \\ A', "agent_model_id": 'forecast/model:"1"'}
         result = render(values, TEMPLATE)
-        metadata = yaml.safe_load(result.split("---", 2)[1])["metadata"]
-        self.assertEqual(metadata, {"agent_id": values["agent_model_id"], "agent_name": values["agent_name"]})
+        metadata = yaml.safe_load(result.split("---", 2)[1])
+        self.assertEqual(set(metadata), {"name", "description"})
         body = result.split("---", 2)[2]
         self.assertIn("# " + values["agent_name"], body)
         self.assertIn("`" + values["agent_model_id"] + "`", body)

@@ -55,14 +55,13 @@ def render(fields: dict, template: str) -> str:
             raise ValueError("Replace all template placeholders in input fields")
 
     expected = Counter({name.upper(): 1 for name in TEXT_FIELDS})
-    expected.update(("AGENT_MODEL_ID", "AGENT_NAME"))
     if Counter(TOKEN.findall(template)) != expected:
-        raise ValueError("Template must contain supported placeholders: agent fields twice, other fields once")
+        raise ValueError("Template must contain each supported placeholder once")
     if not template.startswith("---\n") or "\n---\n" not in template[4:]:
         raise ValueError("Template must start with YAML frontmatter")
     header, body = template[4:].split("\n---\n", 1)
     # JSON-quoted strings are valid YAML. Quote metadata separately from body text.
-    for name in ("SKILL_NAME", "ROUTING_DESCRIPTION", "AGENT_MODEL_ID", "AGENT_NAME"):
+    for name in ("SKILL_NAME", "ROUTING_DESCRIPTION"):
         quoted = '"{{' + name + '}}"'
         if header.count(quoted) != 1:
             raise ValueError("Template must quote the " + name + " placeholder")

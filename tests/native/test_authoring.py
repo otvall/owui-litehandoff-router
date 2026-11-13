@@ -104,8 +104,8 @@ class NativeAuthoringTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.user_id, self.writer.id)
         self.assertEqual(first.access_grants, [])
         self.assertTrue(first.is_active)
-        self.assertEqual(frontmatter(first.content)["metadata"], {
-            "agent_id": self.model_id, "agent_name": self.profile()["agent_name"],
+        self.assertEqual(frontmatter(first.content), {
+            "name": self.profile()["skill_name"], "description": self.profile()["routing_description"],
         })
         self.assertEqual(saved["registry_entry"], {self.model_id: skill_id})
         self.assertFalse(saved["registry_updated"])
@@ -126,7 +126,7 @@ class NativeAuthoringTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(updated["is_active"])
         self.assertNotEqual(row.version_id, current.version_id)
         self.assertIn("Updated forecast with sources", row.content)
-        self.assertEqual(frontmatter(row.content)["metadata"]["agent_id"], self.model_id)
+        self.assertEqual(set(frontmatter(row.content)), {"name", "description"})
         self.assertIn({"path": "notes.txt", "content": "Keep me"}, row.data["files"])
         self.assertTrue(await AccessGrants.has_access(user_id=self.reader.id, resource_type="skill",
                                                     resource_id=skill_id, permission="read"))

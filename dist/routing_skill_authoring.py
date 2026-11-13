@@ -51,13 +51,12 @@ def render(fields: dict, template: str) -> str:
         if any(('{{' in item or '}}' in item for item in items)):
             raise ValueError('Replace all template placeholders in input fields')
     expected = Counter({name.upper(): 1 for name in TEXT_FIELDS})
-    expected.update(('AGENT_MODEL_ID', 'AGENT_NAME'))
     if Counter(TOKEN.findall(template)) != expected:
-        raise ValueError('Template must contain supported placeholders: agent fields twice, other fields once')
+        raise ValueError('Template must contain each supported placeholder once')
     if not template.startswith('---\n') or '\n---\n' not in template[4:]:
         raise ValueError('Template must start with YAML frontmatter')
     header, body = template[4:].split('\n---\n', 1)
-    for name in ('SKILL_NAME', 'ROUTING_DESCRIPTION', 'AGENT_MODEL_ID', 'AGENT_NAME'):
+    for name in ('SKILL_NAME', 'ROUTING_DESCRIPTION'):
         quoted = '"{{' + name + '}}"'
         if header.count(quoted) != 1:
             raise ValueError('Template must quote the ' + name + ' placeholder')
@@ -93,7 +92,7 @@ import json
 from pathlib import Path
 
 def authoring_template():
-    return '---\nname: "{{SKILL_NAME}}"\ndescription: "{{ROUTING_DESCRIPTION}}"\nmetadata:\n  agent_id: "{{AGENT_MODEL_ID}}"\n  agent_name: "{{AGENT_NAME}}"\n---\n\n# {{AGENT_NAME}}\n\nАдресат: Workspace Model с точным ID `{{AGENT_MODEL_ID}}`.\nЭтот профиль читает Router для выбора адресата. Рабочие инструкции\nисполнителя задаются в его модели и собственных Skills.\n\n## Когда выбирать агента\n\n{{ROUTING_CRITERIA}}\n\n## Когда не выбирать этого агента\n\n{{OTHER_ROUTE_CRITERIA}}\n\n## Входные данные и уточнения\n\n{{REQUIRED_INPUTS}}\n\n## Самостоятельное поручение в составном запросе\n\n{{INDEPENDENT_TASK_SCOPE}}\n\n## Финальная обработка готовых результатов\n\n{{FINAL_RESULT_SCOPE}}\n\n## Ожидаемый результат\n\n{{EXPECTED_RESULT}}\n'
+    return '---\nname: "{{SKILL_NAME}}"\ndescription: "{{ROUTING_DESCRIPTION}}"\n---\n\n# {{AGENT_NAME}}\n\nАдресат: Workspace Model с точным ID `{{AGENT_MODEL_ID}}`.\nЭтот профиль читает Router для выбора адресата. Рабочие инструкции\nисполнителя задаются в его модели и собственных Skills.\n\n## Когда выбирать агента\n\n{{ROUTING_CRITERIA}}\n\n## Когда не выбирать этого агента\n\n{{OTHER_ROUTE_CRITERIA}}\n\n## Входные данные и уточнения\n\n{{REQUIRED_INPUTS}}\n\n## Самостоятельное поручение в составном запросе\n\n{{INDEPENDENT_TASK_SCOPE}}\n\n## Финальная обработка готовых результатов\n\n{{FINAL_RESULT_SCOPE}}\n\n## Ожидаемый результат\n\n{{EXPECTED_RESULT}}\n'
 
 async def authoring_user(injected):
     from open_webui.models.users import Users

@@ -1,9 +1,6 @@
 ---
 name: "{{SKILL_NAME}}"
 description: "{{ROUTING_DESCRIPTION}}"
-metadata:
-  agent_id: "{{AGENT_MODEL_ID}}"
-  agent_name: "{{AGENT_NAME}}"
 ---
 
 # {{AGENT_NAME}}

@@ -129,28 +129,28 @@ Open WebUI: изучение конфигурации агента с право
 - **WHEN** поля не содержат негативных примеров либо включают незаменённый placeholder
 - **THEN** рендер и сохранение отклоняются без частично сформированного Skill
 
-### Requirement: Routing Skill target metadata
+### Requirement: Skill metadata is separate from runtime agent identity
 
-Созданный `SKILL.md` SHALL содержать YAML `name`/`description` Skill и вложенные `metadata.agent_id`/`metadata.agent_name` адресата. Рендерер SHALL брать адресата в YAML и тексте из одних полей и безопасно экранировать YAML-строки. Метаданные SHALL сохраняться в содержимом файла и SHALL NOT заменять `AGENTS`, штатные проверки доступа или актуальное имя модели в манифесте Router. Skills без этих полей SHALL сохранять работоспособность.
+Созданный по шаблону `SKILL.md` SHALL содержать в YAML только `name` и `description` самого Skill с безопасным экранированием строк. Имя и ID адресата SHALL оставаться в тексте профиля и входных полях помощника. Runtime Router SHALL брать соответствие из `AGENTS`, а актуальное название из Workspace Model. Дополнительные YAML-поля адресата SHALL NOT требоваться для регистрации или выполнения.
 
 #### Scenario: Agent name differs from Skill name
 
 - **WHEN** автор готовит Skill `route-forecast` для модели `forecast-agent` с именем «Прогнозист»
-- **THEN** YAML содержит `name=route-forecast`, `metadata.agent_id=forecast-agent` и `metadata.agent_name=Прогнозист`
-- **AND** адресат в тексте профиля совпадает со значениями метаданных
-- **AND** после сохранения штатными средствами OWUI эти поля остаются в `SKILL.md`
+- **THEN** YAML содержит только `name=route-forecast` и описание Skill
+- **AND** имя «Прогнозист» и ID `forecast-agent` присутствуют в тексте профиля
+- **AND** после сохранения штатными средствами OWUI поля адресата не добавляются в YAML
 
-#### Scenario: Target identity contains YAML punctuation
+#### Scenario: Target identity contains punctuation
 
 - **WHEN** имя или ID адресата содержит двоеточие, кавычки или обратный слеш
-- **THEN** YAML parser восстанавливает исходные значения без искажения
-- **AND** экранирование YAML не изменяет обычное имя и ID в Markdown-тексте
+- **THEN** исходные имя и ID сохраняются в Markdown-тексте
+- **AND** YAML содержит только метаданные самого Skill
 
-#### Scenario: Existing routing Skill lacks target metadata
+#### Scenario: Existing routing Skill has legacy target metadata
 
-- **WHEN** в `AGENTS` зарегистрирован пригодный Skill без `metadata.agent_id` и `metadata.agent_name`
+- **WHEN** в `AGENTS` зарегистрирован пригодный Skill с дополнительными `metadata.agent_id` и `metadata.agent_name`
 - **THEN** runtime использует существующую связь и проверки без требования миграции Skill
-- **AND** следующий рендер профиля по новому шаблону добавляет поля адресата
+- **AND** следующий рендер профиля по новому шаблону удаляет поля адресата из YAML
 
 ### Requirement: Native Skill persistence and version protection
 
