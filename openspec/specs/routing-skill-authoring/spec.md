@@ -108,6 +108,29 @@ Open WebUI: изучение конфигурации агента с право
 - **WHEN** поля не содержат негативных примеров либо включают незаменённый placeholder
 - **THEN** рендер и сохранение отклоняются без частично сформированного Skill
 
+### Requirement: Routing Skill target metadata
+
+Созданный `SKILL.md` SHALL содержать YAML `name`/`description` Skill и вложенные `metadata.agent_id`/`metadata.agent_name` адресата. Рендерер SHALL брать адресата в YAML и тексте из одних полей и безопасно экранировать YAML-строки. Метаданные SHALL сохраняться в содержимом файла и SHALL NOT заменять `AGENTS`, штатные проверки доступа или актуальное имя модели в манифесте Router. Skills без этих полей SHALL сохранять работоспособность.
+
+#### Scenario: Agent name differs from Skill name
+
+- **WHEN** автор готовит Skill `route-forecast` для модели `forecast-agent` с именем «Прогнозист»
+- **THEN** YAML содержит `name=route-forecast`, `metadata.agent_id=forecast-agent` и `metadata.agent_name=Прогнозист`
+- **AND** адресат в тексте профиля совпадает со значениями метаданных
+- **AND** после сохранения штатными средствами OWUI эти поля остаются в `SKILL.md`
+
+#### Scenario: Target identity contains YAML punctuation
+
+- **WHEN** имя или ID адресата содержит двоеточие, кавычки или обратный слеш
+- **THEN** YAML parser восстанавливает исходные значения без искажения
+- **AND** экранирование YAML не изменяет обычное имя и ID в Markdown-тексте
+
+#### Scenario: Existing routing Skill lacks target metadata
+
+- **WHEN** в `AGENTS` зарегистрирован пригодный Skill без `metadata.agent_id` и `metadata.agent_name`
+- **THEN** runtime использует существующую связь и проверки без требования миграции Skill
+- **AND** следующий рендер профиля по новому шаблону добавляет поля адресата
+
 ### Requirement: Native Skill persistence and version protection
 
 Сохранение SHALL использовать штатные обработчики OWUI, actor-права и историю. Пустой `expected_version_id` SHALL означать только создание; обновление SHALL требовать write на Skill и актуальную версию. Новый Skill SHALL быть активным и приватным для автора. Обновление SHALL сохранять владельца, grants, активность и файлы кроме `SKILL.md`. Конфликт SHALL требовать перечитать изменения перед новой попыткой.

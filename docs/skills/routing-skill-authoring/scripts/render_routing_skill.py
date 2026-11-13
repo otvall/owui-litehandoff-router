@@ -1,6 +1,7 @@
 """Fill the routing Skill template from JSON; Python 3, standard library only."""
 
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 import re
@@ -53,21 +54,22 @@ def render(fields: dict, template: str) -> str:
         if any("{{" in item or "}}" in item for item in items):
             raise ValueError("Replace all template placeholders in input fields")
 
-    expected = {name.upper() for name in TEXT_FIELDS}
-    tokens = TOKEN.findall(template)
-    if set(tokens) != expected or len(tokens) != len(expected):
-        raise ValueError(f"Template must contain each of the {len(expected)} supported placeholders once")
-    # The canonical template surrounds these two placeholders with YAML quotes.
-    # JSON string quoting is also valid YAML, including quotes and newlines.
-    for name in ("SKILL_NAME", "ROUTING_DESCRIPTION"):
+    expected = Counter({name.upper(): 1 for name in TEXT_FIELDS})
+    expected.update(("AGENT_MODEL_ID", "AGENT_NAME"))
+    if Counter(TOKEN.findall(template)) != expected:
+        raise ValueError("Template must contain supported placeholders: agent fields twice, other fields once")
+    if not template.startswith("---\n") or "\n---\n" not in template[4:]:
+        raise ValueError("Template must start with YAML frontmatter")
+    header, body = template[4:].split("\n---\n", 1)
+    # JSON-quoted strings are valid YAML. Quote metadata separately from body text.
+    for name in ("SKILL_NAME", "ROUTING_DESCRIPTION", "AGENT_MODEL_ID", "AGENT_NAME"):
         quoted = '"{{' + name + '}}"'
-        if template.count(quoted) != 1:
+        if header.count(quoted) != 1:
             raise ValueError("Template must quote the " + name + " placeholder")
-        template = template.replace(quoted, "{{" + name + "}}")
+        header = header.replace(quoted, "{{" + name + "}}")
 
     replacements = {name.upper(): values[name] for name in TEXT_FIELDS}
-    for name in ("SKILL_NAME", "ROUTING_DESCRIPTION"):
-        replacements[name] = json.dumps(replacements[name], ensure_ascii=False)
+    header = TOKEN.sub(lambda match: json.dumps(replacements[match.group(1)], ensure_ascii=False), header)
 
     def examples_section(title, examples):
         bullets = "\n".join("- " + item.replace("\n", "\n  ") for item in examples)
@@ -75,7 +77,7 @@ def render(fields: dict, template: str) -> str:
 
     replacements["ROUTING_CRITERIA"] += examples_section("Позитивные примеры", values["positive_examples"])
     replacements["OTHER_ROUTE_CRITERIA"] += examples_section("Негативные примеры", values["negative_examples"])
-    result = TOKEN.sub(lambda match: replacements[match.group(1)], template)
+    result = "---\n" + header + "\n---\n" + TOKEN.sub(lambda match: replacements[match.group(1)], body)
     if "{{" in result or "}}" in result:
         raise ValueError("Unresolved template placeholders")
     return result.rstrip() + "\n"
