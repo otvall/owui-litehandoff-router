@@ -169,6 +169,7 @@ class Tools:
         :param fields: Object with skill_name, routing_description, agent_name, agent_model_id, routing_criteria,
             other_route_criteria, required_inputs, independent_task_scope, final_result_scope, expected_result
             (all strings), and positive_examples and negative_examples (nonempty arrays of agreed strings).
+            Describe only this agent's scope; exclusions must not name other agents or prescribe another route.
         """
         user = await authoring_user(__user__)
         content = render(fields, authoring_template())

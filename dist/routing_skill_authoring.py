@@ -93,7 +93,7 @@ import json
 from pathlib import Path
 
 def authoring_template():
-    return '---\nname: "{{SKILL_NAME}}"\ndescription: "{{ROUTING_DESCRIPTION}}"\nmetadata:\n  agent_id: "{{AGENT_MODEL_ID}}"\n  agent_name: "{{AGENT_NAME}}"\n---\n\n# {{AGENT_NAME}}\n\nАдресат: Workspace Model с точным ID `{{AGENT_MODEL_ID}}`.\nЭтот профиль читает Router для выбора адресата. Рабочие инструкции\nисполнителя задаются в его модели и собственных Skills.\n\n## Когда выбирать агента\n\n{{ROUTING_CRITERIA}}\n\n## Когда выбрать другой путь\n\n{{OTHER_ROUTE_CRITERIA}}\n\n## Входные данные и уточнения\n\n{{REQUIRED_INPUTS}}\n\n## Самостоятельное поручение в составном запросе\n\n{{INDEPENDENT_TASK_SCOPE}}\n\n## Финальная обработка готовых результатов\n\n{{FINAL_RESULT_SCOPE}}\n\n## Ожидаемый результат\n\n{{EXPECTED_RESULT}}\n'
+    return '---\nname: "{{SKILL_NAME}}"\ndescription: "{{ROUTING_DESCRIPTION}}"\nmetadata:\n  agent_id: "{{AGENT_MODEL_ID}}"\n  agent_name: "{{AGENT_NAME}}"\n---\n\n# {{AGENT_NAME}}\n\nАдресат: Workspace Model с точным ID `{{AGENT_MODEL_ID}}`.\nЭтот профиль читает Router для выбора адресата. Рабочие инструкции\nисполнителя задаются в его модели и собственных Skills.\n\n## Когда выбирать агента\n\n{{ROUTING_CRITERIA}}\n\n## Когда не выбирать этого агента\n\n{{OTHER_ROUTE_CRITERIA}}\n\n## Входные данные и уточнения\n\n{{REQUIRED_INPUTS}}\n\n## Самостоятельное поручение в составном запросе\n\n{{INDEPENDENT_TASK_SCOPE}}\n\n## Финальная обработка готовых результатов\n\n{{FINAL_RESULT_SCOPE}}\n\n## Ожидаемый результат\n\n{{EXPECTED_RESULT}}\n'
 
 async def authoring_user(injected):
     from open_webui.models.users import Users
@@ -210,6 +210,7 @@ class Tools:
         :param fields: Object with skill_name, routing_description, agent_name, agent_model_id, routing_criteria,
             other_route_criteria, required_inputs, independent_task_scope, final_result_scope, expected_result
             (all strings), and positive_examples and negative_examples (nonempty arrays of agreed strings).
+            Describe only this agent's scope; exclusions must not name other agents or prescribe another route.
         """
         user = await authoring_user(__user__)
         content = render(fields, authoring_template())

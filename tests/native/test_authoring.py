@@ -36,7 +36,7 @@ class NativeAuthoringTest(unittest.IsolatedAsyncioTestCase):
             "skill_name": "route-authoring-" + self.suffix,
             "routing_description": "Прогноз по временному ряду.",
             "routing_criteria": "Рассчитать прогноз.",
-            "other_route_criteria": "Объяснение терминов остаётся Router.",
+            "other_route_criteria": "Объяснение терминов без расчёта прогноза вне профиля.",
             "required_inputs": "Временной ряд, горизонт, единицы.",
             "independent_task_scope": "Один прогноз одного ряда.",
             "final_result_scope": "Сравнение готовых прогнозов.",

@@ -16,7 +16,7 @@ metadata:
 
 {{ROUTING_CRITERIA}}
 
-## Когда выбрать другой путь
+## Когда не выбирать этого агента
 
 {{OTHER_ROUTE_CRITERIA}}
 
