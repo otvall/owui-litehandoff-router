@@ -18,6 +18,7 @@ Router для Open WebUI **0.13.3**: самостоятельный ответ �
 - [Проверки совместимости](docs/compatibility.md)
 - [Контекст и обмен результатами](docs/context.md)
 - [Разделение Skills](docs/skills.md)
+- [Все routing Skills в одном Skill-контейнере](docs/folder-routing.md)
 - [Агент для создания routing Skills](docs/routing-author-agent.md)
 - [Фактическая приёмка](docs/acceptance.md)
 

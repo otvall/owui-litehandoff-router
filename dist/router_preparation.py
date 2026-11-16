@@ -333,7 +333,9 @@ def publish(request, current, draft, tools):
 
 # Source: registry
 """The same immutable request snapshot supplies routing discovery and execution."""
+import json
 import logging
+from pathlib import PurePosixPath
 log = logging.getLogger(__name__)
 
 def pipe_dispatcher(model, models):
@@ -375,6 +377,30 @@ async def discover(adapter, request, user, catalog, router_id):
             reason = str(getattr(error, 'detail', error))
             diagnostics.append({'agent_id': agent_id, 'reason': reason})
             log.warning('Excluded agent %s: %s', agent_id, reason)
+    return (entries, diagnostics)
+
+async def discover_folder(adapter, request, user, skill_id, router_id):
+    """Read an explicit routing index from one native multi-file Skill."""
+    router = await adapter.model(request, router_id, user)
+    owner = await adapter.owner(router)
+    skill = await adapter.skill(skill_id, owner)
+    files = {item['path']: item['content'] for item in (skill.get('data') or {}).get('files', [])}
+    try:
+        routes = json.loads(files['routing.json'])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError('Routing Skill must contain a valid routing.json') from error
+    if not isinstance(routes, dict):
+        raise ValueError('routing.json must map Workspace Model IDs to profile objects')
+    for agent_id, profile in routes.items():
+        if not isinstance(profile, dict) or any((not isinstance(profile.get(key), str) or not profile[key].strip() for key in ('path', 'name', 'description'))):
+            raise ValueError('Each routing profile requires path, name and description')
+        path = profile['path']
+        if PurePosixPath(path).is_absolute() or '..' in path.split('/') or '\\' in path or (path != str(PurePosixPath(path))) or (path in {'SKILL.md', 'routing.json'}) or (path not in files):
+            raise ValueError('Routing profile must reference an existing relative Skill file: ' + path)
+    entries, diagnostics = await discover(adapter, request, user, {agent: skill_id for agent in routes}, router_id)
+    for agent_id, entry in entries.items():
+        profile = routes[agent_id]
+        entry.update(name=profile['name'], description=profile['description'], skill_path=profile['path'])
     return (entries, diagnostics)
 
 # Source: terminals
@@ -1516,6 +1542,7 @@ class Filter:
 
     class Valves(BaseModel):
         priority: int = 0
+        routing_skill_id: str = Field(default='', description='Multi-file Skill containing routing.json and routing profiles')
         base_tool_ids: list[str] = Field(default_factory=list)
         base_skill_ids: list[str] = Field(default_factory=list)
         max_parallel_tasks: int = Field(default=4, ge=0, strict=True)
@@ -1532,6 +1559,9 @@ class Filter:
         metadata = __metadata__ if __metadata__ is not None else body.setdefault('metadata', {})
         if await prepare_worker(adapter, __request__, body, metadata, user):
             return body
-        registry, diagnostics = await discover(adapter, __request__, user, AGENTS, body['model'])
+        if self.valves.routing_skill_id.strip():
+            registry, diagnostics = await discover_folder(adapter, __request__, user, self.valves.routing_skill_id.strip(), body['model'])
+        else:
+            registry, diagnostics = await discover(adapter, __request__, user, AGENTS, body['model'])
         begin(__request__, body, metadata, user.id, registry, diagnostics, ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids), max_parallel_tasks=self.valves.max_parallel_tasks, parallel_timeout_seconds=self.valves.parallel_timeout_seconds)
         return body

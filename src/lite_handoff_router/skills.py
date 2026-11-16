@@ -56,7 +56,9 @@ async def manifest(adapter, skill_ids, user, registry=None):
         skill = skills[route["skill_id"]]
         entries.append({"skill_id": route["skill_id"], "agent_id": route["agent_id"],
                         "agent_name": route.get("agent_name") or route["agent_id"],
-                        "name": skill["name"], "description": skill.get("description") or ""})
+                        "name": route.get("name", skill["name"]) if route.get("skill_path") else skill["name"],
+                        "description": route.get("description", "") if route.get("skill_path") else skill.get("description") or "",
+                        **({"skill_path": route["skill_path"]} if route.get("skill_path") else {})})
     guidance = (
         'When asked about your capabilities (for example, "что ты можешь", "что ты умеешь", '
         'or "which agents are available"), answer directly in the user\'s language and list '
@@ -67,6 +69,12 @@ async def manifest(adapter, skill_ids, user, registry=None):
     ) if registry is not None else ""
     if not entries and registry is None:
         return ""
+    if registry is not None and any(route.get("skill_path") for route in routing):
+        guidance += (
+            "For entries with skill_path, read the routing profile with read_skill_file "
+            "using id=skill_id and path=skill_path before choosing an agent. "
+            "The shared SKILL.md describes the catalog; each file describes its own agent.\n"
+        )
     return guidance + (
         "Available skills (read instructions with view_skill using skill_id):\n"
         + json.dumps(entries, ensure_ascii=False)
