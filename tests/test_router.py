@@ -61,6 +61,44 @@ class Adapter:
 
 
 class RouterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_card_resources_add_to_router_routing_and_valve_resources(self):
+        adapter = Adapter()
+        model = await adapter.model(None, "router", User())
+        model["info"]["meta"].update(toolIds=["card-tool"], skillIds=["card-skill"], terminalId="term")
+        async def get_model(*args):
+            return model
+        adapter.model = get_model
+        original_tools = adapter.tools
+        async def load_tools(request, identifiers, owner, extra):
+            self.assertEqual(set(identifiers), {"base", "card-tool"})
+            loaded = await original_tools(request, identifiers, owner, extra)
+            loaded["card_helper"] = {"tool_id": "card-tool", "spec": {"name": "card_helper", "parameters": {}},
+                                     "callable": lambda: "card works"}
+            return loaded
+        adapter.tools = load_tools
+        async def terminal_tools(request, identifier, owner, extra):
+            self.assertEqual(identifier, "term")
+            return {"run_command": {"tool_id": "terminal:term", "type": "terminal",
+                    "spec": {"name": "run_command", "parameters": {}}, "callable": lambda: "terminal works"}}, "Terminal prompt"
+        async def terminal_access(*args):
+            pass
+        adapter.terminal_tools = terminal_tools
+        adapter.terminal_access = terminal_access
+        request = SimpleNamespace(scope={}, app=SimpleNamespace(state=SimpleNamespace(MODELS={"llm": {"owned_by": "openai"}})))
+        state = {"request_id": "request", "router_id": "router", "source": [],
+                 "registry": {"a": {"agent_id": "a", "skill_id": "route-a", "name": "A"}},
+                 "base_tool_ids": ["base"], "base_skill_ids": ["base-skill"]}
+        body, tools = await prepare_model(adapter, request, {}, User(), {}, state, "llm", {})
+        self.assertTrue({"base_helper", "card_helper", "run_command", "lite_delegate", "view_skill"} <= tools.keys())
+        systems = "\n".join(m["content"] for m in body["messages"] if m["role"] == "system")
+        for expected in ("card-skill", "base-skill", "route-a", "Terminal prompt", "Router"):
+            self.assertIn(expected, systems)
+        self.assertEqual(await tools["card_helper"]["callable"](), "card works")
+        self.assertEqual(await tools["run_command"]["callable"](), "terminal works")
+        model["info"]["meta"]["toolIds"] = []
+        with self.assertRaisesRegex(ValueError, "detached"):
+            await tools["card_helper"]["callable"]()
+
     async def test_separate_delegate_tool_cannot_replace_the_inline_callable(self):
         adapter = Adapter()
         loaded = await adapter.tools(None, [], User(), {})

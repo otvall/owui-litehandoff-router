@@ -485,7 +485,9 @@ class ResourceScope:
         self.model_id, self.owner_id = (model['id'], owner.id)
         self.tool_ids, self.skill_ids = (frozenset(tool_ids), frozenset(skill_ids))
         self.router = router
-        self.terminal_id = terminal_id if not router else None
+        self.terminal_id = terminal_id
+        meta = model.get('info', {}).get('meta') or {}
+        self.card_ids = {'skill': frozenset(ids(meta.get('skillIds') or [])), 'tool': frozenset(ids(meta.get('toolIds') or []))}
 
     async def authority(self, kind, identifier):
         allowed = self.skill_ids if kind == 'skill' else {self.terminal_id} - {None} if kind == 'terminal' else self.tool_ids
@@ -495,7 +497,7 @@ class ResourceScope:
         owner = await self.adapter.owner(model)
         if owner.id != self.owner_id:
             raise ValueError('Model resource owner changed during generation')
-        if not self.router:
+        if not self.router or kind == 'terminal' or identifier in self.card_ids.get(kind, ()):
             meta = model.get('info', {}).get('meta') or {}
             configured = {terminal_binding(model)} - {None} if kind == 'terminal' else ids(meta.get('skillIds' if kind == 'skill' else 'toolIds') or [])
             if identifier not in configured:
@@ -1264,9 +1266,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     selected = deepcopy(model)
     selected['owned_by'] = inference.get('owned_by')
     meta = model.get('info', {}).get('meta') or {}
-    tool_ids = ids(meta.get('toolIds') or []) if target else state['base_tool_ids']
-    skill_ids = ids(meta.get('skillIds') or []) if target else ids(state['base_skill_ids'] + [entry['skill_id'] for entry in state['registry'].values()])
-    terminal_id = terminal_binding(model) if target else None
+    tool_ids = ids(meta.get('toolIds') or []) if target else ids(state['base_tool_ids'] + ids(meta.get('toolIds') or []))
+    skill_ids = ids(meta.get('skillIds') or []) if target else ids(state['base_skill_ids'] + ids(meta.get('skillIds') or []) + [entry['skill_id'] for entry in state['registry'].values()])
+    terminal_id = terminal_binding(model)
     prepare_terminal_scope(metadata, terminal_id)
     resources = ResourceScope(adapter, request, user, model, owner, tool_ids, skill_ids, router=not target, terminal_id=terminal_id)
     prepare_skill_scope(metadata, state, model['id'], skill_ids)

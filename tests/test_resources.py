@@ -95,9 +95,19 @@ class ResourceScopeTest(unittest.IsolatedAsyncioTestCase):
             await scope.terminal("term-a")
         self.assertEqual(len([c for c in adapter.calls if c[0]=="terminal"]),1)
 
-    async def test_no_binding_or_router_cannot_gain_terminal_from_tool_ids(self):
+    async def test_router_terminal_rechecks_card_binding(self):
         adapter=Directory()
-        for router,terminal_id in ((False,None),(True,"term-a")):
+        adapter.model_row["info"]["meta"]["terminalId"]="term-a"
+        scope=ResourceScope(adapter,None,SimpleNamespace(id="actor"),adapter.model_row,
+            SimpleNamespace(id="owner"),[],[],router=True,terminal_id="term-a")
+        await scope.terminal("term-a")
+        adapter.model_row["info"]["meta"]["terminalId"]=None
+        with self.assertRaisesRegex(ValueError,"detached"):
+            await scope.terminal("term-a")
+
+    async def test_no_binding_cannot_gain_terminal_from_tool_ids(self):
+        adapter=Directory()
+        for router,terminal_id in ((False,None),(True,None)):
             scope=ResourceScope(adapter,None,SimpleNamespace(id="actor"),adapter.model_row,
                 SimpleNamespace(id="owner"),["terminal:term-a"],[],router=router,terminal_id=terminal_id)
             with self.assertRaisesRegex(ValueError,"model scope"):

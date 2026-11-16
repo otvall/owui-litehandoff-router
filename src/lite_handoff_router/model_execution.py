@@ -49,11 +49,13 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     selected = deepcopy(model)
     selected["owned_by"] = inference.get("owned_by")
     meta = model.get("info", {}).get("meta") or {}
-    tool_ids = ids(meta.get("toolIds") or []) if target else state["base_tool_ids"]
+    tool_ids = ids(meta.get("toolIds") or []) if target else ids(
+        state["base_tool_ids"] + ids(meta.get("toolIds") or []))
     skill_ids = ids(meta.get("skillIds") or []) if target else ids(
-        state["base_skill_ids"] + [entry["skill_id"] for entry in state["registry"].values()]
+        state["base_skill_ids"] + ids(meta.get("skillIds") or [])
+        + [entry["skill_id"] for entry in state["registry"].values()]
     )
-    terminal_id = terminal_binding(model) if target else None
+    terminal_id = terminal_binding(model)
     prepare_terminal_scope(metadata, terminal_id)
     resources = ResourceScope(adapter, request, user, model, owner, tool_ids, skill_ids,
                               router=not target, terminal_id=terminal_id)

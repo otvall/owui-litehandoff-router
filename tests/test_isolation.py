@@ -34,7 +34,7 @@ class IsolatedAdapter(Adapter):
 
 
 class IsolationTest(unittest.IsolatedAsyncioTestCase):
-    async def test_client_user_valves_and_router_card_cannot_union_or_disable_sets(self):
+    async def test_router_card_adds_resources_but_client_cannot_disable_or_leak_sets(self):
         models = {
             "router": {"id": "router", "info": {"params": {"system": "Router"}, "meta": {"toolIds": ["forbidden"], "skillIds": ["forbidden-skill"]}}},
             "a": {"id": "a", "owned_by": "openai", "info": {"params": {"system": "A"}, "meta": {"toolIds": ["a", "delegate"]}}},
@@ -57,7 +57,7 @@ class IsolationTest(unittest.IsolatedAsyncioTestCase):
                 await pipe.pipe(body, request, fake_user_valves, metadata)
                 self.assertTrue(adapter.calls[-1]["native"] == "native")
                 self.assertIn("base_tool", adapter.calls[-1]["tools"])
-                self.assertNotIn("forbidden_tool", adapter.calls[-1]["tools"])
+                self.assertIn("forbidden_tool", adapter.calls[-1]["tools"])
                 marker = await delegate(adapter, request, User(), state, target)
                 body["messages"] += [
                     {"role": "assistant", "tool_calls": [call("lite_delegate", "d", {"agent_id": target})]},
