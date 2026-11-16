@@ -61,6 +61,41 @@ class Adapter:
 
 
 class RouterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_router_uses_chat_selected_terminal_with_capability_enabled(self):
+        adapter = Adapter()
+        model = await adapter.model(None, "router", User())
+        model["info"]["meta"].update(capabilities={"terminal": True}, terminalId=None)
+        async def get_model(*args):
+            return model
+        adapter.model = get_model
+        async def terminal_tools(request, identifier, owner, extra):
+            return {"run_command": {"tool_id": "terminal:" + identifier, "type": "terminal",
+                    "spec": {"name": "run_command", "parameters": {}}, "callable": lambda: "works"}}, "Terminal prompt"
+        adapter.terminal_tools = terminal_tools
+        request = SimpleNamespace(scope={}, state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(
+            MODELS={"llm": {"owned_by": "openai"}})))
+        body = {"model": "router", "messages": [], "terminal_id": "chat-terminal"}
+        metadata = {}
+        state = begin(request, body, metadata, "u", {}, [], [], [])
+        # Native middleware moves the UI selection from the body to metadata.
+        metadata["terminal_id"] = body.pop("terminal_id")
+        draft, tools = await prepare_model(adapter, request, body, User(), metadata, state, "llm", {})
+        self.assertIn("run_command", tools)
+        self.assertEqual(draft["metadata"]["terminal_id"], "chat-terminal")
+        model["info"]["meta"]["terminalId"] = "default-terminal"
+        draft, tools = await prepare_model(adapter, request, body, User(), metadata, state, "llm", {})
+        self.assertEqual(draft["metadata"]["terminal_id"], "chat-terminal")
+        model["info"]["meta"]["capabilities"]["terminal"] = False
+        draft, tools = await prepare_model(adapter, request, body, User(), metadata, state, "llm", {})
+        self.assertNotIn("run_command", tools)
+        self.assertNotIn("terminal_id", draft["metadata"])
+        # A copied metadata selection cannot enable a terminal in a new request.
+        model["info"]["meta"].update(capabilities={"terminal": True}, terminalId=None)
+        state = begin(request, body, metadata, "u", {}, [], [], [])
+        metadata["terminal_id"] = "copied-selection"
+        draft, tools = await prepare_model(adapter, request, body, User(), metadata, state, "llm", {})
+        self.assertNotIn("run_command", tools)
+
     async def test_card_resources_add_to_router_routing_and_valve_resources(self):
         adapter = Adapter()
         model = await adapter.model(None, "router", User())

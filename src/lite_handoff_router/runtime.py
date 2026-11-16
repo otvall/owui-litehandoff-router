@@ -19,6 +19,7 @@ def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, ski
         "request_id": uuid4().hex, "user_id": user_id,
         "chat_id": metadata.get("chat_id"), "message_id": metadata.get("message_id"),
         "router_id": body["model"], "registry": deepcopy(registry),
+        "chat_terminal_id": body.get("terminal_id") if isinstance(body.get("terminal_id"), str) else None,
         "diagnostics": diagnostics, "base_tool_ids": list(tool_ids),
         "base_skill_ids": list(skill_ids), "source": deepcopy(body.get("messages", [])),
         "phase": "router", "pending": [], "active_agent": None,

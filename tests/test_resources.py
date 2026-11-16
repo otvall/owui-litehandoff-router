@@ -32,6 +32,20 @@ class Directory:
 
 
 class ResourceScopeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_terminal_uses_actor_access_and_rechecks_capability(self):
+        adapter=Directory()
+        meta=adapter.model_row["info"]["meta"]
+        meta["capabilities"]={"terminal": True}
+        scope=ResourceScope(adapter,None,SimpleNamespace(id="actor"),adapter.model_row,
+            SimpleNamespace(id="owner"),[],[],router=True,terminal_id="chat-term",chat_terminal=True)
+        await scope.terminal("chat-term")
+        self.assertEqual(adapter.calls[-1], ("terminal","chat-term","actor"))
+        meta["capabilities"]["terminal"]=False
+        with self.assertRaisesRegex(ValueError,"disabled"):
+            await scope.terminal("chat-term")
+        with self.assertRaisesRegex(ValueError,"model scope"):
+            await scope.terminal("other")
+
     def scope(self, adapter):
         return ResourceScope(adapter,None,SimpleNamespace(id="actor"),adapter.model_row,
             SimpleNamespace(id="owner"),["private-tool"],["private-skill"])

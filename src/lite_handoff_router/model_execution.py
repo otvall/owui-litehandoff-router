@@ -56,9 +56,13 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         + [entry["skill_id"] for entry in state["registry"].values()]
     )
     terminal_id = terminal_binding(model)
+    chat_terminal = bool(not target and state.get("chat_terminal_id")
+                         and (meta.get("capabilities") or {}).get("terminal", True))
+    if chat_terminal:
+        terminal_id = state["chat_terminal_id"]
     prepare_terminal_scope(metadata, terminal_id)
     resources = ResourceScope(adapter, request, user, model, owner, tool_ids, skill_ids,
-                              router=not target, terminal_id=terminal_id)
+                              router=not target, terminal_id=terminal_id, chat_terminal=chat_terminal)
     prepare_skill_scope(metadata, state, model["id"], skill_ids)
     draft = {key: deepcopy(value) for key, value in body.items() if key in ENVELOPE}
     draft.update(model=llm_id, messages=[
@@ -79,7 +83,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if any(is_terminal_tool(tool) for tool in tools.values()):
         raise ValueError("Terminal Tools must come from the model terminal binding")
     if terminal_id:
-        terminal_tools, terminal_prompt = await adapter.terminal_tools(request, terminal_id, owner, extra)
+        terminal_tools, terminal_prompt = await adapter.terminal_tools(
+            request, terminal_id, user if chat_terminal else owner, extra)
         collisions = set(terminal_tools).intersection(set(tools) | READERS | ROUTING_TOOLS)
         if collisions:
             raise ValueError("Conflicting terminal Tool name: " + ", ".join(sorted(collisions)))

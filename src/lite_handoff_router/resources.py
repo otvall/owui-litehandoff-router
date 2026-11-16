@@ -9,12 +9,14 @@ async def routing_owner(adapter, request, user, router_id):
 
 
 class ResourceScope:
-    def __init__(self, adapter, request, user, model, owner, tool_ids, skill_ids, *, router=False, terminal_id=None):
+    def __init__(self, adapter, request, user, model, owner, tool_ids, skill_ids, *, router=False, terminal_id=None,
+                 chat_terminal=False):
         self.adapter, self.request, self.user = adapter, request, user
         self.model_id, self.owner_id = model["id"], owner.id
         self.tool_ids, self.skill_ids = frozenset(tool_ids), frozenset(skill_ids)
         self.router = router
         self.terminal_id = terminal_id
+        self.chat_terminal = chat_terminal and router
         meta = model.get("info", {}).get("meta") or {}
         self.card_ids = {"skill": frozenset(ids(meta.get("skillIds") or [])),
                          "tool": frozenset(ids(meta.get("toolIds") or []))}
@@ -28,6 +30,11 @@ class ResourceScope:
         owner = await self.adapter.owner(model)
         if owner.id != self.owner_id:
             raise ValueError("Model resource owner changed during generation")
+        if kind == "terminal" and self.chat_terminal:
+            meta = model.get("info", {}).get("meta") or {}
+            if (meta.get("capabilities") or {}).get("terminal") is False:
+                raise ValueError("Terminal capability was disabled on the current model")
+            return self.user
         if not self.router or kind == "terminal" or identifier in self.card_ids.get(kind, ()):
             meta = model.get("info", {}).get("meta") or {}
             configured = ({terminal_binding(model)} - {None} if kind == "terminal" else

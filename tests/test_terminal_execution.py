@@ -60,7 +60,7 @@ class TerminalExecutionTest(unittest.IsolatedAsyncioTestCase):
                                    self.state,"llm",{},target=target)
 
     async def test_opt_in_transitions_and_continuations_replace_terminal_context(self):
-        for target,terminal in ((None,None),("a","t1"),("a","t1"),("b","t2"),("c",None),(None,None)):
+        for target,terminal in ((None,"client"),("a","t1"),("a","t1"),("b","t2"),("c",None),(None,"client")):
             draft,tools=await self.prepare(target)
             self.assertEqual(draft["metadata"].get("terminal_id"),terminal)
             self.assertEqual("run_command" in tools,bool(terminal))
@@ -108,7 +108,7 @@ class TerminalExecutionTest(unittest.IsolatedAsyncioTestCase):
             await self.prepare("a")
         self.assertIs(self.metadata["tools"],old_registry)
         self.assertEqual(set(old_registry),old_names)
-        self.assertNotIn("terminal_id",self.metadata)
+        self.assertEqual(self.metadata["terminal_id"],"client")
 
     async def test_collision_is_rejected_without_overwriting_any_tool(self):
         for name in ("a_tool","view_skill","lite_delegate","lite_parallel","delegate_task"):
