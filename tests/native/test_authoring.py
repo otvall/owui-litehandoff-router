@@ -36,10 +36,7 @@ class NativeAuthoringTest(unittest.IsolatedAsyncioTestCase):
             "skill_name": "route-authoring-" + self.suffix,
             "routing_description": "Прогноз по временному ряду.",
             "routing_criteria": "Рассчитать прогноз.",
-            "other_route_criteria": "Объяснение терминов без расчёта прогноза вне профиля.",
-            "required_inputs": "Временной ряд, горизонт, единицы.",
-            "independent_task_scope": "Один прогноз одного ряда.",
-            "final_result_scope": "Сравнение готовых прогнозов.",
+            "exclusion_criteria": "Объяснение терминов без расчёта прогноза вне профиля.",
             "expected_result": "Прогноз с допущениями.",
             "positive_examples": ["Рассчитай продажи на декабрь."],
             "negative_examples": ["Что такое сезонность?"],
@@ -104,6 +101,7 @@ class NativeAuthoringTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.user_id, self.writer.id)
         self.assertEqual(first.access_grants, [])
         self.assertTrue(first.is_active)
+        self.assertNotIn(self.model_id, first.content)
         self.assertEqual(frontmatter(first.content), {
             "name": self.profile()["skill_name"], "description": self.profile()["routing_description"],
         })

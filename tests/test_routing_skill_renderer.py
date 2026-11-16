@@ -22,10 +22,7 @@ def fields():
         "agent_name": "Прогнозист",
         "agent_model_id": "forecast/model-1",
         "routing_criteria": "Нужно рассчитать прогноз по временному ряду.",
-        "other_route_criteria": "Объяснение общих терминов без расчёта прогноза вне профиля.",
-        "required_inputs": "Временной ряд, горизонт и единицы измерения; горизонт уточнить до запуска.",
-        "independent_task_scope": "Один прогноз для одного заданного ряда и горизонта.",
-        "final_result_scope": "Сравнение готовых прогнозов одной метрики без повторного расчёта.",
+        "exclusion_criteria": "Объяснение общих терминов без расчёта прогноза вне профиля.",
         "expected_result": "Прогноз с допущениями.",
         "positive_examples": ["Рассчитай продажи на декабрь по приложенному ряду."],
         "negative_examples": ["Что такое сезонность?"],
@@ -42,10 +39,14 @@ class RoutingSkillRendererTests(unittest.TestCase):
         self.assertEqual(metadata["name"], "route-forecast")
         self.assertEqual(metadata, {"name": fields()["skill_name"],
                                     "description": fields()["routing_description"]})
-        self.assertIn("`forecast/model-1`", result)
+        self.assertNotIn(fields()["agent_model_id"], result)
         for key in ("positive_examples", "negative_examples"):
             self.assertIn("- " + fields()[key][0], result)
-        for key in ("required_inputs", "independent_task_scope", "final_result_scope"):
+        positive, negative = result.split("## Когда не выбирать этого агента", 1)
+        self.assertIn(fields()["positive_examples"][0], positive)
+        self.assertNotIn(fields()["negative_examples"][0], positive)
+        self.assertIn(fields()["negative_examples"][0], negative)
+        for key in ("routing_criteria", "exclusion_criteria", "expected_result"):
             self.assertIn(fields()[key], result)
         self.assertNotIn("{{", result)
 
@@ -57,7 +58,7 @@ class RoutingSkillRendererTests(unittest.TestCase):
         self.assertEqual(set(metadata), {"name", "description"})
         body = result.split("---", 2)[2]
         self.assertIn("# " + values["agent_name"], body)
-        self.assertIn("`" + values["agent_model_id"] + "`", body)
+        self.assertNotIn(values["agent_model_id"], body)
 
     def test_bundled_template_matches_canonical_template(self):
         canonical = ROOT / "docs/templates/routing-skill/SKILL.md"
@@ -74,6 +75,8 @@ class RoutingSkillRendererTests(unittest.TestCase):
             ("negative_examples", "a string"), ("skill_name", "Invalid Name"),
             ("agent_model_id", "{{AGENT_MODEL_ID}}"), ("agent_name", "Name\n# Heading"),
             ("unknown_field", "typo"),
+            ("other_route_criteria", "Old exclusions"), ("required_inputs", "Old inputs"),
+            ("independent_task_scope", "Old assignment"), ("final_result_scope", "Old final role"),
         ):
             cases.append({**fields(), key: value})
         for case in cases:

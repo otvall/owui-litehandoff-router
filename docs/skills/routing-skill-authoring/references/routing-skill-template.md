@@ -5,29 +5,21 @@ description: "{{ROUTING_DESCRIPTION}}"
 
 # {{AGENT_NAME}}
 
-Адресат: Workspace Model с точным ID `{{AGENT_MODEL_ID}}`.
-Этот профиль читает Router для выбора адресата. Рабочие инструкции
-исполнителя задаются в его модели и собственных Skills.
-
 ## Когда выбирать агента
 
 {{ROUTING_CRITERIA}}
 
+### Примеры подходящих запросов
+
+{{POSITIVE_EXAMPLES}}
+
 ## Когда не выбирать этого агента
 
-{{OTHER_ROUTE_CRITERIA}}
+{{EXCLUSION_CRITERIA}}
 
-## Входные данные и уточнения
+### Примеры неподходящих запросов
 
-{{REQUIRED_INPUTS}}
-
-## Самостоятельное поручение в составном запросе
-
-{{INDEPENDENT_TASK_SCOPE}}
-
-## Финальная обработка готовых результатов
-
-{{FINAL_RESULT_SCOPE}}
+{{NEGATIVE_EXAMPLES}}
 
 ## Ожидаемый результат
 

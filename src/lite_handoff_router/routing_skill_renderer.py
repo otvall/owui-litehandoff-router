@@ -10,8 +10,7 @@ import sys
 
 TEXT_FIELDS = (
     "skill_name", "routing_description", "agent_name", "agent_model_id",
-    "routing_criteria", "other_route_criteria", "expected_result",
-    "required_inputs", "independent_task_scope", "final_result_scope",
+    "routing_criteria", "exclusion_criteria", "expected_result",
 )
 EXAMPLE_FIELDS = ("positive_examples", "negative_examples")
 TOKEN = re.compile(r"\{\{([A-Z_]+)\}\}")
@@ -54,7 +53,8 @@ def render(fields: dict, template: str) -> str:
         if any("{{" in item or "}}" in item for item in items):
             raise ValueError("Replace all template placeholders in input fields")
 
-    expected = Counter({name.upper(): 1 for name in TEXT_FIELDS})
+    # Model ID is a control input for authoring Tools, not part of the profile.
+    expected = Counter({name.upper(): 1 for name in TEXT_FIELDS + EXAMPLE_FIELDS if name != "agent_model_id"})
     if Counter(TOKEN.findall(template)) != expected:
         raise ValueError("Template must contain each supported placeholder once")
     if not template.startswith("---\n") or "\n---\n" not in template[4:]:
@@ -70,12 +70,8 @@ def render(fields: dict, template: str) -> str:
     replacements = {name.upper(): values[name] for name in TEXT_FIELDS}
     header = TOKEN.sub(lambda match: json.dumps(replacements[match.group(1)], ensure_ascii=False), header)
 
-    def examples_section(title, examples):
-        bullets = "\n".join("- " + item.replace("\n", "\n  ") for item in examples)
-        return "\n\n### " + title + "\n\n" + bullets
-
-    replacements["ROUTING_CRITERIA"] += examples_section("Позитивные примеры", values["positive_examples"])
-    replacements["OTHER_ROUTE_CRITERIA"] += examples_section("Негативные примеры", values["negative_examples"])
+    for name in EXAMPLE_FIELDS:
+        replacements[name.upper()] = "\n".join("- " + item.replace("\n", "\n  ") for item in values[name])
     result = "---\n" + header + "\n---\n" + TOKEN.sub(lambda match: replacements[match.group(1)], body)
     if "{{" in result or "}}" in result:
         raise ValueError("Unresolved template placeholders")

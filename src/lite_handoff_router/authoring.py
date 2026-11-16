@@ -167,8 +167,9 @@ class Tools:
         """Validate agreed profile fields and render a routing SKILL.md; does not save it.
 
         :param fields: Object with skill_name, routing_description, agent_name, agent_model_id, routing_criteria,
-            other_route_criteria, required_inputs, independent_task_scope, final_result_scope, expected_result
+            exclusion_criteria, expected_result
             (all strings), and positive_examples and negative_examples (nonempty arrays of agreed strings).
+            agent_model_id is used to authorize the target model and is not rendered into the profile.
             Describe only this agent's scope; exclusions must not name other agents or prescribe another route.
         """
         user = await authoring_user(__user__)
