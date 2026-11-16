@@ -65,21 +65,29 @@ async def authoring_tool_specs(identifier, user):
 
 class Tools:
     async def list_agent_models(self, query: str = "", page: int = 1, __user__: dict = None) -> str:
-        """Find Workspace Models writable by the current user. Follow next_page even if items is empty.
+        """Find writable Workspace Models by name or model ID; follow next_page for more results.
 
-        :param query: Agent name or model ID search text; empty lists accessible models.
-        :param page: Source catalog page, starting at 1.
+        :param query: Case-insensitive substring of agent name or model ID; empty lists writable models.
+        :param page: Page of matching writable models, starting at 1.
         """
-        from open_webui.routers.models import get_models, PAGE_ITEM_COUNT
+        from open_webui.models.models import Models
+        from open_webui.routers.models import BYPASS_ADMIN_ACCESS_CONTROL, PAGE_ITEM_COUNT
 
         user = await authoring_user(__user__)
         if page < 1:
             raise ValueError("page must be positive")
-        result = await get_models(query=query or None, page=page, user=user, db=None)
+        # The UI search first filters by read grants and does not search Model IDs.
+        # Query the native writable catalog directly; never substitute the model owner.
+        bypass = user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL
+        models = await Models.get_models(writable_by_user_id=None if bypass else user.id)
+        needle = query.strip().casefold()
+        models = [m for m in models if not needle or needle in m.id.casefold() or needle in m.name.casefold()]
+        models.sort(key=lambda m: (m.name.casefold(), m.id))
+        start, end = (page - 1) * PAGE_ITEM_COUNT, page * PAGE_ITEM_COUNT
         return authoring_json({
             "items": [{"id": m.id, "name": m.name, "is_active": m.is_active}
-                      for m in result.items if m.write_access],
-            "next_page": page + 1 if page * PAGE_ITEM_COUNT < result.total else None,
+                      for m in models[start:end]],
+            "next_page": page + 1 if end < len(models) else None,
         })
 
     async def inspect_agent_model(self, model_id: str, __user__: dict = None) -> str:

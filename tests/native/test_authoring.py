@@ -3,6 +3,7 @@ from pathlib import Path
 import runpy
 import unittest
 from uuid import uuid4
+from unittest.mock import patch
 
 from lite_handoff_router.authoring import Tools
 
@@ -22,7 +23,7 @@ class NativeAuthoringTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.model_id = "authoring-model-" + self.suffix
         await Models.insert_new_model(ModelForm(
-            id=self.model_id, name=self.model_id, params={"system": "SECRET_AGENT_PROMPT"},
+            id=self.model_id, name=self.model_id, base_model_id="base-llm", params={"system": "SECRET_AGENT_PROMPT"},
             meta={"skillIds": [], "toolIds": []}), self.owner.id)
         from open_webui.models.access_grants import AccessGrants
         await AccessGrants.grant_access("model", self.model_id, "user", self.writer.id, "write")
@@ -41,6 +42,78 @@ class NativeAuthoringTest(unittest.IsolatedAsyncioTestCase):
             "positive_examples": ["Рассчитай продажи на декабрь."],
             "negative_examples": ["Что такое сезонность?"],
         }
+
+    async def test_list_includes_model_shared_with_write_only_grant(self):
+        from open_webui.models.models import Models, ModelForm
+
+        # A real Workspace Model with a base model and a display name unlike its ID.
+        await Models.update_model_by_id(self.model_id, ModelForm(
+            id=self.model_id, name="Forecast specialist", base_model_id="base-llm",
+            params={"system": "Prompt"}, meta={}), user_id=self.owner.id)
+        for query in ("", "Forecast specialist"):
+            with self.subTest(query=query):
+                result = json.loads(await self.tools.list_agent_models(
+                    query, __user__=self.writer.model_dump()))
+                self.assertIn(self.model_id, {item["id"] for item in result["items"]})
+
+    async def test_list_matches_model_id_when_display_name_differs(self):
+        from open_webui.models.models import Models, ModelForm
+
+        await Models.update_model_by_id(self.model_id, ModelForm(
+            id=self.model_id, name="Forecast specialist", base_model_id="base-llm",
+            params={}, meta={}), user_id=self.owner.id)
+        result = json.loads(await self.tools.list_agent_models(
+            self.model_id, __user__=self.owner.model_dump()))
+        self.assertEqual([item["id"] for item in result["items"]], [self.model_id])
+
+    async def test_list_includes_inherited_group_write_and_rechecks_revocation(self):
+        from open_webui.models.groups import Groups, GroupForm
+        from open_webui.models.access_grants import AccessGrants
+
+        parent = await Groups.insert_new_group(self.owner.id, GroupForm(
+            name="authors-" + self.suffix, description="Authors"))
+        child = await Groups.insert_new_group(self.owner.id, GroupForm(
+            name="child-" + self.suffix, description="Inherited authors", parent_group_id=parent.id))
+        await Groups.add_users_to_group(child.id, [self.writer.id])
+        await AccessGrants.revoke_access("model", self.model_id, "user", self.writer.id, "write")
+        await AccessGrants.grant_access("model", self.model_id, "group", parent.id, "write")
+        result = json.loads(await self.tools.list_agent_models(self.model_id, __user__=self.writer.model_dump()))
+        self.assertEqual([m["id"] for m in result["items"]], [self.model_id])
+        await AccessGrants.revoke_access("model", self.model_id, "group", parent.id, "write")
+        result = json.loads(await self.tools.list_agent_models(self.model_id, __user__=self.writer.model_dump()))
+        self.assertEqual(result["items"], [])
+
+    async def test_list_pages_matching_writable_models_without_read_only_entries(self):
+        from open_webui.models.models import Models, ModelForm
+        from open_webui.models.access_grants import AccessGrants
+
+        prefix = "Page " + self.suffix
+        expected = []
+        for label in ("0-read-only", "A", "B", "C"):
+            identifier = "page-" + label.lower() + "-" + self.suffix
+            await Models.insert_new_model(ModelForm(
+                id=identifier, name=prefix + " " + label, base_model_id="base-llm", params={}, meta={}), self.owner.id)
+            permission = "read" if label == "0-read-only" else "write"
+            await AccessGrants.grant_access("model", identifier, "user", self.writer.id, permission)
+            if permission == "write":
+                expected.append(identifier)
+        with patch("open_webui.routers.models.PAGE_ITEM_COUNT", 2):
+            first = json.loads(await self.tools.list_agent_models(prefix.upper(), __user__=self.writer.model_dump()))
+            second = json.loads(await self.tools.list_agent_models(prefix, page=first["next_page"],
+                                                                  __user__=self.writer.model_dump()))
+        self.assertEqual([m["id"] for m in first["items"]], expected[:2])
+        self.assertEqual([m["id"] for m in second["items"]], expected[2:])
+        self.assertIsNone(second["next_page"])
+
+    async def test_list_admin_bypass_respects_platform_setting(self):
+        from open_webui.models.users import Users
+
+        admin = await Users.insert_new_user("admin-author-" + self.suffix, "Admin",
+                                           self.suffix + "@admin-author.example.test", role="admin")
+        for bypass in (False, True):
+            with self.subTest(bypass=bypass), patch("open_webui.routers.models.BYPASS_ADMIN_ACCESS_CONTROL", bypass):
+                result = json.loads(await self.tools.list_agent_models(self.model_id, __user__=admin.model_dump()))
+                self.assertEqual([m["id"] for m in result["items"]], [self.model_id] if bypass else [])
 
     async def test_read_only_actor_cannot_inspect_or_render_even_with_forged_admin_role(self):
         from open_webui.models.access_grants import AccessGrants
@@ -160,6 +233,8 @@ class NativeAuthoringTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packages[0]["name"], "routing-skill-authoring")
         result = json.loads(await instance.inspect_agent_model(self.model_id, __user__=self.writer.model_dump()))
         self.assertEqual(result["system_prompt"], "SECRET_AGENT_PROMPT")
+        catalog = json.loads(await instance.list_agent_models(self.model_id, __user__=self.writer.model_dump()))
+        self.assertEqual([m["id"] for m in catalog["items"]], [self.model_id])
 
     async def test_local_tool_inspection_never_loads_source_and_respects_resource_grants(self):
         from open_webui.models.tools import Tools as ToolRows, ToolForm
