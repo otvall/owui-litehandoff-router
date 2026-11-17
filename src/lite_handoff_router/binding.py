@@ -3,13 +3,13 @@
 import inspect
 
 
-async def bind_tool_context(adapter, tool, messages, check=None, pinned=None):
+async def bind_tool_context(adapter, tool, messages, check=None, pinned=None, resolve=None):
     function = tool["callable"]
     original = getattr(function, "__function__", function)
     extra = getattr(function, "__extra_params__", None)
     signature = inspect.signature(original)
     pinned = {key: value for key, value in (pinned or {}).items() if key in signature.parameters}
-    if check is None and not pinned and (messages is None or "__messages__" not in signature.parameters):
+    if check is None and resolve is None and not pinned and (messages is None or "__messages__" not in signature.parameters):
         return tool
 
     async def protected(*args, **kwargs):
@@ -19,6 +19,10 @@ async def bind_tool_context(adapter, tool, messages, check=None, pinned=None):
         if check is not None:
             arguments = signature.bind_partial(*args, **kwargs).arguments
             await check(arguments)
+        if resolve is not None:
+            arguments = signature.bind_partial(*args, **kwargs).arguments
+            overrides = await resolve(arguments)
+            kwargs.update({key: value for key, value in overrides.items() if key in signature.parameters})
         result = original(*args, **kwargs)
         return await result if inspect.isawaitable(result) else result
 

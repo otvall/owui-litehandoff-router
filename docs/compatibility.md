@@ -18,6 +18,10 @@
 живой модели. Окно N по умолчанию выключено, бюджеты и суммаризация пока
 не подключены. [Подробный отчёт](tool-history-context-validation.md).
 
+В обоих XML-каталогах `skill` использует дочерние поля без атрибутов:
+routing — `id/agent_id/agent_name/name/description`, ordinary — `id/name/description`.
+Chat-only Skills Router проверяются от actor и не передаются агентам/работникам.
+
 ## Терминал из карточки модели
 
 Агент получает терминал из штатного `meta.terminalId` (Default terminal).

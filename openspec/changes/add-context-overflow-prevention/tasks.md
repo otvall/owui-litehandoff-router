@@ -2,7 +2,7 @@
 
 Ветка `feat/tool-history-context-limits` основана на `main` (`3d684db`), без folder-routing коммита. Реализованы секции 1–4: окно текстовых/HTML результатов, исторические `lite_delegate` с отдельными tool messages, один system и XML routing Skills. Бюджеты, checkpoints и summary относятся к поздним этапам: согласованный текущий объём ограничен скрытием и новой упаковкой истории, обновление плана не запускает поздние механизмы.
 
-Пересобраны обе Functions, проходят 131 unit-тест и 77 native-тестов в изолированной официальной OWUI 0.13.3. Официальный шаблон GLM проверен рендерингом. Отдельная HTTP-приёмка и смысловая GLM-приёмка не выполнены; подробности и границы подтверждения — в `docs/tool-history-context-validation.md`.
+Пересобраны обе Functions, проходят 134 unit-теста и 78 native-тестов в изолированной официальной OWUI 0.13.3. Официальный шаблон GLM проверен рендерингом. Отдельная HTTP-приёмка и смысловая GLM-приёмка не выполнены; подробности и границы подтверждения — в `docs/tool-history-context-validation.md`.
 
 ## 1. Administrative policy and runtime propagation
 
@@ -32,10 +32,14 @@
 
 ## 4. Composed Router system and XML routing catalog
 
-- [x] 4.1 Сериализовать scoped routing-каталог XML-encoder в routing_skills с полями skill_id/agent_id/agent_name/name/description и отдельными base Skills; проверить специальные символы, пустой реестр, порядок и отсутствие неприкреплённых Skills.
+- [x] 4.1 Обновить XML: routing_skills первым с дочерними id/agent_id/agent_name/name/description без атрибутов, available_skills вторым с id/name/description как в OWUI; проверить escaping, пустые блоки, порядок, отсутствие дублей и отдельный каталог агента.
 - [x] 4.2 Сохранить guidance чтения routing Skill, ответа о возможностях и выбора agent_id; на main проверить view_skill(id=skill_id) и отсутствие новой зависимости от skill_path/routing.json/folder routing.
 - [x] 4.3 Собрать одно исходящее system-сообщение Router из своего промпта, правил, каталогов и допустимых системных добавлений; проверить стабильный порядок, отсутствие raw Tool data, отдельное API-поле tools и сохранение собственного system/scope агента.
 - [x] 4.4 Документировать XML и итоговый API-пример в docs/context.md/docs/setup.md; проверить официальным шаблоном GLM-5.3-Flash, что отдельные role=tool сериализуются в observation/tool_response, а схемы и control tags не дублируются вручную.
+
+- [x] 4.5 Подключить явные обычные Skills чата из body.skill_ids и native mentions текущего user через серверный snapshot; проверить actor/owner authority, недоступность и отзыв доступа, dedup и отсутствие расширения через metadata, старые mentions или handoff/worker.
+- [x] 4.6 Проверить оба каталога и chat-only Skill настоящими readers/callable refresh и экспортами в изолированной OWUI 0.13.3; подтвердить один system, точные ID чтения и неизменный scope агента/worker.
+- [x] 4.7 Обновить документацию и примеры XML/чата, пересобрать обе Functions, выполнить unit/native проверки и strict validation; записать фактический результат без заявления о смысловой приёмке GLM.
 
 ## 5. Later stage: complete request budget and diagnostics
 

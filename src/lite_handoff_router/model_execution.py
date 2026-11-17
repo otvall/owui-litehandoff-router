@@ -84,6 +84,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         state["base_skill_ids"] + ids(meta.get("skillIds") or [])
         + [entry["skill_id"] for entry in state["registry"].values()]
     )
+    chat_skill_ids = [sid for sid in state.get("chat_skill_ids", []) if sid not in skill_ids] if not target else []
+    skill_ids = ids(skill_ids + chat_skill_ids)
     terminal_id = terminal_binding(model)
     chat_terminal = bool(not target and state.get("chat_terminal_id")
                          and (meta.get("capabilities") or {}).get("terminal", True))
@@ -91,7 +93,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         terminal_id = state["chat_terminal_id"]
     prepare_terminal_scope(metadata, terminal_id)
     resources = ResourceScope(adapter, request, user, model, owner, tool_ids, skill_ids,
-                              router=not target, terminal_id=terminal_id, chat_terminal=chat_terminal)
+                              router=not target, terminal_id=terminal_id, chat_terminal=chat_terminal,
+                              chat_skill_ids=chat_skill_ids)
     prepare_skill_scope(metadata, state, model["id"], skill_ids)
     draft = {key: deepcopy(value) for key, value in body.items() if key in ENVELOPE}
     draft.update(model=llm_id, messages=[
@@ -108,7 +111,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     packet = await downstream_data(adapter, user, metadata, state) if target else None
     if packet:
         draft["files"] = deepcopy(metadata["files"])
-    prompt = await manifest(adapter, skill_ids, owner, None if target else state["registry"])
+    prompt = await manifest(adapter, skill_ids, owner, None if target else state["registry"],
+                            chat_user=user, chat_skill_ids=chat_skill_ids)
     if prompt:
         catalog_message = {"role": "system", "content": prompt}
         draft["messages"].insert(0, catalog_message)

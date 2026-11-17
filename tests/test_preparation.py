@@ -10,6 +10,9 @@ from lite_handoff_router.runtime import begin, require
 
 
 class Directory:
+    async def chat_skill_ids(self, body):
+        return body.get("skill_ids") or []
+
     async def user(self, user_id):
         return SimpleNamespace(id=user_id)
 
@@ -24,6 +27,22 @@ class Directory:
 
 
 class PreparationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_skill_selection_is_snapshotted_before_body_cleanup(self):
+        request = SimpleNamespace(scope={}, state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(MODELS={})))
+        with patch.object(router_preparation, "OWUIAdapter", return_value=Directory()), \
+             patch.object(router_preparation, "discover", return_value=({}, [])):
+            instance = router_preparation.Filter()
+            body = {"model": "router", "messages": [], "skill_ids": ["chat-guide"],
+                    "metadata": {"skill_ids": ["forged"], "available_skills": ["forged"]}}
+            await instance.inlet(body, request, {"id": "u"})
+            state = require(request, body["metadata"], "u")
+            self.assertEqual(state["chat_skill_ids"], ["chat-guide"])
+            self.assertNotIn("skill_ids", body)
+            body["metadata"]["skill_ids"] = ["other"]
+            self.assertEqual(state["chat_skill_ids"], ["chat-guide"])
+            await instance.inlet({"model": "router", "messages": []}, request, {"id": "u"})
+            self.assertEqual(request.scope["lite_handoff_router"]["chat_skill_ids"], [])
+
     async def test_filter_reads_administrative_valves_each_request(self):
         request = SimpleNamespace(scope={}, state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(MODELS={
             "router": {"pipe": {"id": "router-pipe"}}, "agent-a": {"id": "agent-a"},

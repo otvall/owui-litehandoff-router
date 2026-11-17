@@ -1,4 +1,3 @@
-import json
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 import unittest
@@ -8,11 +7,25 @@ from lite_handoff_router.skills import manifest
 
 
 class SkillManifestTest(unittest.IsolatedAsyncioTestCase):
+    async def test_router_catalogs_are_ordered_and_routing_ids_are_not_duplicated(self):
+        adapter = SimpleNamespace(skill=AsyncMock(return_value={"name": "Skill", "description": ""}))
+        prompt = await manifest(adapter, ["base", "route", "chat"], None,
+                                {"a": {"agent_id": "a", "skill_id": "route"}})
+        root = ET.fromstring("<catalogs>" + prompt[prompt.index("<routing_skills"):] + "</catalogs>")
+        self.assertEqual([item.tag for item in root], ["routing_skills", "available_skills"])
+        self.assertEqual([e.findtext("id") for e in root.find("available_skills")], ["base", "chat"])
+        self.assertTrue(all(not e.attrib for catalog in root for e in catalog))
+        empty = await manifest(adapter, [], None, {})
+        self.assertIn("<routing_skills />", empty)
+        self.assertIn("<available_skills />", empty)
+
     def entries(self, prompt):
-        if "<routing_skills" in prompt:
-            routes = ET.fromstring(prompt[prompt.index("<routing_skills"):])
-            return [{**item.attrib, **{child.tag: child.text or "" for child in item}} for item in routes]
-        return json.loads(prompt.split("using skill_id):\n", 1)[1])
+        start = prompt.index("<routing_skills" if "<routing_skills" in prompt else "<available_skills")
+        root = ET.fromstring("<catalogs>" + prompt[start:] + "</catalogs>")
+        catalog = root.find("routing_skills")
+        if catalog is None:
+            catalog = root.find("available_skills")
+        return [{child.tag: child.text or "" for child in item} for item in catalog]
 
     async def test_router_receives_agent_names_separate_from_shared_skill_name(self):
         adapter = SimpleNamespace(skill=AsyncMock(return_value={
@@ -42,5 +55,5 @@ class SkillManifestTest(unittest.IsolatedAsyncioTestCase):
         adapter = SimpleNamespace(skill=AsyncMock(return_value={"name": "Work skill"}))
         self.assertEqual(await manifest(adapter, [], None), "")
         prompt = await manifest(adapter, ["work"], None)
-        self.assertEqual(self.entries(prompt), [{"skill_id": "work", "name": "Work skill", "description": ""}])
+        self.assertEqual(self.entries(prompt), [{"id": "work", "name": "Work skill", "description": ""}])
         self.assertNotIn("list all available agents", prompt)

@@ -97,6 +97,9 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
             id=skill_id, name="route-" + suffix, description="Profile A questions.",
             content="Call lite_delegate with exact agent_id " + agent_id, meta={},
         ))
+        chat_skill_id = "chat-guide-" + suffix
+        await Skills.insert_new_skill(user.id, SkillForm(
+            id=chat_skill_id, name="Chat guide", description="Ordinary chat skill.", content="Write clearly."))
         for identifier, base, params, meta in (
             (router_id, pipe_id, {"system": "ROUTER_PROMPT", "temperature": 0.8, "top_p": 0.9, "top_k": 17,
                                  "custom_params": {"seed": "123", "router_only": "true"}}, {"toolIds": [], "skillIds": []}),
@@ -118,7 +121,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
                     "params": {"function_calling": "native", "tool_approval_mode": "full"}, "files": [{"id": "user-file"}],
                     "variables": {"{{ticket}}": "T42"}}
         request.state.metadata = metadata
-        body = {"model": router_id, "stream": True, "messages": [{"role": "user", "content": [
+        body = {"model": router_id, "stream": True, "skill_ids": [chat_skill_id], "messages": [{"role": "user", "content": [
             {"type": "text", "text": "profile a question"}, {"type": "image_url", "image_url": {"url": PNG}},
         ]}], "metadata": metadata}
         await preparation.inlet(body, request, user.model_dump(), metadata)
@@ -179,6 +182,10 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         for payload in seen[:2]:
             self.assertEqual(sum(m["role"] == "system" for m in payload["messages"]), 1)
             self.assertIn("<routing_skills>", payload["messages"][0]["content"])
+            self.assertIn("<id>" + skill_id + "</id>", payload["messages"][0]["content"])
+            self.assertIn("<available_skills>", payload["messages"][0]["content"])
+            self.assertIn("<id>" + chat_skill_id + "</id>", payload["messages"][0]["content"])
+        self.assertTrue(all(chat_skill_id not in str(p["messages"]) for p in seen[2:]))
         self.assertEqual(app.state.MODELS[agent_id]["info"]["params"]["temperature"], 0.2)
         finals = [event["data"] for event in events if event.get("type") == "chat:completion" and event.get("data", {}).get("done")]
         self.assertTrue(finals, events)

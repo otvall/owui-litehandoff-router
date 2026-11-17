@@ -10,13 +10,14 @@ async def routing_owner(adapter, request, user, router_id):
 
 class ResourceScope:
     def __init__(self, adapter, request, user, model, owner, tool_ids, skill_ids, *, router=False, terminal_id=None,
-                 chat_terminal=False):
+                 chat_terminal=False, chat_skill_ids=()):
         self.adapter, self.request, self.user = adapter, request, user
         self.model_id, self.owner_id = model["id"], owner.id
         self.tool_ids, self.skill_ids = frozenset(tool_ids), frozenset(skill_ids)
         self.router = router
         self.terminal_id = terminal_id
         self.chat_terminal = chat_terminal and router
+        self.chat_skill_ids = frozenset(chat_skill_ids) if router else frozenset()
         meta = model.get("info", {}).get("meta") or {}
         self.card_ids = {"skill": frozenset(ids(meta.get("skillIds") or [])),
                          "tool": frozenset(ids(meta.get("toolIds") or []))}
@@ -30,6 +31,8 @@ class ResourceScope:
         owner = await self.adapter.owner(model)
         if owner.id != self.owner_id:
             raise ValueError("Model resource owner changed during generation")
+        if kind == "skill" and identifier in self.chat_skill_ids:
+            return self.user
         if kind == "terminal" and self.chat_terminal:
             meta = model.get("info", {}).get("meta") or {}
             if (meta.get("capabilities") or {}).get("terminal") is False:
@@ -46,6 +49,7 @@ class ResourceScope:
     async def skill(self, identifier):
         owner = await self.authority("skill", identifier)
         await self.adapter.skill(identifier, owner)
+        return owner
 
     async def tool(self, identifier):
         owner = await self.authority("tool", identifier)

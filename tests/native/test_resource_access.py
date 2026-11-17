@@ -15,6 +15,57 @@ from lite_handoff_router.skills import READERS
 
 
 class NativeResourceAccessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_skill_catalog_native_readers_and_revoked_actor_access(self):
+        import xml.etree.ElementTree as ET
+        from open_webui.models.skills import Skills, SkillForm
+        from open_webui.models.access_grants import AccessGrants
+        from fastapi import HTTPException
+
+        chat_id = "chat-skill-" + self.suffix
+        await Skills.insert_new_skill(self.router_owner.id, SkillForm(id=chat_id, name="Chat <guide>", files=[
+            {"path": "SKILL.md", "content": "# Chat instructions"},
+            {"path": "data.txt", "content": "chat needle"}]))
+        await AccessGrants.grant_access("skill", chat_id, "user", self.one.id, "read")
+        router, agent = self.model_ids
+        body = {"model": router, "skill_ids": [chat_id, chat_id, self.skill_ids[0]], "messages": [
+            {"role": "user", "content": "old <$old-guide|Old>"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "Use <$" + chat_id + "|Guide>"}]}
+        selected = await self.adapter.chat_skill_ids(body)
+        self.assertEqual(selected, [chat_id, self.skill_ids[0]])
+        registry = {agent: {"agent_id": agent, "skill_id": self.skill_ids[0]}}
+        metadata = {}
+        state = begin(self.request, body, metadata, self.one.id, registry, [], [], [], chat_skill_ids=selected)
+        draft, tools = await prepare_model(self.adapter, self.request, body, self.one, metadata_draft(metadata),
+                                           state, "test-llm", {})
+        systems = [m["content"] for m in draft["messages"] if m["role"] == "system"]
+        self.assertEqual(len(systems), 1)
+        text = systems[0]
+        # Extract just the two catalogs; other native system additions may follow.
+        xml = text[text.index("<routing_skills"):text.index("</available_skills>") + len("</available_skills>")]
+        root = ET.fromstring("<catalogs>" + xml + "</catalogs>")
+        self.assertEqual(root.findtext("routing_skills/skill/id"), self.skill_ids[0])
+        self.assertEqual([s.findtext("id") for s in root.find("available_skills")], [chat_id])
+        arguments = {"view_skill": {}, "read_skill_file": {"path": "data.txt"},
+                     "grep_skill_files": {"pattern": "needle"}}
+        refreshed = {}
+        for name in READERS:
+            refreshed[name] = await self.adapter.refresh(tools[name]["callable"], {
+                "__user__": self.router_owner.model_dump(), "__messages__": [{"role": "user", "content": "FORGED"}]})
+            value = json.loads(await refreshed[name](id=chat_id, **arguments[name]))
+            self.assertNotIn("error", value, value)
+        _, agent_tools = await prepare_model(self.adapter, self.request, body, self.one, metadata_draft(metadata),
+                                               state, "test-llm", {}, target=agent)
+        with self.assertRaisesRegex(ValueError, "model scope"):
+            await agent_tools["view_skill"]["callable"](id=chat_id)
+        await AccessGrants.revoke_access("skill", chat_id, "user", self.one.id, "read")
+        for name in READERS:
+            with self.assertRaises(HTTPException):
+                await refreshed[name](id=chat_id, **arguments[name])
+        with self.assertRaises(HTTPException):
+            await prepare_model(self.adapter, self.request, body, self.one, metadata_draft(metadata), state, "test-llm", {})
+        self.assertEqual(state["chat_skill_ids"], selected)
+
     async def asyncSetUp(self):
         from fastapi import FastAPI
         from starlette.requests import Request

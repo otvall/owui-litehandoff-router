@@ -114,14 +114,21 @@ class RoutingCatalogTest(unittest.IsolatedAsyncioTestCase):
                 return {"name": 'Name <&> "' + skill_id, "description": "Desc <skill> & data"}
         registry = {"agent<&\"": {"agent_id": "agent<&\"", "skill_id": "route<&\"", "agent_name": "Name <agent>"}}
         text = await manifest(CatalogAdapter(), ["base", "route<&\""], User(), registry)
-        routing = ET.fromstring(text[text.index("<routing_skills"):])
+        root = ET.fromstring("<catalogs>" + text[text.index("<routing_skills"):] + "</catalogs>")
+        routing = root.find("routing_skills")
         entry = routing.find("skill")
-        self.assertEqual(entry.attrib, {"skill_id": "route<&\"", "agent_id": "agent<&\""})
+        self.assertEqual(entry.attrib, {})
+        self.assertEqual([child.tag for child in entry], ["id", "agent_id", "agent_name", "name", "description"])
+        self.assertEqual(entry.findtext("id"), "route<&\"")
+        self.assertEqual(entry.findtext("agent_id"), "agent<&\"")
         self.assertEqual(entry.findtext("agent_name"), "Name <agent>")
         self.assertEqual(entry.findtext("name"), 'Name <&> "route<&\"')
         self.assertEqual(entry.findtext("description"), "Desc <skill> & data")
-        self.assertIn('<skill skill_id="base">', text)
-        self.assertIn("view_skill(id=skill_id)", text)
+        self.assertEqual([child.tag for child in root], ["routing_skills", "available_skills"])
+        base = root.find("available_skills/skill")
+        self.assertEqual([child.tag for child in base], ["id", "name", "description"])
+        self.assertEqual(base.findtext("id"), "base")
+        self.assertIn("view_skill(id=id)", text)
         self.assertNotIn("skill_path", text)
 
     async def test_empty_catalog_and_one_system_keep_actual_question_and_tools(self):

@@ -80,23 +80,50 @@ Router, передача, системные инструкции и рабоч�
 
 В API у Router одно `system`: промпт Workspace Model, служебные правила,
 каталоги Skills и допустимые системные добавления. Routing-каталог имеет точную
-структуру ниже; общий каталог идёт отдельно в `<base_skills>`. Значения XML
-экранируются encoder-ом. Для чтения используется `view_skill(id=skill_id)`.
+структуру ниже; обычный каталог идёт вторым блоком `<available_skills>`. Значения XML
+экранируются encoder-ом. Для чтения `view_skill(id=...)` получает значение поля `<id>`, а для передачи `lite_delegate` — `<agent_id>`.
 
 ```xml
 <routing_skills>
-  <skill skill_id="route-a" agent_id="agent-a">
+  <skill>
+    <id>route-a</id>
+    <agent_id>agent-a</agent_id>
     <agent_name>Agent A</agent_name>
     <name>Routing A</name>
     <description>Вопросы профиля A</description>
   </skill>
-  <skill skill_id="route-b" agent_id="agent-b">
+  <skill>
+    <id>route-b</id>
+    <agent_id>agent-b</agent_id>
     <agent_name>Agent B</agent_name>
     <name>Routing B</name>
     <description>Вопросы профиля B</description>
   </skill>
 </routing_skills>
+<available_skills>
+  <skill>
+    <id>format-report</id>
+    <name>Оформление отчётов</name>
+    <description>Правила подготовки отчётов</description>
+  </skill>
+</available_skills>
 ```
+
+Первый блок содержит только записи разрешённого routing-реестра. Второй
+повторяет штатный формат OWUI: `skill` с дочерними `id/name/description`.
+Обычные Skills Router объединяют Valves `base_skill_ids`, карточку Router
+и явный выбор в текущем запросе чата (`skill_ids` либо native mention
+`<$skill-id|Имя>`). ID не дублируются; routing Skill не появляется повторно
+в обычном каталоге. Оба блока Router присутствуют даже пустыми.
+
+Skills только из чата проверяются и читаются от пользователя; настроенные
+ресурсы сохраняют права владельца модели. Доступ проверяется повторно при
+чтении, включая callable refresh. Старые mentions и произвольный metadata-
+каталог не расширяют набор. Выбор фиксируется на текущий запрос и заново
+определяется при следующем. При handoff агент получает собственный
+`available_skills`, без routing-каталога и chat-only Skills Router; worker
+также не наследует этот выбор. Терминальные Skills обрабатываются отдельно
+существующим native-механизмом.
 
 Например, после двух ответов разных агентов при `N=1` массив сообщений
 выглядит так. Тексты system и видимых ответов сокращены для примера; реальный

@@ -11,6 +11,7 @@ from .capabilities import MCP_CLOSE_TIMEOUT, bounded_tool_name
 from .native_context import scoped_knowledge_result
 from .history import context_handoff_key, handoff_evidence
 from .protocol import completed_pairs
+from .registry import ids
 
 
 def as_dict(value):
@@ -50,6 +51,15 @@ def saved_handoff_statuses(branch, convert):
 
 
 class OWUIAdapter:
+    async def chat_skill_ids(self, body):
+        from open_webui.utils.skills import extract_skill_ids_from_messages
+
+        current = next((m for m in reversed(body.get("messages") or []) if m.get("role") == "user"), None)
+        selected = ids(body.get("skill_ids") or [])
+        mentioned = sorted(extract_skill_ids_from_messages([current] if current else []))
+        # Terminal Skills retain their native terminal scope and reader contract.
+        return [sid for sid in ids(selected + mentioned) if not sid.startswith("terminal:")]
+
     async def historical_handoff_statuses(self, request, metadata, state, user):
         """Read terminal evidence from this saved branch, never from client metadata."""
         if not state.get("chat_id") or user.id != state.get("user_id"):

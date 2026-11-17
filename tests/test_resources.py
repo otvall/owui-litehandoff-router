@@ -32,6 +32,17 @@ class Directory:
 
 
 class ResourceScopeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_only_skill_uses_actor_and_is_not_granted_to_agent(self):
+        adapter = Directory()
+        args = (adapter, None, SimpleNamespace(id="actor"), adapter.model_row,
+                SimpleNamespace(id="owner"), [], ["chat"])
+        router = ResourceScope(*args, router=True, chat_skill_ids=["chat"])
+        self.assertEqual((await router.skill("chat")).id, "actor")
+        self.assertEqual(adapter.calls[-1], ("skill", "chat", "actor"))
+        agent = ResourceScope(*args, chat_skill_ids=["chat"])
+        with self.assertRaisesRegex(ValueError, "detached"):
+            await agent.skill("chat")
+
     async def test_chat_terminal_uses_actor_access_and_rechecks_capability(self):
         adapter=Directory()
         meta=adapter.model_row["info"]["meta"]

@@ -169,7 +169,7 @@ Router SHALL получать историю завершённой работы
 
 ### Requirement: Routing skill catalog uses XML without changing scope
 
-Каталог routing Skills в системном промпте Router SHALL использовать XML-блок `routing_skills`. Каждая запись SHALL сохранять `skill_id`, `agent_id`, `agent_name`, `name` и `description` действующего реестра. Содержимое SHALL корректно экранироваться, а инструкции чтения и выбора agent_id SHALL сохраняться. Каталог SHALL NOT заменять API-схемы Tools или расширять права.
+Каталог Router SHALL использовать `routing_skills` с записями `<skill>` без атрибутов и дочерними `id`, `agent_id`, `agent_name`, `name`, `description` в этом порядке. XML `id` SHALL отображать внутренний `skill_id` и передаваться в `view_skill(id=...)`; `lite_delegate` SHALL получать отдельный `agent_id`. Значения SHALL экранироваться; каталог SHALL NOT расширять права или заменять API-схемы Tools.
 
 #### Scenario: Two independent routing skills are available
 
@@ -188,3 +188,26 @@ Router SHALL получать историю завершённой работы
 - **WHEN** используется база main без поддержки `skill_path`
 - **THEN** XML использует существующий реестр Model ID → Skill ID и штатное чтение Skill
 - **AND** change не добавляет папочный routing index или неподдерживаемое поле лишь ради примеров из обсуждения
+
+### Requirement: Ordinary skill catalog follows native OWUI XML
+
+Router SHALL выводить после `routing_skills` отдельный `<available_skills>` с записями `<skill>` и дочерними `id`, `name`, `description`. Оба блока SHALL присутствовать даже пустыми. Обычные Skills SHALL объединять конфигурацию, карточку Router и явный выбор в чате без дублей. Routing Skills SHALL NOT повторяться в обычном каталоге. Агент SHALL получать только свой `available_skills` без Router-каталога.
+
+#### Scenario: User explicitly selects an ordinary chat skill
+
+- **WHEN** пользователь выбирает Skill через `skill_ids` запроса либо native mention текущего user-сообщения
+- **THEN** Router фиксирует выбор на текущий запрос и включает доступный активный Skill в `available_skills`
+- **AND** Skill только из чата читается с правами пользователя, включая повторную проверку при native callable refresh; owner-доступ не подменяет отказ
+- **AND** прошлые mentions и произвольный metadata-каталог не добавляют Skills; обычный выбор не разрешает делегирование
+
+#### Scenario: A selected skill is also configured or used for routing
+
+- **WHEN** один ID поступил из нескольких источников
+- **THEN** обычный каталог содержит не более одной записи и сохраняет owner-права явно настроенного ресурса
+- **AND** при наличии ID в routing-реестре он представлен только routing-записями с точными agent IDs
+
+#### Scenario: Chat choice is not an agent grant
+
+- **WHEN** Router передаёт запрос агенту либо запускает worker
+- **THEN** адресат сохраняет только собственный набор Skills и не наследует chat-only Skills Router
+- **AND** новый запрос заново определяет явный выбор; недоступный или неактивный выбранный Skill не читается с правами владельца Router

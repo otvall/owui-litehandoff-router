@@ -207,6 +207,7 @@ class Tools:
         self.assertEqual(len(self.app.state.worker_contexts), 2)
         for child in self.children:
             worker = child.scope["lite_handoff_router"]
+            self.assertEqual(worker["chat_skill_ids"], [])
             seen = [p for p in self.seen if p["chat_id"] == worker["chat_id"]]
             self.assertEqual(len(seen), 3)
             for payload in seen:

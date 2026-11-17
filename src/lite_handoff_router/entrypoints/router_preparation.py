@@ -32,9 +32,10 @@ class Filter:
         if await prepare_worker(adapter, __request__, body, metadata, user):
             return body
         registry, diagnostics = await discover(adapter, __request__, user, AGENTS, body["model"])
+        chat_skill_ids = await adapter.chat_skill_ids(body)
         begin(__request__, body, metadata, user.id, registry, diagnostics,
               ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids),
               max_parallel_tasks=self.valves.max_parallel_tasks,
               parallel_timeout_seconds=self.valves.parallel_timeout_seconds,
-              context_policy=self.valves.snapshot())
+              context_policy=self.valves.snapshot(), chat_skill_ids=chat_skill_ids)
         return body

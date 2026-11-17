@@ -55,13 +55,13 @@ async def discover(adapter, request, user, catalog, router_id):
 """Bind a Tool's effective context through OWUI's native callable refresh."""
 import inspect
 
-async def bind_tool_context(adapter, tool, messages, check=None, pinned=None):
+async def bind_tool_context(adapter, tool, messages, check=None, pinned=None, resolve=None):
     function = tool['callable']
     original = getattr(function, '__function__', function)
     extra = getattr(function, '__extra_params__', None)
     signature = inspect.signature(original)
     pinned = {key: value for key, value in (pinned or {}).items() if key in signature.parameters}
-    if check is None and (not pinned) and (messages is None or '__messages__' not in signature.parameters):
+    if check is None and resolve is None and (not pinned) and (messages is None or '__messages__' not in signature.parameters):
         return tool
 
     async def protected(*args, **kwargs):
@@ -71,6 +71,10 @@ async def bind_tool_context(adapter, tool, messages, check=None, pinned=None):
         if check is not None:
             arguments = signature.bind_partial(*args, **kwargs).arguments
             await check(arguments)
+        if resolve is not None:
+            arguments = signature.bind_partial(*args, **kwargs).arguments
+            overrides = await resolve(arguments)
+            kwargs.update({key: value for key, value in overrides.items() if key in signature.parameters})
         result = original(*args, **kwargs)
         return await result if inspect.isawaitable(result) else result
     protected.__name__ = getattr(original, '__name__', 'tool')
@@ -86,22 +90,23 @@ async def bind_tool_context(adapter, tool, messages, check=None, pinned=None):
 
 # Source: skills
 """A model receives a small manifest; instruction text is read lazily."""
-import json
 import xml.etree.ElementTree as ET
 READERS = frozenset({'view_skill', 'read_skill_file', 'grep_skill_files'})
 
 async def scoped_reader(adapter, tool, allowed_ids, user, messages, check_scope=None):
     allowed = frozenset(allowed_ids)
 
-    async def check(arguments):
+    async def resolve(arguments):
         skill_id = arguments.get('id')
         if not isinstance(skill_id, str) or skill_id not in allowed:
             raise ValueError('Skill is outside the current model scope')
         if check_scope is not None:
-            await check_scope(skill_id)
+            principal = await check_scope(skill_id)
         else:
             await adapter.skill(skill_id, user)
-    return await bind_tool_context(adapter, tool, messages, check=check, pinned={'__user__': user.model_dump()})
+            principal = user
+        return {'__user__': (principal or user).model_dump()}
+    return await bind_tool_context(adapter, tool, messages, resolve=resolve)
 
 def prepare_skill_scope(metadata, state, model_id, skill_ids):
     previous = state.get('skill_scope') or {}
@@ -117,40 +122,37 @@ def prepare_skill_scope(metadata, state, model_id, skill_ids):
         metadata.pop(key, None)
     metadata['lite_skill_scope'] = {'model_id': model_id, 'skill_ids': list(skill_ids), 'request_id': state['request_id']}
 
-async def manifest(adapter, skill_ids, user, registry=None):
+async def manifest(adapter, skill_ids, user, registry=None, *, chat_user=None, chat_skill_ids=()):
     entries = []
     routing = list((registry or {}).values())
     routed_ids = {entry['skill_id'] for entry in routing}
     skills = {}
     for skill_id in skill_ids:
-        skill = await adapter.skill(skill_id, user)
+        skill = await adapter.skill(skill_id, chat_user if skill_id in chat_skill_ids else user)
         skills[skill_id] = skill
         if skill_id in routed_ids:
             continue
-        entry = {'skill_id': skill_id, 'name': skill['name'], 'description': skill.get('description') or ''}
+        entry = {'id': skill_id, 'name': skill['name'], 'description': skill.get('description') or ''}
         entries.append(entry)
     for route in routing:
         skill = skills[route['skill_id']]
-        entries.append({'skill_id': route['skill_id'], 'agent_id': route['agent_id'], 'agent_name': route.get('agent_name') or route['agent_id'], 'name': skill['name'], 'description': skill.get('description') or ''})
+        entries.append({'id': route['skill_id'], 'agent_id': route['agent_id'], 'agent_name': route.get('agent_name') or route['agent_id'], 'name': skill['name'], 'description': skill.get('description') or ''})
     guidance = 'When asked about your capabilities (for example, "что ты можешь", "что ты умеешь", or "which agents are available"), answer directly in the user\'s language and list all available agents by agent_name from the current manifest. Use descriptions to briefly explain their capabilities; name is the routing Skill name, not the agent name. Do not delegate merely to describe capabilities. Only list agents from this manifest; if none have agent_id, explicitly say that no agents are currently available.\n' if registry is not None else ''
     if not entries and registry is None:
         return ''
     if registry is not None:
-        guidance += 'Before choosing an agent, read its routing Skill with view_skill(id=skill_id). Use the exact agent_id in lite_delegate; skill_id is not an agent ID.\n'
-        base = ET.Element('base_skills')
-        routes = ET.Element('routing_skills')
-        for entry in entries:
-            attributes = {key: entry[key] for key in ('skill_id', 'agent_id') if key in entry}
-            item = ET.SubElement(routes if 'agent_id' in entry else base, 'skill', attributes)
-            for key in ('agent_name', 'name', 'description'):
-                if key in entry:
-                    ET.SubElement(item, key).text = entry[key]
-        ET.indent(base, space='  ')
-        ET.indent(routes, space='  ')
-        catalogs = [ET.tostring(base, encoding='unicode')] if len(base) else []
-        catalogs.append(ET.tostring(routes, encoding='unicode'))
-        return guidance + '\n'.join(catalogs)
-    return guidance + ('Available skills (read instructions with view_skill using skill_id):\n' + json.dumps(entries, ensure_ascii=False))
+        guidance += 'Before choosing an agent, read its routing Skill with view_skill(id=id). Use the exact agent_id in lite_delegate; the Skill id is not an agent ID.\n'
+    guidance += 'Use ordinary Skills from available_skills for your own work; read them with view_skill(id=id).\n'
+    routes, available = (ET.Element('routing_skills'), ET.Element('available_skills'))
+    for entry in entries:
+        item = ET.SubElement(routes if 'agent_id' in entry else available, 'skill')
+        for key in ('id', 'agent_id', 'agent_name', 'name', 'description'):
+            if key in entry:
+                ET.SubElement(item, key).text = entry[key]
+    catalogs = [routes, available] if registry is not None else [available]
+    for catalog in catalogs:
+        ET.indent(catalog, space='  ')
+    return guidance + '\n'.join((ET.tostring(catalog, encoding='unicode') for catalog in catalogs))
 
 # Source: capabilities
 """Native Tools and authenticated MCP sessions owned by one request."""
@@ -451,8 +453,8 @@ from uuid import uuid4
 SCOPE_KEY = 'lite_handoff_router'
 RECEIPT = 'lite_router'
 
-def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids, *, max_parallel_tasks=4, parallel_timeout_seconds=300, context_policy=None):
-    state = {'request_id': uuid4().hex, 'user_id': user_id, 'chat_id': metadata.get('chat_id'), 'message_id': metadata.get('message_id'), 'router_id': body['model'], 'registry': deepcopy(registry), 'chat_terminal_id': body.get('terminal_id') if isinstance(body.get('terminal_id'), str) else None, 'diagnostics': diagnostics, 'base_tool_ids': list(tool_ids), 'base_skill_ids': list(skill_ids), 'source': deepcopy(body.get('messages', [])), 'phase': 'router', 'pending': [], 'active_agent': None, 'skill_scope': None, 'original_source': deepcopy(body.get('messages', [])), 'user_boundary': next((i for i in range(len(body.get('messages', [])) - 1, -1, -1) if body['messages'][i].get('role') == 'user'), -1), 'generation': 0, 'audit': [], 'native_context': None, 'context_policy': ContextPolicy.model_validate(context_policy or {}).snapshot(), 'parallel': group_state(max_parallel_tasks, parallel_timeout_seconds)}
+def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids, *, max_parallel_tasks=4, parallel_timeout_seconds=300, context_policy=None, chat_skill_ids=()):
+    state = {'request_id': uuid4().hex, 'user_id': user_id, 'chat_id': metadata.get('chat_id'), 'message_id': metadata.get('message_id'), 'router_id': body['model'], 'registry': deepcopy(registry), 'chat_terminal_id': body.get('terminal_id') if isinstance(body.get('terminal_id'), str) else None, 'diagnostics': diagnostics, 'base_tool_ids': list(tool_ids), 'base_skill_ids': list(skill_ids), 'source': deepcopy(body.get('messages', [])), 'chat_skill_ids': list(chat_skill_ids), 'phase': 'router', 'pending': [], 'active_agent': None, 'skill_scope': None, 'original_source': deepcopy(body.get('messages', [])), 'user_boundary': next((i for i in range(len(body.get('messages', [])) - 1, -1, -1) if body['messages'][i].get('role') == 'user'), -1), 'generation': 0, 'audit': [], 'native_context': None, 'context_policy': ContextPolicy.model_validate(context_policy or {}).snapshot(), 'parallel': group_state(max_parallel_tasks, parallel_timeout_seconds)}
     request.scope[SCOPE_KEY] = state
     request.scope['lite_handoff_metadata'] = metadata
     metadata['tools'] = {}
@@ -544,13 +546,14 @@ async def routing_owner(adapter, request, user, router_id):
 
 class ResourceScope:
 
-    def __init__(self, adapter, request, user, model, owner, tool_ids, skill_ids, *, router=False, terminal_id=None, chat_terminal=False):
+    def __init__(self, adapter, request, user, model, owner, tool_ids, skill_ids, *, router=False, terminal_id=None, chat_terminal=False, chat_skill_ids=()):
         self.adapter, self.request, self.user = (adapter, request, user)
         self.model_id, self.owner_id = (model['id'], owner.id)
         self.tool_ids, self.skill_ids = (frozenset(tool_ids), frozenset(skill_ids))
         self.router = router
         self.terminal_id = terminal_id
         self.chat_terminal = chat_terminal and router
+        self.chat_skill_ids = frozenset(chat_skill_ids) if router else frozenset()
         meta = model.get('info', {}).get('meta') or {}
         self.card_ids = {'skill': frozenset(ids(meta.get('skillIds') or [])), 'tool': frozenset(ids(meta.get('toolIds') or []))}
 
@@ -562,6 +565,8 @@ class ResourceScope:
         owner = await self.adapter.owner(model)
         if owner.id != self.owner_id:
             raise ValueError('Model resource owner changed during generation')
+        if kind == 'skill' and identifier in self.chat_skill_ids:
+            return self.user
         if kind == 'terminal' and self.chat_terminal:
             meta = model.get('info', {}).get('meta') or {}
             if (meta.get('capabilities') or {}).get('terminal') is False:
@@ -577,6 +582,7 @@ class ResourceScope:
     async def skill(self, identifier):
         owner = await self.authority('skill', identifier)
         await self.adapter.skill(identifier, owner)
+        return owner
 
     async def tool(self, identifier):
         owner = await self.authority('tool', identifier)
@@ -1478,12 +1484,14 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     meta = model.get('info', {}).get('meta') or {}
     tool_ids = ids(meta.get('toolIds') or []) if target else ids(state['base_tool_ids'] + ids(meta.get('toolIds') or []))
     skill_ids = ids(meta.get('skillIds') or []) if target else ids(state['base_skill_ids'] + ids(meta.get('skillIds') or []) + [entry['skill_id'] for entry in state['registry'].values()])
+    chat_skill_ids = [sid for sid in state.get('chat_skill_ids', []) if sid not in skill_ids] if not target else []
+    skill_ids = ids(skill_ids + chat_skill_ids)
     terminal_id = terminal_binding(model)
     chat_terminal = bool(not target and state.get('chat_terminal_id') and (meta.get('capabilities') or {}).get('terminal', True))
     if chat_terminal:
         terminal_id = state['chat_terminal_id']
     prepare_terminal_scope(metadata, terminal_id)
-    resources = ResourceScope(adapter, request, user, model, owner, tool_ids, skill_ids, router=not target, terminal_id=terminal_id, chat_terminal=chat_terminal)
+    resources = ResourceScope(adapter, request, user, model, owner, tool_ids, skill_ids, router=not target, terminal_id=terminal_id, chat_terminal=chat_terminal, chat_skill_ids=chat_skill_ids)
     prepare_skill_scope(metadata, state, model['id'], skill_ids)
     draft = {key: deepcopy(value) for key, value in body.items() if key in ENVELOPE}
     draft.update(model=llm_id, messages=[deepcopy(m) for m in state['source'] if m.get('role') != 'system'], metadata=metadata)
@@ -1498,7 +1506,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     packet = await downstream_data(adapter, user, metadata, state) if target else None
     if packet:
         draft['files'] = deepcopy(metadata['files'])
-    prompt = await manifest(adapter, skill_ids, owner, None if target else state['registry'])
+    prompt = await manifest(adapter, skill_ids, owner, None if target else state['registry'], chat_user=user, chat_skill_ids=chat_skill_ids)
     if prompt:
         catalog_message = {'role': 'system', 'content': prompt}
         draft['messages'].insert(0, catalog_message)
@@ -1671,6 +1679,13 @@ def saved_handoff_statuses(branch, convert):
     return statuses
 
 class OWUIAdapter:
+
+    async def chat_skill_ids(self, body):
+        from open_webui.utils.skills import extract_skill_ids_from_messages
+        current = next((m for m in reversed(body.get('messages') or []) if m.get('role') == 'user'), None)
+        selected = ids(body.get('skill_ids') or [])
+        mentioned = sorted(extract_skill_ids_from_messages([current] if current else []))
+        return [sid for sid in ids(selected + mentioned) if not sid.startswith('terminal:')]
 
     async def historical_handoff_statuses(self, request, metadata, state, user):
         """Read terminal evidence from this saved branch, never from client metadata."""
