@@ -4,20 +4,20 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-PositiveTokens = Annotated[int, Field(gt=0, strict=True)]
+PositiveTokens = Annotated[int, Field(gt=0)]
 
 
 class ContextPolicy(BaseModel):
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, strict=True)
 
-    tool_result_history_limit: int | None = Field(default=None, ge=0, strict=True)
+    tool_result_history_limit: int | None = Field(default=None, ge=0)
     context_input_budget_tokens: PositiveTokens | None = None
     context_model_input_budgets: dict[str, PositiveTokens] = Field(default_factory=dict)
-    context_safety_margin_tokens: int = Field(default=1024, ge=0, strict=True)
+    context_safety_margin_tokens: int = Field(default=1024, ge=0)
     context_summary_enabled: bool = Field(default=False, strict=True)
     context_summary_model_id: str = ""
-    context_summary_trigger_ratio: float = Field(default=0.9, gt=0, lt=1, strict=True)
-    context_summary_target_ratio: float = Field(default=0.7, gt=0, lt=1, strict=True)
+    context_summary_trigger_ratio: float = Field(default=0.9, gt=0, lt=1)
+    context_summary_target_ratio: float = Field(default=0.7, gt=0, lt=1)
     context_summary_input_budget_tokens: PositiveTokens = 8192
     context_summary_max_tokens: PositiveTokens = 1024
     context_summary_timeout_seconds: PositiveTokens = 60

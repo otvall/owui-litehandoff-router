@@ -286,18 +286,18 @@ def group_calls(state):
 """Administrative context policy; no client metadata participates in resolution."""
 from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-PositiveTokens = Annotated[int, Field(gt=0, strict=True)]
+PositiveTokens = Annotated[int, Field(gt=0)]
 
 class ContextPolicy(BaseModel):
-    model_config = ConfigDict(validate_assignment=True)
-    tool_result_history_limit: int | None = Field(default=None, ge=0, strict=True)
+    model_config = ConfigDict(validate_assignment=True, strict=True)
+    tool_result_history_limit: int | None = Field(default=None, ge=0)
     context_input_budget_tokens: PositiveTokens | None = None
     context_model_input_budgets: dict[str, PositiveTokens] = Field(default_factory=dict)
-    context_safety_margin_tokens: int = Field(default=1024, ge=0, strict=True)
+    context_safety_margin_tokens: int = Field(default=1024, ge=0)
     context_summary_enabled: bool = Field(default=False, strict=True)
     context_summary_model_id: str = ''
-    context_summary_trigger_ratio: float = Field(default=0.9, gt=0, lt=1, strict=True)
-    context_summary_target_ratio: float = Field(default=0.7, gt=0, lt=1, strict=True)
+    context_summary_trigger_ratio: float = Field(default=0.9, gt=0, lt=1)
+    context_summary_target_ratio: float = Field(default=0.7, gt=0, lt=1)
     context_summary_input_budget_tokens: PositiveTokens = 8192
     context_summary_max_tokens: PositiveTokens = 1024
     context_summary_timeout_seconds: PositiveTokens = 60
@@ -1982,17 +1982,32 @@ async def downstream_data(adapter, user, metadata, state):
 
 # Source: entrypoints.router_preparation
 """Mandatory request preparation for the public Router Workspace Model."""
-from pydantic import Field
+from pydantic import ConfigDict, Field, field_validator
 AGENTS: dict[str, str] = {}
 
 class Filter:
 
     class Valves(ContextPolicy):
+        model_config = ConfigDict(strict=False)
         priority: int = 0
         base_tool_ids: list[str] = Field(default_factory=list)
         base_skill_ids: list[str] = Field(default_factory=list)
-        max_parallel_tasks: int = Field(default=4, ge=0, strict=True)
-        parallel_timeout_seconds: int = Field(default=300, gt=0, strict=True)
+        max_parallel_tasks: int = Field(default=4, ge=0, description='Maximum parallel tasks; 0 disables delegate_task and keeps ordinary handoff.')
+        parallel_timeout_seconds: int = Field(default=300, gt=0)
+
+        @field_validator('priority', 'max_parallel_tasks', 'parallel_timeout_seconds', 'tool_result_history_limit', 'context_input_budget_tokens', 'context_safety_margin_tokens', 'context_summary_trigger_ratio', 'context_summary_target_ratio', 'context_summary_input_budget_tokens', 'context_summary_max_tokens', 'context_summary_timeout_seconds', 'context_summary_max_chunks', mode='before')
+        @classmethod
+        def reject_boolean_number(cls, value):
+            if isinstance(value, bool):
+                raise ValueError('Boolean is not a numeric setting')
+            return value
+
+        @field_validator('context_model_input_budgets', mode='before')
+        @classmethod
+        def reject_boolean_budgets(cls, value):
+            if isinstance(value, dict) and any((isinstance(budget, bool) for budget in value.values())):
+                raise ValueError('Boolean is not a model input budget')
+            return value
 
     def __init__(self):
         self.valves = self.Valves()

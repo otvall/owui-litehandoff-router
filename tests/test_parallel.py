@@ -548,6 +548,17 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ParallelPolicyTest(unittest.IsolatedAsyncioTestCase):
+    def test_owui_text_input_can_disable_parallel_tasks(self):
+        # OWUI's ordinary integer Valves input is type=text and posts strings.
+        valves = router_preparation.Filter.Valves.model_validate({
+            "max_parallel_tasks": "0", "parallel_timeout_seconds": "300"})
+        self.assertEqual(valves.max_parallel_tasks, 0)
+        self.assertIs(type(valves.max_parallel_tasks), int)
+        self.assertEqual(valves.parallel_timeout_seconds, 300)
+        for maximum in ("4", " 12 "):
+            self.assertEqual(router_preparation.Filter.Valves(max_parallel_tasks=maximum).max_parallel_tasks,
+                             int(maximum))
+
     async def test_admin_limits_reset_and_ignore_client_fields(self):
         request = SimpleNamespace(scope={}, state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(MODELS={
             "router": {"pipe": {}}, "a": {"id": "a"}})))
@@ -574,9 +585,9 @@ class ParallelPolicyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(empty["parallel"]["status"], "idle")
 
     def test_invalid_limits_are_rejected(self):
-        for maximum in (-1, 2.5, True, "4"):
+        for maximum in (-1, 2.5, True, "4.5", "1e2", "", "false", "-1", "０"):
             with self.subTest(maximum=maximum), self.assertRaises(ValidationError):
                 router_preparation.Filter.Valves(max_parallel_tasks=maximum)
-        for timeout in (0, -1, True, "300"):
+        for timeout in (0, -1, True, "0", "300.5", "", "false"):
             with self.subTest(timeout=timeout), self.assertRaises(ValidationError):
                 router_preparation.Filter.Valves(parallel_timeout_seconds=timeout)

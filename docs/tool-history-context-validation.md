@@ -77,3 +77,29 @@ mentions текущего user, игнорирование прежних mentio
 проходят callable refresh с подставленным owner, продолжают использовать actor
 для chat-only Skill и отклоняют чтение после отзыва его доступа. Настроенные
 ресурсы сохраняют owner authority; отдельные agent/worker scope не расширяются.
+
+## Сохранение числовых Valves через OWUI
+
+Результат: **137 unit-тестов и 79 native-тестов прошли** на официальной OWUI
+0.13.3 в отдельном контейнере без сети и рабочих томов. Обе Functions пересобраны.
+
+Воспроизведён отказ строки `"0"` с `int_type`: текстовый input Valves OWUI
+передаёт строку в Pydantic. Причина — строгие поля нашего Valves, а не `ge=0`
+и не запрет нуля в OWUI. Ручной парсер первоначального исправления заменён
+штатным преобразованием Pydantic: `Filter.Valves` использует `strict=False`,
+внутренний `ContextPolicy` — `strict=True`. Поля наследуют режим модели,
+ограничения `ge/gt/lt`, nullable и соотношения бюджета/порогов сохраняются.
+Оставлены только явные проверки запрета bool вместо числа; числовые строки
+самостоятельно не разбираются.
+
+`test_valves.py` через ASGI HTTP обращается к настоящему Function Valves
+endpoint с текстовыми значениями всех числовых полей: integer, float,
+нулевым N/reserve и отрицательным допустимым priority. Проверяет HTTP 200,
+фактические int/float после повторного GET, сохранение nullable defaults и
+строгую runtime policy. Невалидные значения дают HTTP 400 и не перезаписывают
+сохранённую конфигурацию. Unit-тесты отдельно проверяют отказ строк на каждом
+числовом поле внутреннего ContextPolicy, bool, NaN/inf, границы и пороги.
+
+Источники: [форма Valves OWUI 0.13.3](https://github.com/open-webui/open-webui/blob/v0.13.3/src/lib/components/common/Valves.svelte),
+[endpoint сохранения](https://github.com/open-webui/open-webui/blob/v0.13.3/backend/open_webui/routers/functions.py),
+[режимы преобразования Pydantic](https://docs.pydantic.dev/latest/concepts/strict_mode/).

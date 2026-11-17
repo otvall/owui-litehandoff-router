@@ -1,6 +1,6 @@
 """Mandatory request preparation for the public Router Workspace Model."""
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, field_validator
 
 from ..owui_adapter import OWUIAdapter
 from ..registry import discover, ids
@@ -13,11 +13,35 @@ AGENTS: dict[str, str] = {}
 
 class Filter:
     class Valves(ContextPolicy):
+        # OWUI posts text inputs; use Pydantic's standard numeric conversion
+        # here, then snapshot() revalidates the typed runtime policy strictly.
+        model_config = ConfigDict(strict=False)
+
         priority: int = 0
         base_tool_ids: list[str] = Field(default_factory=list)
         base_skill_ids: list[str] = Field(default_factory=list)
-        max_parallel_tasks: int = Field(default=4, ge=0, strict=True)
-        parallel_timeout_seconds: int = Field(default=300, gt=0, strict=True)
+        max_parallel_tasks: int = Field(default=4, ge=0,
+                                        description="Maximum parallel tasks; 0 disables delegate_task and keeps ordinary handoff.")
+        parallel_timeout_seconds: int = Field(default=300, gt=0)
+
+        @field_validator(
+            "priority", "max_parallel_tasks", "parallel_timeout_seconds",
+            "tool_result_history_limit", "context_input_budget_tokens", "context_safety_margin_tokens",
+            "context_summary_trigger_ratio", "context_summary_target_ratio",
+            "context_summary_input_budget_tokens", "context_summary_max_tokens",
+            "context_summary_timeout_seconds", "context_summary_max_chunks", mode="before")
+        @classmethod
+        def reject_boolean_number(cls, value):
+            if isinstance(value, bool):
+                raise ValueError("Boolean is not a numeric setting")
+            return value
+
+        @field_validator("context_model_input_budgets", mode="before")
+        @classmethod
+        def reject_boolean_budgets(cls, value):
+            if isinstance(value, dict) and any(isinstance(budget, bool) for budget in value.values()):
+                raise ValueError("Boolean is not a model input budget")
+            return value
 
 
     def __init__(self):
