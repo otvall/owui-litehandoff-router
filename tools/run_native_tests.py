@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--data-root", type=Path)
     args = parser.parse_args()
     configure(data_root=args.data_root)
+    sys.path.insert(0, str(ROOT))  # Shared test helpers, not runtime dependencies.
     sys.path.insert(0, str(ROOT / "src"))
     from open_webui.env import VERSION
     # Native startup/config owns migrations. Initialize it before fixture writes.

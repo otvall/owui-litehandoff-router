@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 
 from .protocol import completed_pairs, object_value, tool_image, last_user
-from .skills import READERS
+from .skills import READERS, SKILL_CATALOG
 from .native_context import native_record, project_native_results
 from .tool_history import result_status
 
@@ -171,6 +171,8 @@ def router_projection(state, tool_names, skill_ids, *, window=None):
     native_seen = set()
     for exchange in exchanges:
         name = exchange_name(messages, exchange)
+        if name == SKILL_CATALOG:
+            continue
         record = native_record(state, messages[exchange.batch]["tool_calls"][exchange.call_index],
                                messages[exchange.result_index])
         if record:
@@ -240,12 +242,15 @@ def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
     exchanges = analyze(messages, current_boundary=boundary, audit=state.get("audit", []))
     selected = [e for e in exchanges if e.executor == {"kind": "agent", "agent_id": agent_id}
                 and exchange_name(messages, e) in tool_names
+                and exchange_name(messages, e) != SKILL_CATALOG
                 and (exchange_name(messages, e) not in READERS
                      or e.batch > boundary and skill_is_current(messages, e, skill_ids))]
     selected = [e for e in selected if not native_record(
         state, messages[e.batch]["tool_calls"][e.call_index], messages[e.result_index])]
     native_seen = set()
     for exchange in exchanges:
+        if exchange_name(messages, exchange) == SKILL_CATALOG:
+            continue
         record = native_record(state, messages[exchange.batch]["tool_calls"][exchange.call_index],
                                messages[exchange.result_index])
         if record:

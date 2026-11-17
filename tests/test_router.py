@@ -7,6 +7,7 @@ from unittest.mock import patch
 from lite_handoff_router.entrypoints import lite_handoff_router
 from lite_handoff_router.runtime import begin
 from lite_handoff_router.model_execution import prepare_model
+from tests.context_helpers import catalog_result
 
 
 class User:
@@ -126,8 +127,10 @@ class RouterTest(unittest.IsolatedAsyncioTestCase):
         body, tools = await prepare_model(adapter, request, {}, User(), {}, state, "llm", {})
         self.assertTrue({"base_helper", "card_helper", "run_command", "lite_delegate", "view_skill"} <= tools.keys())
         systems = "\n".join(m["content"] for m in body["messages"] if m["role"] == "system")
-        for expected in ("card-skill", "base-skill", "route-a", "Terminal prompt", "Router"):
-            self.assertIn(expected, systems)
+        for expected in ("card-skill", "base-skill", "route-a"):
+            self.assertIn(expected, catalog_result(body["messages"]))
+        self.assertIn("Terminal prompt", systems)
+        self.assertIn("Router", systems)
         self.assertEqual(await tools["card_helper"]["callable"](), "card works")
         self.assertEqual(await tools["run_command"]["callable"](), "terminal works")
         model["info"]["meta"]["toolIds"] = []
@@ -167,14 +170,14 @@ class RouterTest(unittest.IsolatedAsyncioTestCase):
         one, two = await asyncio.gather(prepare("agent-a", []), prepare("agent-b", []))
         for agent, (body, tools) in zip(("agent-a", "agent-b"), (one, two)):
             self.assertEqual(tools["lite_delegate"]["spec"]["parameters"]["properties"]["agent_id"]["enum"], [agent])
-            self.assertIn('<agent_id>' + agent + '</agent_id>', body["messages"][0]["content"])
-            self.assertIn('<id>route-' + agent + '</id>', body["messages"][0]["content"])
+            self.assertIn('<agent_id>' + agent + '</agent_id>', catalog_result(body["messages"]))
+            self.assertIn('<id>route-' + agent + '</id>', catalog_result(body["messages"]))
         self.assertNotIn("lite_delegate", shared)
         self.assertIsNot(one[1]["lite_delegate"]["spec"], two[1]["lite_delegate"]["spec"])
         body, tools = await prepare(None, ["base-skill"])
         self.assertNotIn("lite_delegate", tools)
         self.assertIn("base_helper", tools)
-        self.assertIn("base-skill", body["messages"][0]["content"])
+        self.assertIn("base-skill", catalog_result(body["messages"]))
 
     async def test_empty_card_uses_valves_in_one_normal_generation(self):
         request = SimpleNamespace(scope={}, state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(

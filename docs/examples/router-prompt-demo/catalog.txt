@@ -1,0 +1,40 @@
+<routing_skills>
+  <skill>
+    <id>route-forecast</id>
+    <agent_id>forecast-agent</agent_id>
+    <agent_name>Агент прогнозирования</agent_name>
+    <name>Маршрутизация прогнозов</name>
+    <description>Прогнозирование продаж, расчёт сценариев и сравнение прогнозных показателей.</description>
+  </skill>
+  <skill>
+    <id>route-research</id>
+    <agent_id>research-agent</agent_id>
+    <agent_name>Агент исследований</agent_name>
+    <name>Маршрутизация исследований</name>
+    <description>Поиск и сопоставление источников, проверка фактов и подготовка аналитических выводов.</description>
+  </skill>
+  <skill>
+    <id>route-html</id>
+    <agent_id>html-agent</agent_id>
+    <agent_name>Агент HTML-отчётов</agent_name>
+    <name>Маршрутизация HTML-отчётов</name>
+    <description>Создание и доработка HTML-отчётов по готовым данным, таблицам и выводам.</description>
+  </skill>
+</routing_skills>
+<available_skills>
+  <skill>
+    <id>report-style</id>
+    <name>Оформление отчётов</name>
+    <description>Структура деловых отчётов: выводы, таблицы, единицы измерения и подписи.</description>
+  </skill>
+  <skill>
+    <id>fact-check</id>
+    <name>Проверка фактов</name>
+    <description>Отделять подтверждённые факты от предположений, проверять даты и идентификаторы.</description>
+  </skill>
+  <skill>
+    <id>concise-answer</id>
+    <name>Краткий ответ</name>
+    <description>Отвечать кратко, сохранять ключевые числа, ограничения и ссылки на источники.</description>
+  </skill>
+</available_skills>

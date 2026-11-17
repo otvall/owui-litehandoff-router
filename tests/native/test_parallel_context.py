@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
+from tests.context_helpers import work_results
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -148,7 +149,7 @@ class Tools:
         payload = copy.deepcopy({k: v for k, v in form_data.items() if k != "metadata"})
         self.seen.append({**payload, "chat_id": form_data["metadata"]["chat_id"]})
         messages = payload["messages"]
-        results = [m for m in messages if m.get("role") == "tool"]
+        results = work_results(messages)
         name, args, answer = None, {}, "PARENT_FINAL"
         if payload["model"] == "worker-router-llm":
             if not results:

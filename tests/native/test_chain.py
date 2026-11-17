@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
+from tests.context_helpers import catalog_result, last_question
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -181,10 +182,12 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("TOOL_RESULT_42:" + user.id, str(seen[-1]["messages"]))
         for payload in seen[:2]:
             self.assertEqual(sum(m["role"] == "system" for m in payload["messages"]), 1)
-            self.assertIn("<routing_skills>", payload["messages"][0]["content"])
-            self.assertIn("<id>" + skill_id + "</id>", payload["messages"][0]["content"])
-            self.assertIn("<available_skills>", payload["messages"][0]["content"])
-            self.assertIn("<id>" + chat_skill_id + "</id>", payload["messages"][0]["content"])
+            self.assertNotIn("<routing_skills", payload["messages"][0]["content"])
+            catalog = catalog_result(payload["messages"])
+            self.assertIn("<routing_skills>", catalog)
+            self.assertIn("<id>" + skill_id + "</id>", catalog)
+            self.assertIn("<available_skills>", catalog)
+            self.assertIn("<id>" + chat_skill_id + "</id>", catalog)
         self.assertTrue(all(chat_skill_id not in str(p["messages"]) for p in seen[2:]))
         self.assertEqual(app.state.MODELS[agent_id]["info"]["params"]["temperature"], 0.2)
         finals = [event["data"] for event in events if event.get("type") == "chat:completion" and event.get("data", {}).get("done")]
@@ -223,7 +226,9 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         assert "B_PROMPT" in str(__messages__)
         assert "AGENT_PROMPT" not in str(__messages__)
         assert "ROUTER_PROMPT" not in str(__messages__)
-        assert not any(m.get("role") == "tool" for m in __messages__)
+        catalog_ids = {c["id"] for m in __messages__ for c in m.get("tool_calls", [])
+                       if c["function"]["name"] == "list_available_skills"}
+        assert not any(m.get("role") == "tool" and m.get("tool_call_id") not in catalog_ids for m in __messages__)
         return "B_PRIVATE_RESULT_42"
 '''
         b_module, _, b_source = await load_tool_module_by_id(b_tool, b_content)
@@ -290,7 +295,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("General answer", str(general_ctx["assistant_message"]["output"]))
         self.assertIn("B_PRIVATE_RESULT_42", str(general_seen[0]["messages"]))
         self.assertEqual(sum(m["role"] == "system" for m in general_seen[0]["messages"]), 1)
-        self.assertEqual(general_seen[0]["messages"][-1], {"role": "user", "content": "general question"})
+        self.assertEqual(last_question(general_seen[0]["messages"]), {"role": "user", "content": "general question"})
         from lite_handoff_router.protocol import object_value
         historical = [object_value(m.get("content")) for m in general_seen[0]["messages"] if m["role"] == "tool"]
         historical = [item for item in historical if "tool_results" in item]

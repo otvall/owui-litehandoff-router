@@ -3,7 +3,8 @@
 from copy import deepcopy
 
 from .registry import ids
-from .skills import READERS, manifest, prepare_skill_scope, scoped_reader
+from .skills import (READERS, SKILL_CATALOG, manifest, prepare_skill_scope, scoped_reader,
+                     skill_guidance, skill_catalog_messages, validate_skill_catalog)
 from .capabilities import load_capabilities
 from .binding import bind_tool_context
 from .history import router_projection, agent_projection
@@ -111,13 +112,12 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     packet = await downstream_data(adapter, user, metadata, state) if target else None
     if packet:
         draft["files"] = deepcopy(metadata["files"])
-    prompt = await manifest(adapter, skill_ids, owner, None if target else state["registry"],
-                            chat_user=user, chat_skill_ids=chat_skill_ids)
-    if prompt:
-        catalog_message = {"role": "system", "content": prompt}
-        draft["messages"].insert(0, catalog_message)
-        if not target:
-            primary_systems.append(deepcopy(catalog_message))
+    catalog = await manifest(adapter, skill_ids, owner, None if target else state["registry"],
+                             chat_user=user, chat_skill_ids=chat_skill_ids)
+    guidance = {"role": "system", "content": skill_guidance(not target)}
+    draft["messages"].insert(0, guidance)
+    if not target:
+        primary_systems.append(deepcopy(guidance))
     extra = injections(request, user, metadata, model, draft["messages"], events)
     tools, mcp_instructions = await load_capabilities(adapter, request, tool_ids, owner, extra)
     terminal_names = set()
@@ -133,8 +133,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         tools.update(terminal_tools)
         if terminal_prompt:
             draft["messages"].insert(0, {"role": "system", "content": terminal_prompt})
-    if READERS.intersection(tools):
-        raise ValueError("Reserved Skill reader collision: " + ", ".join(sorted(READERS.intersection(tools))))
+    if (READERS | {SKILL_CATALOG}).intersection(tools):
+        raise ValueError("Reserved Skill Tool collision: " + ", ".join(sorted((READERS | {SKILL_CATALOG}).intersection(tools))))
     native_delegate = tools.get("delegate_task")
     if native_delegate and native_delegate.get("tool_id") == "builtin:delegate_task" and native_delegate.get("type") == "builtin":
         tools.pop("delegate_task")
@@ -186,6 +186,10 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         index = next((i for i in range(len(history) - 1, -1, -1) if history[i].get("role") == "user"), len(history))
         history.insert(index, packet)
     draft["messages"][:] = systems + history
+    catalog_context = skill_catalog_messages(state, model["id"], catalog)
+    draft["messages"].extend(deepcopy(catalog_context))
+    if window is not None:
+        window.capture(catalog_context, {})
     draft["tools"] = [{"type": "function", "function": tool["spec"]} for tool in tools.values()]
     protected = {name: (tool["callable"], deepcopy(tool["spec"]), tool.get("tool_id"), tool.get("type"))
                  for name, tool in tools.items() if name in READERS | ROUTING_TOOLS | terminal_names}
@@ -209,6 +213,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
             request.state.metadata = previous_metadata
     if not isinstance(draft, dict) or not isinstance(draft.get("messages"), list):
         raise ValueError("Destination inlet returned an invalid request")
+    validate_skill_catalog(draft["messages"], catalog_context)
     if (state.get("native_context") != native_snapshot
             or state.get("native_context_allowed") != native_allowed_snapshot):
         raise ValueError("Destination inlet changed protected native context")
@@ -233,7 +238,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         raise ValueError("Destination inlet changed protected terminal context")
     schemas = [schema.get("function") for schema in (draft.get("tools") or []) if isinstance(schema, dict)]
     terminal_found = {name for name, tool in tools.items() if isinstance(tool, dict) and is_terminal_tool(tool)}
-    for name in READERS | ROUTING_TOOLS | terminal_names | terminal_found:
+    for name in READERS | ROUTING_TOOLS | {SKILL_CATALOG} | terminal_names | terminal_found:
         expected = protected.get(name)
         found = tools.get(name)
         public = [schema for schema in schemas if isinstance(schema, dict) and schema.get("name") == name]

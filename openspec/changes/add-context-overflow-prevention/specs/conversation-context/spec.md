@@ -153,12 +153,12 @@ Router SHALL получать историю завершённой работы
 
 ### Requirement: Router emits one composed system message
 
-Исходящий API-массив `messages` Router SHALL содержать одно `system`-сообщение, объединяющее собственный промпт, служебные правила, каталоги и допустимые системные добавления. Исторические Tool results SHALL NOT переноситься в него. Отдельное API-поле `tools` SHALL сохраняться; модельный chat template вправе добавлять свои внутренние секции при сериализации.
+Исходящий API-массив `messages` Router SHALL содержать одно `system`-сообщение, объединяющее собственный промпт, служебные правила и допустимые системные добавления. XML-каталоги Skills SHALL передаваться отдельным служебным Tool result, без копии в system. Исторические Tool results SHALL NOT переноситься в него. Отдельное API-поле `tools` SHALL сохраняться; модельный chat template вправе добавлять свои внутренние секции при сериализации.
 
 #### Scenario: Prompt and skill catalog were assembled separately
 
 - **WHEN** подготовлены промпт Router, каталог Skills и дополнительные разрешённые системные инструкции
-- **THEN** до отправки они объединяются в одно сообщение со стабильным порядком и явными разделами
+- **THEN** до отправки промпт и правила объединяются в один system, а XML-каталог остаётся отдельным tool-сообщением
 - **AND** runtime-шаблон GLM формирует собственные Tools/Reasoning sections без ручного дублирования в промпте
 
 #### Scenario: Agent is selected after Router
@@ -211,3 +211,25 @@ Router SHALL выводить после `routing_skills` отдельный `<a
 - **WHEN** Router передаёт запрос агенту либо запускает worker
 - **THEN** адресат сохраняет только собственный набор Skills и не наследует chat-only Skills Router
 - **AND** новый запрос заново определяет явный выбор; недоступный или неактивный выбранный Skill не читается с правами владельца Router
+
+### Requirement: Current skill catalog is protected server tool context
+
+Каждая подготовка SHALL передавать одну актуальную пару `assistant.tool_calls(list_available_skills)` → `tool` со строковым XML. Router SHALL получать `routing_skills` и `available_skills`, агент/worker — только собственный `available_skills`. Пара SHALL NOT расходовать N, предоставлять callable/schema или учитываться как действие модели либо чтение routing Skill. Исходный чат SHALL сохраняться.
+
+#### Scenario: Old or wide native catalog exists
+
+- **WHEN** исходная история содержит прежние либо native каталоги Skills
+- **THEN** они исключаются из модельного представления и заменяются одной свежей scoped-парой
+- **AND** текущий каталог не дублируется в system и не изменяет user-вопрос
+
+#### Scenario: All working results are hidden
+
+- **WHEN** N=0 и выполняется продолжение либо handoff
+- **THEN** собственный актуальный каталог адресата остаётся полным, включая пустые блоки
+- **AND** Tools получают ту же пару в __messages__, которую видит модель
+
+#### Scenario: Inlet changes service context
+
+- **WHEN** destination inlet удаляет, подменяет или дублирует служебную пару
+- **THEN** подготовка отклоняется независимо от N
+- **AND** неверный каталог не публикуется в executable registry

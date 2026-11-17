@@ -14,6 +14,7 @@ from lite_handoff_router.protocol import object_value
 from tests.test_history import turn
 from tests.test_protocol import call
 from tests.test_router import Adapter, User
+from tests.context_helpers import catalog_result, last_question
 
 
 def packets(view):
@@ -128,7 +129,6 @@ class RoutingCatalogTest(unittest.IsolatedAsyncioTestCase):
         base = root.find("available_skills/skill")
         self.assertEqual([child.tag for child in base], ["id", "name", "description"])
         self.assertEqual(base.findtext("id"), "base")
-        self.assertIn("view_skill(id=id)", text)
         self.assertNotIn("skill_path", text)
 
     async def test_empty_catalog_and_one_system_keep_actual_question_and_tools(self):
@@ -140,8 +140,9 @@ class RoutingCatalogTest(unittest.IsolatedAsyncioTestCase):
         draft, tools = await prepare_model(Adapter(), request, {}, User(), {}, state, "llm", {})
         self.assertEqual(sum(m["role"] == "system" for m in draft["messages"]), 1)
         self.assertTrue(draft["messages"][0]["content"].startswith("Router\n\n"))
-        self.assertIn("<routing_skills />", draft["messages"][0]["content"])
-        self.assertEqual(draft["messages"][-1], source[-1])
+        self.assertNotIn("<routing_skills", draft["messages"][0]["content"])
+        self.assertIn("<routing_skills />", catalog_result(draft["messages"]))
+        self.assertEqual(last_question(draft["messages"]), source[-1])
         self.assertEqual([t["function"]["name"] for t in draft["tools"]], list(tools))
 
     def test_system_composition_preserves_section_order_and_user_data(self):

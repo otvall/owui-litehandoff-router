@@ -39,8 +39,10 @@
   "tool_names": [
     "lite_delegate",
     "view_skill",
-    "read_skill_file",
-    "grep_skill_files"
+    "grep_skill_files",
+    "read_skill_file"
   ],
-  "system_characters": 8635
+  "system_characters": 7379,
+  "catalog_characters": 1503,
+  "catalog_delivery": "server-only list_available_skills tool result"
 }

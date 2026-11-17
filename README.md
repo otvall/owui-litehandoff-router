@@ -15,7 +15,7 @@ Router для Open WebUI **0.13.3**: самостоятельный ответ �
 `tool_result_history_limit` в Router Preparation сохраняет N свежих рабочих
 Tool results в контексте модели, заменяя старые плашкой без изменения чата.
 История передач остаётся в отдельных Tool-сообщениях, Router получает один
-system с XML-каталогом routing Skills. [Пример запроса](docs/context.md#пример-третьего-запроса-router).
+system с правилами и отдельный служебный `list_available_skills` с XML-каталогами. [Пример запроса](docs/context.md#пример-третьего-запроса-router).
 Каталоги разделены на `routing_skills` и штатный по форме `available_skills`;
 обычные Skills Router доступны из конфигурации, карточки модели и выбора в чате.
 

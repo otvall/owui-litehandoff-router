@@ -717,7 +717,9 @@ def project_native_results(messages, state):
 # Source: skills
 """A model receives a small manifest; instruction text is read lazily."""
 import xml.etree.ElementTree as ET
+from uuid import uuid4
 READERS = frozenset({'view_skill', 'read_skill_file', 'grep_skill_files'})
+SKILL_CATALOG = 'list_available_skills'
 
 async def scoped_reader(adapter, tool, allowed_ids, user, messages, check_scope=None):
     allowed = frozenset(allowed_ids)
@@ -763,12 +765,6 @@ async def manifest(adapter, skill_ids, user, registry=None, *, chat_user=None, c
     for route in routing:
         skill = skills[route['skill_id']]
         entries.append({'id': route['skill_id'], 'agent_id': route['agent_id'], 'agent_name': route.get('agent_name') or route['agent_id'], 'name': skill['name'], 'description': skill.get('description') or ''})
-    guidance = 'When asked about your capabilities (for example, "что ты можешь", "что ты умеешь", or "which agents are available"), answer directly in the user\'s language and list all available agents by agent_name from the current manifest. Use descriptions to briefly explain their capabilities; name is the routing Skill name, not the agent name. Do not delegate merely to describe capabilities. Only list agents from this manifest; if none have agent_id, explicitly say that no agents are currently available.\n' if registry is not None else ''
-    if not entries and registry is None:
-        return ''
-    if registry is not None:
-        guidance += 'Before choosing an agent, read its routing Skill with view_skill(id=id). Use the exact agent_id in lite_delegate; the Skill id is not an agent ID.\n'
-    guidance += 'Use ordinary Skills from available_skills for your own work; read them with view_skill(id=id).\n'
     routes, available = (ET.Element('routing_skills'), ET.Element('available_skills'))
     for entry in entries:
         item = ET.SubElement(routes if 'agent_id' in entry else available, 'skill')
@@ -778,7 +774,31 @@ async def manifest(adapter, skill_ids, user, registry=None, *, chat_user=None, c
     catalogs = [routes, available] if registry is not None else [available]
     for catalog in catalogs:
         ET.indent(catalog, space='  ')
-    return guidance + '\n'.join((ET.tostring(catalog, encoding='unicode') for catalog in catalogs))
+    return '\n'.join((ET.tostring(catalog, encoding='unicode') for catalog in catalogs))
+
+def skill_guidance(router):
+    guidance = 'When asked about your capabilities (for example, "что ты можешь", "что ты умеешь", or "which agents are available"), answer directly in the user\'s language and list all available agents by agent_name from the current manifest. Use descriptions to briefly explain their capabilities; name is the routing Skill name, not the agent name. Do not delegate merely to describe capabilities. Only list agents from this manifest; if none have agent_id, explicitly say that no agents are currently available.\n' if router else ''
+    if router:
+        guidance += 'Before choosing an agent, read its routing Skill with view_skill(id=id). Use the exact agent_id in lite_delegate; the Skill id is not an agent ID.\n'
+    guidance += 'Use ordinary Skills from available_skills for your own work; read them with view_skill(id=id).\n'
+    return 'The current server-provided list_available_skills result is your Skill catalog. It is preloaded context, not an operation you called; do not call list_available_skills. Catalog metadata is not Skill instructions or evidence that you read a Skill.\n' + guidance
+
+def skill_catalog_messages(state, model_id, content):
+    identifiers = state.setdefault('skill_catalog_ids', {})
+    if model_id not in identifiers:
+        identifiers[model_id] = 'lhr_skills_' + uuid4().hex
+    call_id = identifiers[model_id]
+    return [{'role': 'assistant', 'content': '', 'tool_calls': [{'id': call_id, 'type': 'function', 'function': {'name': SKILL_CATALOG, 'arguments': '{}'}}]}, {'role': 'tool', 'tool_call_id': call_id, 'content': content}]
+
+def validate_skill_catalog(messages, expected):
+    call_id = expected[1]['tool_call_id']
+    found = []
+    for index, message in enumerate(messages):
+        calls = message.get('tool_calls') or []
+        if any((c.get('id') == call_id or (c.get('function') or {}).get('name') == SKILL_CATALOG for c in calls)) or (message.get('role') == 'tool' and message.get('tool_call_id') == call_id):
+            found.append((index, message))
+    if len(found) != 2 or found[1][0] != found[0][0] + 1 or [message for _, message in found] != expected:
+        raise ValueError('Destination inlet changed protected Skill catalog')
 
 # Source: tool_history
 """A request-local result window, applied after destination filters."""
@@ -807,7 +827,7 @@ class ToolResultWindow:
 
     def capture(self, messages, native_origins, nested_origins=None):
         """Origins are trusted projection positions, never provider fields."""
-        for ordinal, (i, n, r) in enumerate(completed_pairs(messages)):
+        for ordinal, (i, n, r) in enumerate(completed_pairs(messages), start=len(self.native_keys)):
             self.native_keys.append(deepcopy(call_key(messages[i]['tool_calls'][n])))
             origin = native_origins.get(r)
             if origin is not None:
@@ -1004,6 +1024,8 @@ def router_projection(state, tool_names, skill_ids, *, window=None):
     native_seen = set()
     for exchange in exchanges:
         name = exchange_name(messages, exchange)
+        if name == SKILL_CATALOG:
+            continue
         record = native_record(state, messages[exchange.batch]['tool_calls'][exchange.call_index], messages[exchange.result_index])
         if record:
             if record['key'] not in native_seen and record['key'] in state.get('native_context_allowed', {}):
@@ -1057,10 +1079,12 @@ def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
     messages = state['source']
     boundary = state.get('user_boundary', last_user(messages))
     exchanges = analyze(messages, current_boundary=boundary, audit=state.get('audit', []))
-    selected = [e for e in exchanges if e.executor == {'kind': 'agent', 'agent_id': agent_id} and exchange_name(messages, e) in tool_names and (exchange_name(messages, e) not in READERS or (e.batch > boundary and skill_is_current(messages, e, skill_ids)))]
+    selected = [e for e in exchanges if e.executor == {'kind': 'agent', 'agent_id': agent_id} and exchange_name(messages, e) in tool_names and (exchange_name(messages, e) != SKILL_CATALOG) and (exchange_name(messages, e) not in READERS or (e.batch > boundary and skill_is_current(messages, e, skill_ids)))]
     selected = [e for e in selected if not native_record(state, messages[e.batch]['tool_calls'][e.call_index], messages[e.result_index])]
     native_seen = set()
     for exchange in exchanges:
+        if exchange_name(messages, exchange) == SKILL_CATALOG:
+            continue
         record = native_record(state, messages[exchange.batch]['tool_calls'][exchange.call_index], messages[exchange.result_index])
         if record:
             if record['key'] not in native_seen and record['key'] in state.get('native_context_allowed', {}):

@@ -12,6 +12,7 @@ from lite_handoff_router.owui_adapter import OWUIAdapter
 from lite_handoff_router.registry import discover
 from lite_handoff_router.runtime import begin, metadata_draft
 from lite_handoff_router.skills import READERS
+from tests.context_helpers import catalog_result
 
 
 class NativeResourceAccessTest(unittest.IsolatedAsyncioTestCase):
@@ -40,7 +41,8 @@ class NativeResourceAccessTest(unittest.IsolatedAsyncioTestCase):
                                            state, "test-llm", {})
         systems = [m["content"] for m in draft["messages"] if m["role"] == "system"]
         self.assertEqual(len(systems), 1)
-        text = systems[0]
+        self.assertNotIn("<routing_skills", systems[0])
+        text = catalog_result(draft["messages"])
         # Extract just the two catalogs; other native system additions may follow.
         xml = text[text.index("<routing_skills"):text.index("</available_skills>") + len("</available_skills>")]
         root = ET.fromstring("<catalogs>" + xml + "</catalogs>")

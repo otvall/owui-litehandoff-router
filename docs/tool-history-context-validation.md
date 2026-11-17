@@ -103,3 +103,30 @@ endpoint с текстовыми значениями всех числовых 
 Источники: [форма Valves OWUI 0.13.3](https://github.com/open-webui/open-webui/blob/v0.13.3/src/lib/components/common/Valves.svelte),
 [endpoint сохранения](https://github.com/open-webui/open-webui/blob/v0.13.3/backend/open_webui/routers/functions.py),
 [режимы преобразования Pydantic](https://docs.pydantic.dev/latest/concepts/strict_mode/).
+
+## Доставка каталогов отдельным Tool result
+
+Актуальные каталоги перенесены из system в единственную модельную пару
+`assistant.tool_calls(list_available_skills, {})` → `tool` со строковым XML.
+Router получает оба блока; agent/worker — только собственный `available_skills`.
+В system остаются промпт, служебные правила и guidance. Схемы/callable для
+служебного имени не публикуются; пара не записывается в source/audit/receipts
+и не подтверждает чтение routing Skill. Старые и широкие native каталоги исключены.
+
+Результат: **139 unit-тестов и 79 native-тестов** на официальной OWUI 0.13.3,
+также 139 unit-тестов внутри этого Docker-образа. Пересобраны оба экспорта.
+Проверены N=null/0/1, отсутствие расхода окна каталогом, свежий scope после
+смены прикреплённых Skills, стабильный request-local ID и отдельные ID адресатов,
+неизменность user/source/audit, совпадение __messages__ с provider payload.
+Удаление/подмена/дублирование пары через inlets отклоняются независимо от N;
+добавление executable schema под служебным именем также отклоняется.
+
+Native streaming suites подтверждают обычный handoff, работников и финальный
+пакет, callable refresh, исключение широкого каталога и прежние server barriers.
+Детерминированные provider fixtures распознают служебные результаты отдельно
+от реально выполненных Tools. Это не смысловая приёмка живой модели.
+
+Docker-пример `docs/examples/router-prompt-demo` перехвачен повторно:
+system — 7 379 символов, каталог — 1 503, три агента и три обычных Skill.
+Официальный шаблон GLM с ранее указанным SHA-256 отрендерил новый фактический
+request в один observation/tool_response с обоими XML-блоками, без копии в system.

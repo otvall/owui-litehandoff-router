@@ -31,7 +31,7 @@ class ToolResultWindow:
 
     def capture(self, messages, native_origins, nested_origins=None):
         """Origins are trusted projection positions, never provider fields."""
-        for ordinal, (i, n, r) in enumerate(completed_pairs(messages)):
+        for ordinal, (i, n, r) in enumerate(completed_pairs(messages), start=len(self.native_keys)):
             self.native_keys.append(deepcopy(call_key(messages[i]["tool_calls"][n])))
             origin = native_origins.get(r)
             if origin is not None:

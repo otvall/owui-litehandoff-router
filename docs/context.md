@@ -79,7 +79,8 @@ Router, передача, системные инструкции и рабоч�
 ### Пример третьего запроса Router
 
 В API у Router одно `system`: промпт Workspace Model, служебные правила,
-каталоги Skills и допустимые системные добавления. Routing-каталог имеет точную
+guidance чтения Skills и допустимые системные добавления. XML-каталоги
+передаются отдельным строковым результатом `list_available_skills`. Routing-каталог имеет точную
 структуру ниже; обычный каталог идёт вторым блоком `<available_skills>`. Значения XML
 экранируются encoder-ом. Для чтения `view_skill(id=...)` получает значение поля `<id>`, а для передачи `lite_delegate` — `<agent_id>`.
 
@@ -109,6 +110,20 @@ Router, передача, системные инструкции и рабоч�
 </available_skills>
 ```
 
+Каталог добавляется сервером как пара `assistant.tool_calls` → `role=tool`,
+по тому же формату, что native preload OWUI. Это текущий служебный контекст,
+не вызов модели: callable/schema `list_available_skills` не предоставляется,
+успешным чтением routing Skill эта пара не считается. Полные инструкции
+по-прежнему загружаются через `view_skill`.
+
+При каждой подготовке каталог перечитывается из допустимого scope. Старые
+каталоги и широкий native-список исключаются, в модельной копии остаётся ровно
+одна актуальная пара адресата после его истории. Она не расходует N и остаётся
+полной при N=0. Agent/worker получает только собственный `available_skills`.
+Пара не добавляется в canonical source, audit и handoff receipts; исходный чат
+не меняется. Destination inlet не может удалить, изменить или дублировать её,
+а Tools получают эту же пару в окончательном `__messages__`.
+
 Первый блок содержит только записи разрешённого routing-реестра. Второй
 повторяет штатный формат OWUI: `skill` с дочерними `id/name/description`.
 Обычные Skills Router объединяют Valves `base_skill_ids`, карточку Router
@@ -126,13 +141,13 @@ Skills только из чата проверяются и читаются о�
 существующим native-механизмом.
 
 Например, после двух ответов разных агентов при `N=1` массив сообщений
-выглядит так. Тексты system и видимых ответов сокращены для примера; реальный
-system содержит весь приведённый каталог. Статус `completed` в примере
+выглядит так. Тексты system, каталога и видимых ответов сокращены для примера;
+реальный tool result содержит весь приведённый выше XML. Статус `completed` в примере
 предполагает подтверждённое сохранённое завершение, иначе это `unknown`.
 
 ```json
 [
-  {"role":"system","content":"Промпт Router\n\nСлужебные правила\n\nКаталог XML"},
+  {"role":"system","content":"Промпт Router\n\nСлужебные правила и guidance Skills"},
   {"role":"user","content":"Вопрос профиля A"},
   {"role":"assistant","tool_calls":[{"id":"d1","type":"function","function":{"name":"lite_delegate","arguments":"{\"agent_id\":\"agent-a\"}"}}]},
   {"role":"tool","tool_call_id":"d1","content":"{\"agent_id\":\"agent-a\",\"status\":\"completed\",\"tool_results\":[{\"tool\":\"lookup\",\"arguments\":{\"q\":\"A\"},\"status\":\"completed\",\"result\":\"[Tool result hidden by history limit; original retained in chat; status=completed]\"}]}"},
@@ -141,7 +156,9 @@ system содержит весь приведённый каталог. Стат
   {"role":"assistant","tool_calls":[{"id":"d2","type":"function","function":{"name":"lite_delegate","arguments":"{\"agent_id\":\"agent-b\"}"}}]},
   {"role":"tool","tool_call_id":"d2","content":"{\"agent_id\":\"agent-b\",\"status\":\"completed\",\"tool_results\":[{\"tool\":\"lookup\",\"arguments\":{\"q\":\"B\"},\"status\":\"completed\",\"result\":\"<html>Результат B</html>\"}]}"},
   {"role":"assistant","content":"Ответ B"},
-  {"role":"user","content":"Сравни ответы A и B"}
+  {"role":"user","content":"Сравни ответы A и B"},
+  {"role":"assistant","content":"","tool_calls":[{"id":"catalog-current","type":"function","function":{"name":"list_available_skills","arguments":"{}"}}]},
+  {"role":"tool","tool_call_id":"catalog-current","content":"<routing_skills>…</routing_skills>\n<available_skills>…</available_skills>"}
 ]
 ```
 
