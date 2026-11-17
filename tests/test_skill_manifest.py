@@ -1,4 +1,5 @@
 import json
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
@@ -8,6 +9,9 @@ from lite_handoff_router.skills import manifest
 
 class SkillManifestTest(unittest.IsolatedAsyncioTestCase):
     def entries(self, prompt):
+        if "<routing_skills" in prompt:
+            routes = ET.fromstring(prompt[prompt.index("<routing_skills"):])
+            return [{**item.attrib, **{child.tag: child.text or "" for child in item}} for item in routes]
         return json.loads(prompt.split("using skill_id):\n", 1)[1])
 
     async def test_router_receives_agent_names_separate_from_shared_skill_name(self):

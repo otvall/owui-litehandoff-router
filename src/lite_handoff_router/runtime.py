@@ -8,13 +8,14 @@ from copy import deepcopy
 from uuid import uuid4
 
 from .parallel_state import group_state
+from .context_policy import ContextPolicy
 
 SCOPE_KEY = "lite_handoff_router"
 RECEIPT = "lite_router"
 
 
 def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids,
-          *, max_parallel_tasks=4, parallel_timeout_seconds=300):
+          *, max_parallel_tasks=4, parallel_timeout_seconds=300, context_policy=None):
     state = {
         "request_id": uuid4().hex, "user_id": user_id,
         "chat_id": metadata.get("chat_id"), "message_id": metadata.get("message_id"),
@@ -29,6 +30,7 @@ def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, ski
                                if body["messages"][i].get("role") == "user"), -1),
         "generation": 0, "audit": [],
         "native_context": None,
+        "context_policy": ContextPolicy.model_validate(context_policy or {}).snapshot(),
         "parallel": group_state(max_parallel_tasks, parallel_timeout_seconds),
     }
     request.scope[SCOPE_KEY] = state

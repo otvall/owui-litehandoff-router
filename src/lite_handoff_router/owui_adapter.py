@@ -9,6 +9,8 @@ from uuid import UUID
 from .binding import bind_tool_context
 from .capabilities import MCP_CLOSE_TIMEOUT, bounded_tool_name
 from .native_context import scoped_knowledge_result
+from .history import context_handoff_key, handoff_evidence
+from .protocol import completed_pairs
 
 
 def as_dict(value):
@@ -23,7 +25,52 @@ def register_model_tool(registry, name, tool, namespace):
     registry[alias] = {**tool, "spec": {**deepcopy(tool["spec"]), "name": alias}}
 
 
+def saved_handoff_statuses(branch, convert):
+    statuses = {}
+    for message in branch:
+        if message.get("role") != "assistant" or not isinstance(message.get("output"), list):
+            continue
+        converted = convert(deepcopy(message["output"]), raw=True)
+        markers = [handoff_evidence(converted[i]["tool_calls"][n], converted[r])
+                   for i, n, r in completed_pairs(converted)]
+        markers = [marker for marker in markers if marker]
+        if len(markers) != 1:
+            continue
+        status = message.get("status")
+        if status not in ("failed", "cancelled", "timed_out"):
+            failed = any(item.get("type") == "message" and item.get("status") in ("failed", "rejected")
+                         for item in message["output"] if isinstance(item, dict))
+            pending = any(item.get("status") in ("pending", "in_progress", "incomplete", "requires_action")
+                          for item in message["output"] if isinstance(item, dict))
+            status = ("failed" if message.get("error") or failed else
+                      "completed" if message.get("done") is True and not pending else "unknown")
+        key = context_handoff_key(markers[0])
+        statuses[key] = status if key not in statuses or statuses[key] == status else "unknown"
+    return statuses
+
+
 class OWUIAdapter:
+    async def historical_handoff_statuses(self, request, metadata, state, user):
+        """Read terminal evidence from this saved branch, never from client metadata."""
+        if not state.get("chat_id") or user.id != state.get("user_id"):
+            return {}
+        from open_webui.models.chats import Chats
+        from open_webui.utils.misc import get_message_list, convert_output_to_messages
+
+        try:
+            chat = await Chats.get_accessible_chat_by_id(state["chat_id"], user)
+            if chat is None:
+                return {}
+            messages = await Chats.get_messages_map_by_chat_id(chat.id)
+            current = state.get("message_id")
+            if current not in (messages or {}):
+                current = metadata.get("user_message_id")
+            branch = get_message_list(messages or {}, current)
+            return saved_handoff_statuses(branch, convert_output_to_messages)
+        except Exception as error:
+            logging.getLogger(__name__).warning("Historical terminal evidence unavailable (%s)", type(error).__name__)
+            return {}
+
     async def native_memory_allowed(self, metadata, model, user):
         from open_webui.models.config import Config
         from open_webui.utils.access_control import has_permission

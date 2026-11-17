@@ -1,6 +1,7 @@
 """A model receives a small manifest; instruction text is read lazily."""
 
 import json
+import xml.etree.ElementTree as ET
 
 from .binding import bind_tool_context
 
@@ -67,6 +68,24 @@ async def manifest(adapter, skill_ids, user, registry=None):
     ) if registry is not None else ""
     if not entries and registry is None:
         return ""
+    if registry is not None:
+        guidance += (
+            "Before choosing an agent, read its routing Skill with view_skill(id=skill_id). "
+            "Use the exact agent_id in lite_delegate; skill_id is not an agent ID.\n"
+        )
+        base = ET.Element("base_skills")
+        routes = ET.Element("routing_skills")
+        for entry in entries:
+            attributes = {key: entry[key] for key in ("skill_id", "agent_id") if key in entry}
+            item = ET.SubElement(routes if "agent_id" in entry else base, "skill", attributes)
+            for key in ("agent_name", "name", "description"):
+                if key in entry:
+                    ET.SubElement(item, key).text = entry[key]
+        ET.indent(base, space="  ")
+        ET.indent(routes, space="  ")
+        catalogs = ([ET.tostring(base, encoding="unicode")] if len(base) else [])
+        catalogs.append(ET.tostring(routes, encoding="unicode"))
+        return guidance + "\n".join(catalogs)
     return guidance + (
         "Available skills (read instructions with view_skill using skill_id):\n"
         + json.dumps(entries, ensure_ascii=False)

@@ -35,9 +35,14 @@ class PreparationTest(unittest.IsolatedAsyncioTestCase):
             await instance.inlet(body, request, {"id": "u"})
             self.assertEqual(require(request, body["metadata"], "u")["base_tool_ids"], [])
             instance.valves.base_skill_ids = ["new-base"]
-            next_body = {"model": "router", "messages": [], "metadata": {"message_id": "next"}}
+            instance.valves.tool_result_history_limit = 2
+            next_body = {"model": "router", "messages": [], "context_policy": {"tool_result_history_limit": 99},
+                         "metadata": {"message_id": "next", "context_policy": {"tool_result_history_limit": 99}}}
             await instance.inlet(next_body, request, {"id": "u"})
             self.assertEqual(require(request, next_body["metadata"], "u")["base_skill_ids"], ["new-base"])
+            self.assertEqual(require(request, next_body["metadata"], "u")["context_policy"]["tool_result_history_limit"], 2)
+            instance.valves.tool_result_history_limit = 5
+            self.assertEqual(require(request, next_body["metadata"], "u")["context_policy"]["tool_result_history_limit"], 2)
 
     async def test_snapshot_and_new_message_valves(self):
         request = SimpleNamespace(scope={}, app=SimpleNamespace(state=SimpleNamespace(MODELS={

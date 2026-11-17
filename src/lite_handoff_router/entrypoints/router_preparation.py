@@ -1,17 +1,18 @@
 """Mandatory request preparation for the public Router Workspace Model."""
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from ..owui_adapter import OWUIAdapter
 from ..registry import discover, ids
 from ..runtime import begin
 from ..parallel import prepare_worker
+from ..context_policy import ContextPolicy
 
 AGENTS: dict[str, str] = {}
 
 
 class Filter:
-    class Valves(BaseModel):
+    class Valves(ContextPolicy):
         priority: int = 0
         base_tool_ids: list[str] = Field(default_factory=list)
         base_skill_ids: list[str] = Field(default_factory=list)
@@ -34,5 +35,6 @@ class Filter:
         begin(__request__, body, metadata, user.id, registry, diagnostics,
               ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids),
               max_parallel_tasks=self.valves.max_parallel_tasks,
-              parallel_timeout_seconds=self.valves.parallel_timeout_seconds)
+              parallel_timeout_seconds=self.valves.parallel_timeout_seconds,
+              context_policy=self.valves.snapshot())
         return body

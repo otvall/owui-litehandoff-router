@@ -22,7 +22,9 @@ class NativeParallelTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('background', inspect.signature(delegate).parameters)
         root=Path(__file__).resolve().parents[2]/'src/lite_handoff_router'
         for path in root.rglob('*.py'):
-            if path.name=='owui_adapter.py':
+            # authoring.py belongs to the separate Skill-author Tool, not the
+            # Router/Preparation runtime and its adapter boundary.
+            if path.name in {'owui_adapter.py', 'authoring.py'}:
                 continue
             tree=ast.parse(path.read_text())
             for node in ast.walk(tree):

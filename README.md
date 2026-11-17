@@ -12,6 +12,11 @@ Router для Open WebUI **0.13.3**: самостоятельный ответ �
 Установочный комплект: один Filter и один Pipe со встроенными управляющими Tools. Runtime использует
 библиотеки OWUI и доступные внутри контура модели/сервисы.
 
+`tool_result_history_limit` в Router Preparation сохраняет N свежих рабочих
+Tool results в контексте модели, заменяя старые плашкой без изменения чата.
+История передач остаётся в отдельных Tool-сообщениях, Router получает один
+system с XML-каталогом routing Skills. [Пример запроса](docs/context.md#пример-третьего-запроса-router).
+
 - [Установка и настройка](docs/setup.md)
 - [Промпт Router, routing Skills и общие ресурсы](docs/router-configuration.md)
 - [Разработка и подготовка зависимостей](docs/development.md)

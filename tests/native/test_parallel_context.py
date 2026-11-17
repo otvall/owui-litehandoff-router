@@ -188,6 +188,7 @@ class Tools:
         from open_webui.utils.tools import get_updated_tool_function
         from open_webui.models.chats import Chats
 
+        self.preparation.valves.tool_result_history_limit = 0
         task = "Покажи прогноз ФТП FTP-42 за 2026-11-01–2026-11-30. Верни краткую таблицу."
         self.assignments = [{"agent_id": self.agent, "task": task, "file_ids": [self.file_id]},
                             {"agent_id": self.agent, "task": task}]
@@ -220,7 +221,9 @@ class Tools:
                 names = {t["function"]["name"] for t in payload["tools"]}
                 self.assertFalse(names & {"lite_delegate", "lite_parallel", "delegate_task"})
             self.assertIn("WORKER_SKILL_INSTRUCTIONS", str(seen[1]["messages"]))
-            self.assertIn("WORKER_LOOKUP_RESULT", str(seen[2]["messages"]))
+            self.assertNotIn("WORKER_LOOKUP_RESULT", str(seen[2]["messages"]))
+            self.assertIn("hidden by history limit", str(seen[2]["messages"]))
+            self.assertIn("WORKER_LOOKUP_RESULT", str(worker["source"]))
             tool = child.scope["lite_handoff_metadata"]["tools"]["worker_lookup"]
             refreshed = await get_updated_tool_function(tool["callable"], {
                 "__messages__": [{"role": "user", "content": "PARENT_REFRESH"}],
@@ -230,6 +233,7 @@ class Tools:
             effective = self.app.state.worker_contexts[-1]
             self.assertNotIn("PARENT_", str(effective["messages"]))
             self.assertIn(task, str(effective["messages"]))
+            self.assertEqual(effective["messages"], seen[-1]["messages"])
             self.assertEqual(effective["files"], [{"id": "refreshed-file"}])
             saved = await Chats.get_chat_by_id(worker["chat_id"])
             self.assertTrue(saved.meta["internal"])
@@ -254,6 +258,7 @@ class Tools:
     async def test_final_handoff_keeps_parent_dialogue_and_complete_results(self):
         from open_webui.utils import chat
 
+        self.preparation.valves.tool_result_history_limit = 0
         self.final_handoff = True
         self.assignments = [{"agent_id": self.agent, "task": "FIRST_FORECAST: FTP-42"},
                             {"agent_id": self.agent, "task": "SECOND_FORECAST: FTP-99"}]
@@ -263,6 +268,8 @@ class Tools:
         state = self.request.scope["lite_handoff_router"]
         self.assertEqual(state["active_agent"], self.agent)
         self.assertEqual(state["parallel"]["status"], "completed")
+        self.assertEqual(len(state["pending"]), 1)
+        self.assertEqual(state["pending"][0]["agent_id"], self.agent)
         final = [p for p in self.seen if p["chat_id"] == metadata["chat_id"] and p["model"] == self.agent]
         self.assertEqual(len(final), 3)
         for payload in final:
@@ -349,6 +356,7 @@ class Tools:
         from fastapi.responses import StreamingResponse
         from open_webui.models.chats import Chats
         from open_webui.utils import chat
+        self.preparation.valves.tool_result_history_limit = 0
         self.assignments = [{"agent_id": self.agent, "task": "FIRST_FORECAST"}]
         body, metadata = await self.parent("PARENT_REQUEST: two independent forecasts")
         parent_count = 0

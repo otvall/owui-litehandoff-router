@@ -39,7 +39,11 @@ class HistoryTest(unittest.TestCase):
         self.assertIn('"agent_id": "agent-a"', str(view))
         self.assertIn('"skill_id": "route-a"', str(view))
         self.assertNotIn("FULL_ROUTING_INSTRUCTIONS", str(view))
-        self.assertFalse(any(m.get("tool_calls") or m.get("role") == "tool" for m in view))
+        native = [call for m in view for call in m.get("tool_calls", [])]
+        self.assertTrue(any(c["function"]["name"] == "lite_delegate" for c in native))
+        self.assertFalse(any(json.loads(c["function"]["arguments"]).get("q") == "agent" for c in native))
+        self.assertEqual([m["content"] for m in view if m["role"] == "user"],
+                         [m["content"] for m in messages if m["role"] == "user"])
         self.assertEqual(messages, original)
 
     def test_router_preserves_current_own_skill_read(self):

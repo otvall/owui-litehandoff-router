@@ -96,7 +96,7 @@ async def prepare_worker(adapter, request, body, metadata, user):
     body["files"] = deepcopy(entry["files"])
     metadata["files"] = deepcopy(entry["files"])
     state = begin(request, body, metadata, user.id, {entry["agent_id"]: entry["registry_entry"]}, [], [], [],
-                  max_parallel_tasks=0)
+                  max_parallel_tasks=0, context_policy=entry.get("context_policy"))
     state.update(worker=True, active_agent=entry["agent_id"], phase="agent")
     # Binding persists correlation and the parent link. Finish its transaction
     # before native cancellation can close the child and cascade-delete it.
@@ -219,7 +219,8 @@ def worker_runtime(adapter, request, user, metadata, state, events):
         entry = {**deepcopy(assignment), "task_id": uuid4().hex, "index": index,
                  "user_id": user.id, "parent_chat_id": state["chat_id"],
                  "parent_message_id": state["message_id"], "router_id": state["router_id"],
-                 "registry_entry": deepcopy(state["registry"][assignment["agent_id"]]), "bound": bound}
+                 "registry_entry": deepcopy(state["registry"][assignment["agent_id"]]), "bound": bound,
+                 "context_policy": deepcopy(state.get("context_policy", {}))}
         # Unique benign task labels also correlate children cancelled before Filter binding.
         entry["native_task"] = "[Задание " + entry["task_id"] + "] " + entry["task"]
         entry["input"] = [{"role": "user", "content": entry["native_task"]}]

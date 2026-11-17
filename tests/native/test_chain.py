@@ -112,6 +112,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
 
         preparation, _, _, prep_source = await load_function_module_by_id("prep_" + suffix, (ROOT / "dist/router_preparation.py").read_text())
         prep_source.AGENTS = {agent_id: skill_id}
+        preparation.valves.tool_result_history_limit = 1
         self.assertEqual(preparation.valves.base_tool_ids, [])
         metadata = {"chat_id": "local:" + suffix, "message_id": "answer-" + suffix, "session_id": "test-session-" + suffix,
                     "params": {"function_calling": "native", "tool_approval_mode": "full"}, "files": [{"id": "user-file"}],
@@ -172,6 +173,12 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("router_only", payload)
             self.assertTrue(payload["agent_only"])
         self.assertIn("AGENT_PROMPT_UPDATED", str(seen[-1]["messages"]))
+        self.assertNotIn("Image file read successfully", str(seen[-1]["messages"]))
+        self.assertIn("hidden by history limit", str(seen[-1]["messages"]))
+        self.assertIn("TOOL_RESULT_42:" + user.id, str(seen[-1]["messages"]))
+        for payload in seen[:2]:
+            self.assertEqual(sum(m["role"] == "system" for m in payload["messages"]), 1)
+            self.assertIn("<routing_skills>", payload["messages"][0]["content"])
         self.assertEqual(app.state.MODELS[agent_id]["info"]["params"]["temperature"], 0.2)
         finals = [event["data"] for event in events if event.get("type") == "chat:completion" and event.get("data", {}).get("done")]
         self.assertTrue(finals, events)
@@ -275,6 +282,14 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(general_request.scope["lite_handoff_router"]["active_agent"])
         self.assertIn("General answer", str(general_ctx["assistant_message"]["output"]))
         self.assertIn("B_PRIVATE_RESULT_42", str(general_seen[0]["messages"]))
+        self.assertEqual(sum(m["role"] == "system" for m in general_seen[0]["messages"]), 1)
+        self.assertEqual(general_seen[0]["messages"][-1], {"role": "user", "content": "general question"})
+        from lite_handoff_router.protocol import object_value
+        historical = [object_value(m.get("content")) for m in general_seen[0]["messages"] if m["role"] == "tool"]
+        historical = [item for item in historical if "tool_results" in item]
+        self.assertEqual([item["agent_id"] for item in historical], [agent_id, b_id])
+        self.assertNotIn("TOOL_RESULT_42:" + user.id, str(historical))
+        self.assertIn("B_PRIVATE_RESULT_42", str(historical))
         self.assertNotIn("profile_lookup", [t["function"]["name"] for t in general_seen[0]["tools"]])
 
         for question, detail in (("provider error", "Test provider failure"), ("overflow", "Context length exceeded")):

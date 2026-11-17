@@ -278,6 +278,54 @@ def group_calls(state):
             raise ValueError('Invalid parallel assignment ' + str(index) + ': only agent_id, task and file_ids are accepted')
     return calls
 
+# Source: context_policy
+"""Administrative context policy; no client metadata participates in resolution."""
+from typing import Annotated
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+PositiveTokens = Annotated[int, Field(gt=0, strict=True)]
+
+class ContextPolicy(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+    tool_result_history_limit: int | None = Field(default=None, ge=0, strict=True)
+    context_input_budget_tokens: PositiveTokens | None = None
+    context_model_input_budgets: dict[str, PositiveTokens] = Field(default_factory=dict)
+    context_safety_margin_tokens: int = Field(default=1024, ge=0, strict=True)
+    context_summary_enabled: bool = Field(default=False, strict=True)
+    context_summary_model_id: str = ''
+    context_summary_trigger_ratio: float = Field(default=0.9, gt=0, lt=1, strict=True)
+    context_summary_target_ratio: float = Field(default=0.7, gt=0, lt=1, strict=True)
+    context_summary_input_budget_tokens: PositiveTokens = 8192
+    context_summary_max_tokens: PositiveTokens = 1024
+    context_summary_timeout_seconds: PositiveTokens = 60
+    context_summary_max_chunks: PositiveTokens = 8
+
+    @model_validator(mode='after')
+    def validate_policy(self):
+        if self.context_summary_target_ratio >= self.context_summary_trigger_ratio:
+            raise ValueError('Summary target must be below trigger')
+        budgets = list(self.context_model_input_budgets.values())
+        if self.context_input_budget_tokens is not None:
+            budgets.append(self.context_input_budget_tokens)
+        if any((budget <= self.context_safety_margin_tokens for budget in budgets)):
+            raise ValueError('Input budget must exceed context safety margin')
+        if self.context_summary_input_budget_tokens <= self.context_safety_margin_tokens:
+            raise ValueError('Summary input budget must exceed context safety margin')
+        if self.context_summary_enabled and (not self.context_summary_model_id.strip() or not budgets):
+            raise ValueError('Summary requires an explicit model and input budgets')
+        return self
+
+    def usable_budget(self, model_id):
+        budget = self.context_model_input_budgets.get(model_id, self.context_input_budget_tokens)
+        if budget is None:
+            if self.context_summary_enabled:
+                raise ValueError('Missing context input budget for model: ' + model_id)
+            return None
+        return budget - self.context_safety_margin_tokens
+
+    def snapshot(self):
+        """Revalidate mutable dictionaries and return policy fields only."""
+        return ContextPolicy.model_validate({name: getattr(self, name) for name in ContextPolicy.model_fields}).model_dump()
+
 # Source: runtime
 """Trusted lifecycle state shared by independent uploads through the ASGI scope.
 
@@ -289,8 +337,8 @@ from uuid import uuid4
 SCOPE_KEY = 'lite_handoff_router'
 RECEIPT = 'lite_router'
 
-def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids, *, max_parallel_tasks=4, parallel_timeout_seconds=300):
-    state = {'request_id': uuid4().hex, 'user_id': user_id, 'chat_id': metadata.get('chat_id'), 'message_id': metadata.get('message_id'), 'router_id': body['model'], 'registry': deepcopy(registry), 'chat_terminal_id': body.get('terminal_id') if isinstance(body.get('terminal_id'), str) else None, 'diagnostics': diagnostics, 'base_tool_ids': list(tool_ids), 'base_skill_ids': list(skill_ids), 'source': deepcopy(body.get('messages', [])), 'phase': 'router', 'pending': [], 'active_agent': None, 'skill_scope': None, 'original_source': deepcopy(body.get('messages', [])), 'user_boundary': next((i for i in range(len(body.get('messages', [])) - 1, -1, -1) if body['messages'][i].get('role') == 'user'), -1), 'generation': 0, 'audit': [], 'native_context': None, 'parallel': group_state(max_parallel_tasks, parallel_timeout_seconds)}
+def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids, *, max_parallel_tasks=4, parallel_timeout_seconds=300, context_policy=None):
+    state = {'request_id': uuid4().hex, 'user_id': user_id, 'chat_id': metadata.get('chat_id'), 'message_id': metadata.get('message_id'), 'router_id': body['model'], 'registry': deepcopy(registry), 'chat_terminal_id': body.get('terminal_id') if isinstance(body.get('terminal_id'), str) else None, 'diagnostics': diagnostics, 'base_tool_ids': list(tool_ids), 'base_skill_ids': list(skill_ids), 'source': deepcopy(body.get('messages', [])), 'phase': 'router', 'pending': [], 'active_agent': None, 'skill_scope': None, 'original_source': deepcopy(body.get('messages', [])), 'user_boundary': next((i for i in range(len(body.get('messages', [])) - 1, -1, -1) if body['messages'][i].get('role') == 'user'), -1), 'generation': 0, 'audit': [], 'native_context': None, 'context_policy': ContextPolicy.model_validate(context_policy or {}).snapshot(), 'parallel': group_state(max_parallel_tasks, parallel_timeout_seconds)}
     request.scope[SCOPE_KEY] = state
     request.scope['lite_handoff_metadata'] = metadata
     metadata['tools'] = {}
@@ -658,6 +706,379 @@ def project_native_results(messages, state):
                 projections.append(key)
     return messages
 
+# Source: skills
+"""A model receives a small manifest; instruction text is read lazily."""
+import json
+import xml.etree.ElementTree as ET
+READERS = frozenset({'view_skill', 'read_skill_file', 'grep_skill_files'})
+
+async def scoped_reader(adapter, tool, allowed_ids, user, messages, check_scope=None):
+    allowed = frozenset(allowed_ids)
+
+    async def check(arguments):
+        skill_id = arguments.get('id')
+        if not isinstance(skill_id, str) or skill_id not in allowed:
+            raise ValueError('Skill is outside the current model scope')
+        if check_scope is not None:
+            await check_scope(skill_id)
+        else:
+            await adapter.skill(skill_id, user)
+    return await bind_tool_context(adapter, tool, messages, check=check, pinned={'__user__': user.model_dump()})
+
+def prepare_skill_scope(metadata, state, model_id, skill_ids):
+    previous = state.get('skill_scope') or {}
+    context = dict(metadata.get('chat_context') or {})
+    context.pop('messages', None)
+    context.pop('params', None)
+    versions = context.get('skill_versions') or {}
+    versions = {key: value for key, value in versions.items() if key in skill_ids} if previous.get('model_id') == model_id else {}
+    context.pop('mentioned_skill_ids', None)
+    context['skill_versions'] = versions
+    metadata['chat_context'] = context
+    for key in ('skill_ids', 'mentioned_skill_ids', 'available_skills', 'activated_skill_ids', 'terminal_skills'):
+        metadata.pop(key, None)
+    metadata['lite_skill_scope'] = {'model_id': model_id, 'skill_ids': list(skill_ids), 'request_id': state['request_id']}
+
+async def manifest(adapter, skill_ids, user, registry=None):
+    entries = []
+    routing = list((registry or {}).values())
+    routed_ids = {entry['skill_id'] for entry in routing}
+    skills = {}
+    for skill_id in skill_ids:
+        skill = await adapter.skill(skill_id, user)
+        skills[skill_id] = skill
+        if skill_id in routed_ids:
+            continue
+        entry = {'skill_id': skill_id, 'name': skill['name'], 'description': skill.get('description') or ''}
+        entries.append(entry)
+    for route in routing:
+        skill = skills[route['skill_id']]
+        entries.append({'skill_id': route['skill_id'], 'agent_id': route['agent_id'], 'agent_name': route.get('agent_name') or route['agent_id'], 'name': skill['name'], 'description': skill.get('description') or ''})
+    guidance = 'When asked about your capabilities (for example, "что ты можешь", "что ты умеешь", or "which agents are available"), answer directly in the user\'s language and list all available agents by agent_name from the current manifest. Use descriptions to briefly explain their capabilities; name is the routing Skill name, not the agent name. Do not delegate merely to describe capabilities. Only list agents from this manifest; if none have agent_id, explicitly say that no agents are currently available.\n' if registry is not None else ''
+    if not entries and registry is None:
+        return ''
+    if registry is not None:
+        guidance += 'Before choosing an agent, read its routing Skill with view_skill(id=skill_id). Use the exact agent_id in lite_delegate; skill_id is not an agent ID.\n'
+        base = ET.Element('base_skills')
+        routes = ET.Element('routing_skills')
+        for entry in entries:
+            attributes = {key: entry[key] for key in ('skill_id', 'agent_id') if key in entry}
+            item = ET.SubElement(routes if 'agent_id' in entry else base, 'skill', attributes)
+            for key in ('agent_name', 'name', 'description'):
+                if key in entry:
+                    ET.SubElement(item, key).text = entry[key]
+        ET.indent(base, space='  ')
+        ET.indent(routes, space='  ')
+        catalogs = [ET.tostring(base, encoding='unicode')] if len(base) else []
+        catalogs.append(ET.tostring(routes, encoding='unicode'))
+        return guidance + '\n'.join(catalogs)
+    return guidance + ('Available skills (read instructions with view_skill using skill_id):\n' + json.dumps(entries, ensure_ascii=False))
+
+# Source: tool_history
+"""A request-local result window, applied after destination filters."""
+from copy import deepcopy
+import json
+
+def call_key(call):
+    function = call.get('function') or {}
+    return (call.get('id'), function.get('name'), function.get('arguments'))
+
+def result_status(content):
+    value = object_value(content)
+    failed = bool(value.get('error') or value.get('success') is False or value.get('ok') is False or (value.get('status') in ('error', 'failed')) or (isinstance(content, str) and content.startswith('Error:')))
+    return 'error' if failed else 'completed'
+
+def result_placeholder(content):
+    return '[Tool result hidden by history limit; original retained in chat; status=' + result_status(content) + ']'
+
+class ToolResultWindow:
+
+    def __init__(self, limit):
+        self.limit = limit
+        self.entries = []
+        self.native_keys = []
+        self.packets = {}
+
+    def capture(self, messages, native_origins, nested_origins=None):
+        """Origins are trusted projection positions, never provider fields."""
+        for ordinal, (i, n, r) in enumerate(completed_pairs(messages)):
+            self.native_keys.append(deepcopy(call_key(messages[i]['tool_calls'][n])))
+            origin = native_origins.get(r)
+            if origin is not None:
+                self.entries.append((origin, ordinal, -1))
+            if r in (nested_origins or {}):
+                self.packets[ordinal] = object_value(messages[r]['content'])
+                for child, child_origin in enumerate(nested_origins[r]):
+                    self.entries.append((child_origin, ordinal, child))
+
+    def apply(self, messages):
+        if self.limit is None:
+            return
+        pairs = completed_pairs(messages)
+        keys = [call_key(messages[i]['tool_calls'][n]) for i, n, _ in pairs]
+        call_count = sum((len(m.get('tool_calls') or []) for m in messages if m.get('role') == 'assistant'))
+        result_count = sum((m.get('role') == 'tool' for m in messages))
+        if keys != self.native_keys or call_count != len(pairs) or result_count != len(pairs):
+            raise ValueError('Destination inlet changed Tool history structure under the result limit')
+        packets = {}
+        for ordinal, expected in self.packets.items():
+            found = object_value(messages[pairs[ordinal][2]].get('content'))
+            children = found.get('tool_results')
+            if not isinstance(children, list) or len(children) != len(expected['tool_results']) or {k: v for k, v in found.items() if k != 'tool_results'} != {k: v for k, v in expected.items() if k != 'tool_results'} or any((not isinstance(child, dict) or set(child) != set(original) or {k: v for k, v in child.items() if k != 'result'} != {k: v for k, v in original.items() if k != 'result'} for child, original in zip(children, expected['tool_results']))):
+                raise ValueError('Destination inlet changed historical handoff packet under the result limit')
+            packets[ordinal] = deepcopy(found)
+        ordered = sorted(self.entries)
+        hidden = ordered[:-self.limit] if self.limit else ordered
+        hidden_batches = set()
+        for _, ordinal, child in hidden:
+            if child >= 0:
+                record = packets[ordinal]['tool_results'][child]
+                record['result'] = result_placeholder(record.get('result'))
+                continue
+            i, _, r = pairs[ordinal]
+            result = messages[r]
+            messages[r] = {key: deepcopy(result[key]) for key in ('role', 'tool_call_id', 'name') if key in result}
+            messages[r]['content'] = result_placeholder(result.get('content'))
+            hidden_batches.add(i)
+        for ordinal, packet in packets.items():
+            r = pairs[ordinal][2]
+            messages[r] = {'role': 'tool', 'tool_call_id': messages[r]['tool_call_id'], 'content': json.dumps(packet, ensure_ascii=False)}
+        previous = None
+        remove = []
+        for index, message in enumerate(messages):
+            if message.get('role') == 'assistant':
+                previous = index
+            elif tool_image(message) and previous in hidden_batches:
+                remove.append(index)
+        for index in reversed(remove):
+            del messages[index]
+
+# Source: history
+"""Canonical branch facts; model-specific projections never mutate the source."""
+from copy import deepcopy
+from dataclasses import dataclass
+import json
+
+def fingerprint(call):
+    function = call.get('function') or {}
+    arguments = function.get('arguments', '{}')
+    try:
+        arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(arguments, dict):
+        return None
+    return (call.get('id'), function.get('name'), json.dumps(arguments, sort_keys=True, ensure_ascii=False))
+
+def audit_fingerprint(record):
+    return fingerprint({'id': record.get('id'), 'function': {'name': record.get('name'), 'arguments': record.get('arguments')}})
+
+def handoff_evidence(call, result):
+    marker = object_value(result.get('content'))
+    arguments = object_value((call.get('function') or {}).get('arguments'))
+    if (call.get('function') or {}).get('name') == 'lite_delegate' and marker.get('__lite_delegate__') == 'v2' and isinstance(marker.get('agent_id'), str) and marker['agent_id'] and isinstance(marker.get('request_id'), str) and marker['request_id'] and isinstance(marker.get('nonce'), str) and marker['nonce'] and (arguments.get('agent_id') == marker['agent_id']):
+        return marker
+    return None
+
+@dataclass(frozen=True)
+class Exchange:
+    turn: int
+    batch: int
+    call_index: int
+    result_index: int
+    executor: dict
+    generation: int | None
+
+def analyze(messages, *, current_boundary=None, audit=()):
+    """IDs are scoped by request and assistant batch, never matched globally.
+
+    Fresh provenance comes from observed provider calls. Past handoff results
+    retain Router generation evidence; destination ownership does not depend on
+    today's registry or Tool names. Incomplete/conflicting evidence stays unknown.
+    """
+    turns, turn = ([], -1)
+    for i, message in enumerate(messages):
+        if message.get('role') == 'user' and (i == current_boundary or not tool_image(message)):
+            turn += 1
+        turns.append(turn)
+    pairs = completed_pairs(messages)
+    by_turn = {}
+    for pair in pairs:
+        by_turn.setdefault(turns[pair[0]], []).append(pair)
+    exchanges = []
+    for turn, group in by_turn.items():
+        evidence = []
+        for i, n, r in group:
+            marker = handoff_evidence(messages[i]['tool_calls'][n], messages[r])
+            if marker:
+                evidence.append((r, marker))
+        marker = evidence[0][1] if len(evidence) == 1 else None
+        transition = evidence[0][0] if marker else None
+        paired = {(i, n) for i, n, _ in group}
+        ambiguous_handoff = any((turns[i] == turn and (i, n) not in paired and (call.get('function', {}).get('name') == 'lite_delegate') for i, message in enumerate(messages) for n, call in enumerate(message.get('tool_calls') or []))) or len(evidence) > 1
+        records = list(marker.get('router_calls') or []) if marker else []
+        if current_boundary is not None and any((i > current_boundary for i, _, _ in group)):
+            records += list(audit)
+        for i, n, r in group:
+            call = messages[i]['tool_calls'][n]
+            key = fingerprint(call)
+            matching = [record for record in records if isinstance(record, dict) and key is not None and (audit_fingerprint(record) == key)]
+            unique = {json.dumps(record, sort_keys=True): record for record in matching}
+            owner, generation = ({'kind': 'unknown'}, None)
+            if len(unique) == 1:
+                record = next(iter(unique.values()))
+                owner, generation = (deepcopy(record.get('executor') or owner), record.get('generation'))
+            elif not matching and marker and (not ambiguous_handoff):
+                owner = {'kind': 'router'} if r <= transition else {'kind': 'agent', 'agent_id': marker['agent_id']}
+            exchanges.append(Exchange(turn, i, n, r, owner, generation))
+    return sorted(exchanges, key=lambda exchange: exchange.result_index)
+
+def refresh_source(state, incoming):
+    """Merge only this request's native continuation into its original prefix."""
+    current = last_user(incoming)
+    original = state['original_source'][state['user_boundary']] if state['user_boundary'] >= 0 else None
+    if original and tool_image(original):
+        matching = [i for i, message in enumerate(incoming) if message.get('role') == 'user' and message.get('content') == original.get('content')]
+        if matching:
+            current = matching[-1]
+    if current < 0:
+        raise ValueError('Native continuation has no current user message')
+    state['source'] = deepcopy(state['original_source'][:state['user_boundary']]) + deepcopy(incoming[current:])
+
+def exchange_name(messages, exchange):
+    return messages[exchange.batch]['tool_calls'][exchange.call_index].get('function', {}).get('name', '')
+
+def skill_is_current(messages, exchange, skill_ids):
+    call = messages[exchange.batch]['tool_calls'][exchange.call_index]
+    return object_value(call.get('function', {}).get('arguments')).get('id') in skill_ids
+
+def reconstruct(messages, selected, *, images=False, positions=None):
+    calls = {(e.batch, e.call_index) for e in selected}
+    results = {e.result_index for e in selected}
+    output = []
+    for i, message in enumerate(messages):
+        role = message.get('role')
+        if role == 'system' or (role == 'tool' and i not in results):
+            continue
+        if tool_image(message):
+            if images is True or (images and i in images):
+                output.append(deepcopy(message))
+            continue
+        if role == 'assistant':
+            original_calls = message.get('tool_calls') or []
+            kept = [deepcopy(call) for n, call in enumerate(original_calls) if (i, n) in calls]
+            content = deepcopy(message.get('content') or '')
+            if not kept and (not content):
+                continue
+            clean = {'role': 'assistant', 'content': content}
+            if kept:
+                clean['tool_calls'] = kept
+                if len(kept) == len(original_calls):
+                    for key in ('reasoning_content', 'thinking', 'reasoning_details', 'reasoning_items'):
+                        if key in message:
+                            clean[key] = deepcopy(message[key])
+            output.append(clean)
+        elif role in {'user', 'tool'}:
+            if positions is not None:
+                positions[i] = len(output)
+            output.append(deepcopy(message))
+    return output
+
+def router_projection(state, tool_names, skill_ids, *, window=None):
+    messages = state['source']
+    boundary = state.get('user_boundary', last_user(messages))
+    exchanges = analyze(messages, current_boundary=boundary, audit=state.get('audit', []))
+    exchanges.sort(key=lambda e: (e.batch, e.call_index))
+    selected, overrides, packets = ([], {}, {})
+    handoffs = historical_handoffs(messages, exchanges, boundary)
+    by_turn = {e.turn: (e, marker) for e, marker in handoffs}
+    for exchange, marker in handoffs:
+        packets[exchange.result_index] = {'agent_id': marker['agent_id'], 'status': (state.get('historical_handoff_statuses') or {}).get(context_handoff_key(marker), 'unknown'), 'tool_results': []}
+    nested_origins = {e.result_index: [] for e, _ in handoffs}
+    native_seen = set()
+    for exchange in exchanges:
+        name = exchange_name(messages, exchange)
+        record = native_record(state, messages[exchange.batch]['tool_calls'][exchange.call_index], messages[exchange.result_index])
+        if record:
+            if record['key'] not in native_seen and record['key'] in state.get('native_context_allowed', {}):
+                selected.append(exchange)
+            native_seen.add(record['key'])
+            continue
+        call = messages[exchange.batch]['tool_calls'][exchange.call_index]
+        content = messages[exchange.result_index].get('content')
+        destination = by_turn.get(exchange.turn)
+        belongs = destination is not None and exchange.executor == {'kind': 'agent', 'agent_id': destination[1]['agent_id']}
+        if name in READERS:
+            if exchange.batch > boundary and exchange.executor.get('kind') == 'router' and (name in tool_names) and skill_is_current(messages, exchange, skill_ids):
+                selected.append(exchange)
+                continue
+            fact = {'tool': name, 'skill_id': object_value(call.get('function', {}).get('arguments')).get('id'), 'status': result_status(content)}
+            if belongs:
+                packets[destination[0].result_index].setdefault('skill_reads', []).append(fact)
+                continue
+            overrides[exchange.result_index] = fact
+        elif belongs:
+            packet_index = destination[0].result_index
+            packets[packet_index]['tool_results'].append({'tool': name, 'arguments': object_value(call.get('function', {}).get('arguments')), 'status': result_status(content), 'result': deepcopy(content)})
+            nested_origins[packet_index].append((exchange.batch, exchange.call_index))
+            continue
+        selected.append(exchange)
+    positions = {}
+    output = reconstruct(messages, selected, images=True, positions=positions)
+    for source_index, value in {**overrides, **packets}.items():
+        original = output[positions[source_index]]
+        output[positions[source_index]] = {'role': 'tool', 'tool_call_id': original['tool_call_id'], 'content': json.dumps(value, ensure_ascii=False)}
+    output = project_native_results(output, state)
+    if window is not None:
+        window.capture(output, ordinary_origins(state, selected, positions), {positions[i]: origins for i, origins in nested_origins.items()})
+    return output
+
+def context_handoff_key(marker):
+    """Request provenance, not a call ID which may repeat in another turn."""
+    return (marker['request_id'], marker['nonce'], marker['agent_id'])
+
+def historical_handoffs(messages, exchanges, boundary):
+    candidates = {}
+    for exchange in exchanges:
+        if exchange.batch >= boundary:
+            continue
+        marker = handoff_evidence(messages[exchange.batch]['tool_calls'][exchange.call_index], messages[exchange.result_index])
+        if marker:
+            candidates.setdefault(exchange.turn, []).append((exchange, marker))
+    return [group[0] for group in candidates.values() if len(group) == 1 and group[0][0].executor == {'kind': 'router'}]
+
+def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
+    messages = state['source']
+    boundary = state.get('user_boundary', last_user(messages))
+    exchanges = analyze(messages, current_boundary=boundary, audit=state.get('audit', []))
+    selected = [e for e in exchanges if e.executor == {'kind': 'agent', 'agent_id': agent_id} and exchange_name(messages, e) in tool_names and (exchange_name(messages, e) not in READERS or (e.batch > boundary and skill_is_current(messages, e, skill_ids)))]
+    selected = [e for e in selected if not native_record(state, messages[e.batch]['tool_calls'][e.call_index], messages[e.result_index])]
+    native_seen = set()
+    for exchange in exchanges:
+        record = native_record(state, messages[exchange.batch]['tool_calls'][exchange.call_index], messages[exchange.result_index])
+        if record:
+            if record['key'] not in native_seen and record['key'] in state.get('native_context_allowed', {}):
+                selected.append(exchange)
+            native_seen.add(record['key'])
+    selected_results = {e.result_index for e in selected}
+    image_indices = set()
+    for index, message in enumerate(messages):
+        if not tool_image(message):
+            continue
+        previous = next((i for i in range(index - 1, -1, -1) if messages[i].get('role') == 'assistant'), -1)
+        group = [e for e in exchanges if e.batch == previous and e.result_index < index]
+        if any((e.result_index in selected_results for e in group)) and all((e.result_index in selected_results or exchange_name(messages, e) in READERS | {'lite_delegate'} for e in group)):
+            image_indices.add(index)
+    positions = {}
+    output = project_native_results(reconstruct(messages, selected, images=image_indices, positions=positions), state)
+    if window is not None:
+        window.capture(output, ordinary_origins(state, selected, positions))
+    return output
+
+def ordinary_origins(state, selected, positions):
+    messages = state['source']
+    return {positions[e.result_index]: (e.batch, e.call_index) for e in selected if exchange_name(messages, e) not in READERS | {'lite_delegate'} and (not native_record(state, messages[e.batch]['tool_calls'][e.call_index], messages[e.result_index]))}
+
 # Source: owui_adapter
 """All imports of Open WebUI internal APIs live behind this boundary."""
 import asyncio
@@ -676,7 +1097,46 @@ def register_model_tool(registry, name, tool, namespace):
         alias = bounded_tool_name(name)
     registry[alias] = {**tool, 'spec': {**deepcopy(tool['spec']), 'name': alias}}
 
+def saved_handoff_statuses(branch, convert):
+    statuses = {}
+    for message in branch:
+        if message.get('role') != 'assistant' or not isinstance(message.get('output'), list):
+            continue
+        converted = convert(deepcopy(message['output']), raw=True)
+        markers = [handoff_evidence(converted[i]['tool_calls'][n], converted[r]) for i, n, r in completed_pairs(converted)]
+        markers = [marker for marker in markers if marker]
+        if len(markers) != 1:
+            continue
+        status = message.get('status')
+        if status not in ('failed', 'cancelled', 'timed_out'):
+            failed = any((item.get('type') == 'message' and item.get('status') in ('failed', 'rejected') for item in message['output'] if isinstance(item, dict)))
+            pending = any((item.get('status') in ('pending', 'in_progress', 'incomplete', 'requires_action') for item in message['output'] if isinstance(item, dict)))
+            status = 'failed' if message.get('error') or failed else 'completed' if message.get('done') is True and (not pending) else 'unknown'
+        key = context_handoff_key(markers[0])
+        statuses[key] = status if key not in statuses or statuses[key] == status else 'unknown'
+    return statuses
+
 class OWUIAdapter:
+
+    async def historical_handoff_statuses(self, request, metadata, state, user):
+        """Read terminal evidence from this saved branch, never from client metadata."""
+        if not state.get('chat_id') or user.id != state.get('user_id'):
+            return {}
+        from open_webui.models.chats import Chats
+        from open_webui.utils.misc import get_message_list, convert_output_to_messages
+        try:
+            chat = await Chats.get_accessible_chat_by_id(state['chat_id'], user)
+            if chat is None:
+                return {}
+            messages = await Chats.get_messages_map_by_chat_id(chat.id)
+            current = state.get('message_id')
+            if current not in (messages or {}):
+                current = metadata.get('user_message_id')
+            branch = get_message_list(messages or {}, current)
+            return saved_handoff_statuses(branch, convert_output_to_messages)
+        except Exception as error:
+            logging.getLogger(__name__).warning('Historical terminal evidence unavailable (%s)', type(error).__name__)
+            return {}
 
     async def native_memory_allowed(self, metadata, model, user):
         from open_webui.models.config import Config
@@ -1238,7 +1698,7 @@ async def prepare_worker(adapter, request, body, metadata, user):
     body['messages'] = deepcopy(entry['input'])
     body['files'] = deepcopy(entry['files'])
     metadata['files'] = deepcopy(entry['files'])
-    state = begin(request, body, metadata, user.id, {entry['agent_id']: entry['registry_entry']}, [], [], [], max_parallel_tasks=0)
+    state = begin(request, body, metadata, user.id, {entry['agent_id']: entry['registry_entry']}, [], [], [], max_parallel_tasks=0, context_policy=entry.get('context_policy'))
     state.update(worker=True, active_agent=entry['agent_id'], phase='agent')
     if await finish_cleanup(entry['bound'](entry)):
         raise asyncio.CancelledError
@@ -1338,7 +1798,7 @@ def worker_runtime(adapter, request, user, metadata, state, events):
 
     async def one(index, assignment):
         ticket = uuid4().hex
-        entry = {**deepcopy(assignment), 'task_id': uuid4().hex, 'index': index, 'user_id': user.id, 'parent_chat_id': state['chat_id'], 'parent_message_id': state['message_id'], 'router_id': state['router_id'], 'registry_entry': deepcopy(state['registry'][assignment['agent_id']]), 'bound': bound}
+        entry = {**deepcopy(assignment), 'task_id': uuid4().hex, 'index': index, 'user_id': user.id, 'parent_chat_id': state['chat_id'], 'parent_message_id': state['message_id'], 'router_id': state['router_id'], 'registry_entry': deepcopy(state['registry'][assignment['agent_id']]), 'bound': bound, 'context_policy': deepcopy(state.get('context_policy', {}))}
         entry['native_task'] = '[Задание ' + entry['task_id'] + '] ' + entry['task']
         entry['input'] = [{'role': 'user', 'content': entry['native_task']}]
         entries.append(entry)
@@ -1509,12 +1969,12 @@ async def downstream_data(adapter, user, metadata, state):
 
 # Source: entrypoints.router_preparation
 """Mandatory request preparation for the public Router Workspace Model."""
-from pydantic import BaseModel, Field
+from pydantic import Field
 AGENTS: dict[str, str] = {}
 
 class Filter:
 
-    class Valves(BaseModel):
+    class Valves(ContextPolicy):
         priority: int = 0
         base_tool_ids: list[str] = Field(default_factory=list)
         base_skill_ids: list[str] = Field(default_factory=list)
@@ -1533,5 +1993,5 @@ class Filter:
         if await prepare_worker(adapter, __request__, body, metadata, user):
             return body
         registry, diagnostics = await discover(adapter, __request__, user, AGENTS, body['model'])
-        begin(__request__, body, metadata, user.id, registry, diagnostics, ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids), max_parallel_tasks=self.valves.max_parallel_tasks, parallel_timeout_seconds=self.valves.parallel_timeout_seconds)
+        begin(__request__, body, metadata, user.id, registry, diagnostics, ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids), max_parallel_tasks=self.valves.max_parallel_tasks, parallel_timeout_seconds=self.valves.parallel_timeout_seconds, context_policy=self.valves.snapshot())
         return body
