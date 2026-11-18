@@ -66,6 +66,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
     async def profile_lookup(self, query: str, __user__: dict, __messages__: list, __metadata__: dict) -> str:
         assert "INLET_A" in str(__messages__)
         assert "ROUTER_PROMPT" not in str(__messages__)
+        assert sum(message["role"] == "system" for message in __messages__) == 1
         __metadata__["files"].append({{"id": "tool-file-update"}})
         return {PNG!r}
     async def profile_finish(self, __user__: dict, __messages__: list, __files__: list) -> str:
@@ -188,12 +189,17 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p["seed"] for p in seen], [123, 123, 321, 321, 321])
         for payload in seen[2:]:
             self.assertNotIn("ROUTING_PROSE", str(payload["messages"]))
-            systems = "\n".join(str(m.get("content")) for m in payload["messages"] if m.get("role") == "system")
-            self.assertEqual(systems.count("AGENT_PROMPT"), 1)
-            self.assertNotIn("ROUTER_PROMPT", systems)
-            self.assertNotIn("Router already manages the group", systems)
-            self.assertIn("Native User", systems)
-            self.assertIn("T42", systems)
+            systems = [m["content"] for m in payload["messages"] if m["role"] == "system"]
+            self.assertEqual(len(systems), 1)
+            system = systems[0]
+            self.assertTrue(system.startswith("The current server-provided list_available_skills"))
+            self.assertEqual(system.count(pipe_source.AGENT_HISTORY_PROMPT), 1)
+            self.assertEqual(system.count("AGENT_PROMPT"), 1)
+            self.assertTrue(system.endswith("\n\nINLET_A"))
+            self.assertNotIn("ROUTER_PROMPT", system)
+            self.assertNotIn("Router already manages the group", system)
+            self.assertIn("Native User", system)
+            self.assertIn("T42", system)
             self.assertNotIn("router_only", payload)
             self.assertTrue(payload["agent_only"])
         self.assertIn("AGENT_PROMPT_UPDATED", str(seen[-1]["messages"]))
@@ -202,6 +208,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("TOOL_RESULT_42:" + user.id, str(seen[-1]["messages"]))
         for payload in seen[:2]:
             self.assertEqual(sum(m["role"] == "system" for m in payload["messages"]), 1)
+            self.assertNotIn(pipe_source.AGENT_HISTORY_PROMPT, payload["messages"][0]["content"])
             self.assertNotIn("<routing_skills", payload["messages"][0]["content"])
             catalog = catalog_result(payload["messages"])
             self.assertIn("<routing_skills>", catalog)

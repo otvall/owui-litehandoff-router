@@ -305,9 +305,10 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
         for _ in range(2):
             draft, tools = await prepare_model(adapter, request, body, user, metadata, state, "llm", {}, target="a")
             systems = [m["content"] for m in draft["messages"] if m["role"] == "system"]
-            self.assertEqual(systems.count(WORKER_PROMPT), 1)
-            self.assertIn("Router", systems)  # The fixture's own model system prompt.
-            self.assertNotIn("ASSIGNED_ONLY", str(systems))
+            self.assertEqual(len(systems), 1)
+            self.assertEqual(systems[0].count(WORKER_PROMPT), 1)
+            self.assertTrue(systems[0].endswith(WORKER_PROMPT + "\n\nRouter"))
+            self.assertNotIn("ASSIGNED_ONLY", systems[0])
             self.assertEqual([m["content"] for m in draft["messages"] if m["role"] == "user"],
                              ["ASSIGNED_ONLY: forecast"])
             self.assertFalse({"lite_delegate", "lite_parallel", "delegate_task"} & set(tools))

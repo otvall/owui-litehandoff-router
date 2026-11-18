@@ -6,7 +6,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from lite_handoff_router.history import context_handoff_key, router_projection
-from lite_handoff_router.model_execution import compose_router_system, prepare_model
+from lite_handoff_router.model_execution import compose_system, prepare_model
 from lite_handoff_router.owui_adapter import saved_handoff_statuses
 from lite_handoff_router.skills import manifest
 from lite_handoff_router.tool_history import ToolResultWindow
@@ -152,5 +152,17 @@ class RoutingCatalogTest(unittest.IsolatedAsyncioTestCase):
         user = {"role": "user", "content": "USER_DATA"}
         messages = [{"role": "system", "content": "TERMINAL"}, catalog, rules, core, user,
                     {"role": "system", "content": "INLET"}]
-        compose_router_system(messages, [core, rules, catalog])
+        compose_system(messages, [core, rules, catalog])
         self.assertEqual(messages, [{"role": "system", "content": "CORE\n\nRULES\n\nCATALOG\n\nTERMINAL\n\nINLET"}, user])
+
+    def test_system_composition_preserves_text_parts_and_their_metadata(self):
+        part = {"type": "text", "text": "INLET", "cache_control": {"type": "ephemeral"}}
+        user = {"role": "user", "content": "Question"}
+        messages = [{"role": "system", "content": "MODEL"}, user, {"role": "system", "content": [part]}]
+        compose_system(messages)
+        self.assertEqual(messages, [
+            {"role": "system", "content": [
+                {"type": "text", "text": "MODEL"}, {"type": "text", "text": "\n\n"}, part,
+            ]},
+            user,
+        ])

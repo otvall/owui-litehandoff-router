@@ -151,9 +151,9 @@ Router SHALL получать историю завершённой работы
 - **THEN** допустимые реальные пары сохраняются на своих местах без выдуманного `lite_delegate`
 - **AND** неизвестные exchanges не присваиваются одному из агентов по догадке
 
-### Requirement: Router emits one composed system message
+### Requirement: Model requests emit one composed system message
 
-Исходящий API-массив `messages` Router SHALL содержать одно `system`-сообщение, объединяющее собственный промпт, служебные правила и допустимые системные добавления. XML-каталоги Skills SHALL передаваться отдельным служебным Tool result, без копии в system. Исторические Tool results SHALL NOT переноситься в него. Отдельное API-поле `tools` SHALL сохраняться; модельный chat template вправе добавлять свои внутренние секции при сериализации.
+Исходящий API-массив `messages` Router, агента или параллельного работника SHALL начинаться с одного `system`-сообщения, объединяющего собственный промпт, служебные правила и допустимые системные добавления. XML-каталоги Skills SHALL передаваться отдельным служебным Tool result. Исторические Tool results SHALL NOT переноситься в system. Chat template SHALL получать схемы через отдельное API-поле `tools`.
 
 #### Scenario: Prompt and skill catalog were assembled separately
 
@@ -164,8 +164,16 @@ Router SHALL получать историю завершённой работы
 #### Scenario: Agent is selected after Router
 
 - **WHEN** Router передал запрос A
-- **THEN** A сохраняет собственный системный контекст и scoped-каталог без каталога маршрутизации Router
+- **THEN** A получает собственный промпт, guidance Skills и разрешённые системные добавления в одном `system` в исходном порядке секций агента
+- **AND** этот `system` объясняет, что история может содержать ответы других агентов и подпись автора указывает, кому принадлежат действия и артефакты
+- **AND** A получает отдельный scoped-каталог без каталога маршрутизации Router
 - **AND** эта норма не требует выдачи `lite_delegate` агенту или изменения его модели
+
+#### Scenario: Parallel worker continues after a Tool
+
+- **WHEN** параллельный работник получает первый запрос или продолжение после Tool
+- **THEN** он получает один `system` со своим промптом, guidance Skills и одной копией `WORKER_PROMPT`
+- **AND** поручение остаётся `user`-сообщением, а инструменты видят тот же итоговый массив `messages`
 
 ### Requirement: Routing skill catalog uses XML without changing scope
 
