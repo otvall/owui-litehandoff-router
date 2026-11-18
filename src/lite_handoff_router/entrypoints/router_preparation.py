@@ -14,7 +14,7 @@ AGENTS: dict[str, str] = {}
 class Filter:
     class Valves(ContextPolicy):
         # OWUI posts text inputs; use Pydantic's standard numeric conversion
-        # here, then snapshot() revalidates the typed runtime policy strictly.
+        # here. The runtime policy validates the converted value strictly.
         model_config = ConfigDict(strict=False)
 
         priority: int = 0
@@ -26,23 +26,12 @@ class Filter:
 
         @field_validator(
             "priority", "max_parallel_tasks", "parallel_timeout_seconds",
-            "tool_result_history_limit", "context_input_budget_tokens", "context_safety_margin_tokens",
-            "context_summary_trigger_ratio", "context_summary_target_ratio",
-            "context_summary_input_budget_tokens", "context_summary_max_tokens",
-            "context_summary_timeout_seconds", "context_summary_max_chunks", mode="before")
+            "tool_result_history_limit", mode="before")
         @classmethod
         def reject_boolean_number(cls, value):
             if isinstance(value, bool):
                 raise ValueError("Boolean is not a numeric setting")
             return value
-
-        @field_validator("context_model_input_budgets", mode="before")
-        @classmethod
-        def reject_boolean_budgets(cls, value):
-            if isinstance(value, dict) and any(isinstance(budget, bool) for budget in value.values()):
-                raise ValueError("Boolean is not a model input budget")
-            return value
-
 
     def __init__(self):
         self.valves = self.Valves()
@@ -61,5 +50,6 @@ class Filter:
               ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids),
               max_parallel_tasks=self.valves.max_parallel_tasks,
               parallel_timeout_seconds=self.valves.parallel_timeout_seconds,
-              context_policy=self.valves.snapshot(), chat_skill_ids=chat_skill_ids)
+              context_policy={"tool_result_history_limit": self.valves.tool_result_history_limit},
+              chat_skill_ids=chat_skill_ids)
         return body

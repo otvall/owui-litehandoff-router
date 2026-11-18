@@ -284,51 +284,11 @@ def group_calls(state):
 
 # Source: context_policy
 """Administrative context policy; no client metadata participates in resolution."""
-from typing import Annotated
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-PositiveTokens = Annotated[int, Field(gt=0)]
+from pydantic import BaseModel, ConfigDict, Field
 
 class ContextPolicy(BaseModel):
     model_config = ConfigDict(validate_assignment=True, strict=True)
     tool_result_history_limit: int | None = Field(default=None, ge=0)
-    context_input_budget_tokens: PositiveTokens | None = None
-    context_model_input_budgets: dict[str, PositiveTokens] = Field(default_factory=dict)
-    context_safety_margin_tokens: int = Field(default=1024, ge=0)
-    context_summary_enabled: bool = Field(default=False, strict=True)
-    context_summary_model_id: str = ''
-    context_summary_trigger_ratio: float = Field(default=0.9, gt=0, lt=1)
-    context_summary_target_ratio: float = Field(default=0.7, gt=0, lt=1)
-    context_summary_input_budget_tokens: PositiveTokens = 8192
-    context_summary_max_tokens: PositiveTokens = 1024
-    context_summary_timeout_seconds: PositiveTokens = 60
-    context_summary_max_chunks: PositiveTokens = 8
-
-    @model_validator(mode='after')
-    def validate_policy(self):
-        if self.context_summary_target_ratio >= self.context_summary_trigger_ratio:
-            raise ValueError('Summary target must be below trigger')
-        budgets = list(self.context_model_input_budgets.values())
-        if self.context_input_budget_tokens is not None:
-            budgets.append(self.context_input_budget_tokens)
-        if any((budget <= self.context_safety_margin_tokens for budget in budgets)):
-            raise ValueError('Input budget must exceed context safety margin')
-        if self.context_summary_input_budget_tokens <= self.context_safety_margin_tokens:
-            raise ValueError('Summary input budget must exceed context safety margin')
-        if self.context_summary_enabled and (not self.context_summary_model_id.strip() or not budgets):
-            raise ValueError('Summary requires an explicit model and input budgets')
-        return self
-
-    def usable_budget(self, model_id):
-        budget = self.context_model_input_budgets.get(model_id, self.context_input_budget_tokens)
-        if budget is None:
-            if self.context_summary_enabled:
-                raise ValueError('Missing context input budget for model: ' + model_id)
-            return None
-        return budget - self.context_safety_margin_tokens
-
-    def snapshot(self):
-        """Revalidate mutable dictionaries and return policy fields only."""
-        return ContextPolicy.model_validate({name: getattr(self, name) for name in ContextPolicy.model_fields}).model_dump()
 
 # Source: runtime
 """Trusted lifecycle state shared by independent uploads through the ASGI scope.
@@ -342,7 +302,7 @@ SCOPE_KEY = 'lite_handoff_router'
 RECEIPT = 'lite_router'
 
 def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids, *, max_parallel_tasks=4, parallel_timeout_seconds=300, context_policy=None, chat_skill_ids=()):
-    state = {'request_id': uuid4().hex, 'user_id': user_id, 'chat_id': metadata.get('chat_id'), 'message_id': metadata.get('message_id'), 'router_id': body['model'], 'registry': deepcopy(registry), 'chat_terminal_id': body.get('terminal_id') if isinstance(body.get('terminal_id'), str) else None, 'diagnostics': diagnostics, 'base_tool_ids': list(tool_ids), 'base_skill_ids': list(skill_ids), 'source': deepcopy(body.get('messages', [])), 'chat_skill_ids': list(chat_skill_ids), 'phase': 'router', 'pending': [], 'active_agent': None, 'skill_scope': None, 'original_source': deepcopy(body.get('messages', [])), 'user_boundary': next((i for i in range(len(body.get('messages', [])) - 1, -1, -1) if body['messages'][i].get('role') == 'user'), -1), 'generation': 0, 'audit': [], 'native_context': None, 'context_policy': ContextPolicy.model_validate(context_policy or {}).snapshot(), 'parallel': group_state(max_parallel_tasks, parallel_timeout_seconds)}
+    state = {'request_id': uuid4().hex, 'user_id': user_id, 'chat_id': metadata.get('chat_id'), 'message_id': metadata.get('message_id'), 'router_id': body['model'], 'registry': deepcopy(registry), 'chat_terminal_id': body.get('terminal_id') if isinstance(body.get('terminal_id'), str) else None, 'diagnostics': diagnostics, 'base_tool_ids': list(tool_ids), 'base_skill_ids': list(skill_ids), 'source': deepcopy(body.get('messages', [])), 'chat_skill_ids': list(chat_skill_ids), 'phase': 'router', 'pending': [], 'active_agent': None, 'skill_scope': None, 'original_source': deepcopy(body.get('messages', [])), 'user_boundary': next((i for i in range(len(body.get('messages', [])) - 1, -1, -1) if body['messages'][i].get('role') == 'user'), -1), 'generation': 0, 'audit': [], 'native_context': None, 'context_policy': ContextPolicy.model_validate(context_policy or {}).model_dump(), 'parallel': group_state(max_parallel_tasks, parallel_timeout_seconds)}
     request.scope[SCOPE_KEY] = state
     request.scope['lite_handoff_metadata'] = metadata
     metadata['tools'] = {}
@@ -884,6 +844,7 @@ class ToolResultWindow:
 from copy import deepcopy
 from dataclasses import dataclass
 import json
+import re
 
 def fingerprint(call):
     function = call.get('function') or {}
@@ -978,7 +939,7 @@ def skill_is_current(messages, exchange, skill_ids):
     call = messages[exchange.batch]['tool_calls'][exchange.call_index]
     return object_value(call.get('function', {}).get('arguments')).get('id') in skill_ids
 
-def reconstruct(messages, selected, *, images=False, positions=None):
+def reconstruct(messages, selected, *, images=False, positions=None, assistant_content=None):
     calls = {(e.batch, e.call_index) for e in selected}
     results = {e.result_index for e in selected}
     output = []
@@ -993,7 +954,7 @@ def reconstruct(messages, selected, *, images=False, positions=None):
         if role == 'assistant':
             original_calls = message.get('tool_calls') or []
             kept = [deepcopy(call) for n, call in enumerate(original_calls) if (i, n) in calls]
-            content = deepcopy(message.get('content') or '')
+            content = deepcopy((assistant_content or {}).get(i, message.get('content')) or '')
             if not kept and (not content):
                 continue
             clean = {'role': 'assistant', 'content': content}
@@ -1074,6 +1035,120 @@ def historical_handoffs(messages, exchanges, boundary):
         if marker:
             candidates.setdefault(exchange.turn, []).append((exchange, marker))
     return [group[0] for group in candidates.values() if len(group) == 1 and group[0][0].executor == {'kind': 'router'}]
+VIZ_START = '@@@VIZ-START'
+VIZ_END = '@@@VIZ-END'
+CODE_FENCE = re.compile('^ {0,3}(`{3,}|~{3,})(.*)$')
+
+def visualizer_ranges(text):
+    """Find complete standalone blocks, preserving quoted and ambiguous markers."""
+    if VIZ_START not in text:
+        return ([], True)
+    blocks, fence, depth, start, offset = ([], '', 0, 0, 0)
+    unambiguous, nested = (True, False)
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip('\r\n')
+        if depth:
+            if line == VIZ_START:
+                depth += 1
+                nested = True
+                unambiguous = False
+            elif line == VIZ_END:
+                depth -= 1
+                if depth == 0 and (not nested):
+                    blocks.append((start, offset + len(line)))
+        else:
+            marker = CODE_FENCE.match(line)
+            if fence:
+                if marker and marker[1].startswith(fence) and (not marker[2].strip()):
+                    fence = ''
+            elif marker:
+                fence = marker[1]
+            elif line == VIZ_START:
+                start, depth, nested = (offset, 1, False)
+            elif line == VIZ_END:
+                unambiguous = False
+        offset += len(raw_line)
+    return (blocks, unambiguous and depth == 0)
+
+def describe_visualizations(content, titles):
+    if isinstance(content, str):
+        text_parts = [(None, content)]
+    elif isinstance(content, list):
+        text_parts = [(i, part['text']) for i, part in enumerate(content) if isinstance(part, dict) and part.get('type') in {'text', 'output_text'} and isinstance(part.get('text'), str)]
+    else:
+        return content
+    ranges = [(i, text, *visualizer_ranges(text)) for i, text in text_parts]
+    count = sum((len(blocks) for _, _, blocks, _ in ranges))
+    if not count:
+        return content
+    use_titles = len(titles) == count and None not in titles and all((valid for _, _, _, valid in ranges))
+    labels = iter(titles if use_titles else [''] * count)
+    parts = deepcopy(content) if isinstance(content, list) else None
+    for index, text, blocks, _ in ranges:
+        chunks, start = ([], 0)
+        for left, right in blocks:
+            label = next(labels)
+            name = f' «{label}»' if label else ''
+            chunks.extend((text[start:left], f'[Визуализация{name} доступна в исходном чате.]'))
+            start = right
+        replaced = ''.join(chunks) + text[start:]
+        if index is None:
+            return replaced
+        parts[index]['text'] = replaced
+    return parts
+
+def visualizer_title(call, exchange, messages, owner):
+    if exchange is None or exchange.executor != owner:
+        return None
+    if result_status(messages[exchange.result_index].get('content')) != 'completed':
+        return None
+    title = object_value(call['function'].get('arguments')).get('title')
+    return ' '.join(title.split())[:160] if isinstance(title, str) else ''
+
+def agent_dialogue_overrides(state, agent_id, exchanges, boundary):
+    """Derive text ownership from the same turn and handoff evidence as Tool history."""
+    messages = state['source']
+    batches = {}
+    for exchange in exchanges:
+        batches.setdefault(exchange.batch, []).append(exchange)
+    overrides = {}
+    starts = [i for i, m in enumerate(messages) if m.get('role') == 'user' and (i == boundary or not tool_image(m))]
+    for start, end in zip(starts, starts[1:] + [len(messages)]):
+        calls = [(i, n) for i in range(start + 1, end) for n, call in enumerate(messages[i].get('tool_calls') or []) if call.get('function', {}).get('name') == 'lite_delegate']
+        if len(calls) != 1:
+            continue
+        batch, ordinal = calls[0]
+        handoff = next((e for e in batches.get(batch, ()) if e.call_index == ordinal and e.executor == {'kind': 'router'}), None)
+        if handoff is None:
+            continue
+        marker = handoff_evidence(messages[batch]['tool_calls'][ordinal], messages[handoff.result_index])
+        if not marker or (start >= boundary and state.get('pending') != [marker]):
+            continue
+        author = marker['agent_id']
+        owner = {'kind': 'agent', 'agent_id': author}
+        terminal = messages[end - 1]
+        status = (state.get('historical_handoff_statuses') or {}).get(context_handoff_key(marker))
+        replace_viz = start < boundary and author != agent_id and (terminal.get('role') == 'assistant') and (not terminal.get('tool_calls')) and (status in (None, 'completed'))
+        titles = []
+        for i in range(start + 1, end):
+            message = messages[i]
+            if message.get('role') != 'assistant':
+                continue
+            exchanges_in_batch = batches.get(i, ())
+            if i <= batch:
+                if all((e.executor.get('kind') == 'router' for e in exchanges_in_batch)):
+                    overrides[i] = ''
+            elif replace_viz and i > handoff.result_index:
+                content = message.get('content')
+                if content:
+                    if all((e.executor == owner for e in exchanges_in_batch)):
+                        overrides[i] = describe_visualizations(content, titles)
+                    titles = []
+                by_index = {e.call_index: e for e in exchanges_in_batch}
+                for ordinal, call in enumerate(message.get('tool_calls') or []):
+                    if call.get('function', {}).get('name') == 'visualize':
+                        titles.append(visualizer_title(call, by_index.get(ordinal), messages, owner))
+    return overrides
 
 def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
     messages = state['source']
@@ -1100,7 +1175,8 @@ def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
         if any((e.result_index in selected_results for e in group)) and all((e.result_index in selected_results or exchange_name(messages, e) in READERS | {'lite_delegate'} for e in group)):
             image_indices.add(index)
     positions = {}
-    output = project_native_results(reconstruct(messages, selected, images=image_indices, positions=positions), state)
+    assistant_content = agent_dialogue_overrides(state, agent_id, exchanges, boundary)
+    output = project_native_results(reconstruct(messages, selected, images=image_indices, positions=positions, assistant_content=assistant_content), state)
     if window is not None:
         window.capture(output, ordinary_origins(state, selected, positions))
     return output
@@ -2019,18 +2095,11 @@ class Filter:
         max_parallel_tasks: int = Field(default=4, ge=0, description='Maximum parallel tasks; 0 disables delegate_task and keeps ordinary handoff.')
         parallel_timeout_seconds: int = Field(default=300, gt=0)
 
-        @field_validator('priority', 'max_parallel_tasks', 'parallel_timeout_seconds', 'tool_result_history_limit', 'context_input_budget_tokens', 'context_safety_margin_tokens', 'context_summary_trigger_ratio', 'context_summary_target_ratio', 'context_summary_input_budget_tokens', 'context_summary_max_tokens', 'context_summary_timeout_seconds', 'context_summary_max_chunks', mode='before')
+        @field_validator('priority', 'max_parallel_tasks', 'parallel_timeout_seconds', 'tool_result_history_limit', mode='before')
         @classmethod
         def reject_boolean_number(cls, value):
             if isinstance(value, bool):
                 raise ValueError('Boolean is not a numeric setting')
-            return value
-
-        @field_validator('context_model_input_budgets', mode='before')
-        @classmethod
-        def reject_boolean_budgets(cls, value):
-            if isinstance(value, dict) and any((isinstance(budget, bool) for budget in value.values())):
-                raise ValueError('Boolean is not a model input budget')
             return value
 
     def __init__(self):
@@ -2046,5 +2115,5 @@ class Filter:
             return body
         registry, diagnostics = await discover(adapter, __request__, user, AGENTS, body['model'])
         chat_skill_ids = await adapter.chat_skill_ids(body)
-        begin(__request__, body, metadata, user.id, registry, diagnostics, ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids), max_parallel_tasks=self.valves.max_parallel_tasks, parallel_timeout_seconds=self.valves.parallel_timeout_seconds, context_policy=self.valves.snapshot(), chat_skill_ids=chat_skill_ids)
+        begin(__request__, body, metadata, user.id, registry, diagnostics, ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids), max_parallel_tasks=self.valves.max_parallel_tasks, parallel_timeout_seconds=self.valves.parallel_timeout_seconds, context_policy={'tool_result_history_limit': self.valves.tool_result_history_limit}, chat_skill_ids=chat_skill_ids)
         return body

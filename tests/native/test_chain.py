@@ -6,6 +6,7 @@ Tool execution, callable-refresh or completion-loop helper is mocked.
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -149,7 +150,25 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
 
             async def json_body():
                 return payload
-            return await provider.completion(SimpleNamespace(json=json_body))
+            response = await provider.completion(SimpleNamespace(json=json_body))
+            if hasattr(response, "body_iterator"):
+                original_stream = response.body_iterator
+
+                async def with_routing_prose_and_html():
+                    async for chunk in original_stream:
+                        if not chunk.startswith("data: {"):
+                            yield chunk
+                            continue
+                        data = json.loads(chunk[6:])
+                        delta = data["choices"][0]["delta"]
+                        if any(call["function"]["name"] == "lite_delegate" for call in delta.get("tool_calls", [])):
+                            delta["content"] = "ROUTING_PROSE: passing this question to a specialist."
+                        if delta.get("content") == "specialist-a final: TOOL_RESULT_42":
+                            delta["content"] += "\n@@@VIZ-START\n<div>SLIDE_SOURCE_42</div>\n@@@VIZ-END\n\n~~~html\n<div>ORDINARY_HTML_42</div>\n~~~"
+                        yield "data: " + json.dumps(data) + "\n\n"
+
+                response.body_iterator = with_routing_prose_and_html()
+            return response
 
         async def emit(event):
             events.append(copy.deepcopy(event))
@@ -168,6 +187,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p["top_k"] for p in seen], [17, 17, 3, 3, 3])
         self.assertEqual([p["seed"] for p in seen], [123, 123, 321, 321, 321])
         for payload in seen[2:]:
+            self.assertNotIn("ROUTING_PROSE", str(payload["messages"]))
             systems = "\n".join(str(m.get("content")) for m in payload["messages"] if m.get("role") == "system")
             self.assertEqual(systems.count("AGENT_PROMPT"), 1)
             self.assertNotIn("ROUTER_PROMPT", systems)
@@ -197,7 +217,8 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([item for item in output if item.get("status") in {"failed", "incomplete", "rejected"}], output)
         self.assertTrue(any("TOOL_RESULT_42:" + user.id in str(item.get("output"))
                             for item in output if item.get("type") == "function_call_output"), output)
-        import json
+        self.assertIn("ROUTING_PROSE", str(output))
+        self.assertIn("SLIDE_SOURCE_42", str(output))
         delegate_call = next(item for item in output if item.get("type") == "function_call" and item["name"] == "lite_delegate")
         self.assertEqual(delegate_call["status"], "completed")
         delegate_result = next(item for item in output if item.get("type") == "function_call_output" and item.get("call_id") == delegate_call["call_id"])
@@ -284,6 +305,11 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p["model"] for p in b_seen], ["router-llm", "router-llm", b_id, b_id], b_events)
         self.assertEqual([p["temperature"] for p in b_seen], [0.8, 0.8, 0.4, 0.4])
         self.assertEqual(b_request.scope["lite_handoff_router"]["active_agent"], b_id)
+        for payload in b_seen[2:]:
+            self.assertNotIn("ROUTING_PROSE", str(payload["messages"]))
+            self.assertNotIn("SLIDE_SOURCE_42", str(payload["messages"]))
+            self.assertIn("[Визуализация доступна в исходном чате.]", str(payload["messages"]))
+            self.assertIn("ORDINARY_HTML_42", str(payload["messages"]))
         self.assertIn("B_PRIVATE_RESULT_42", str(b_ctx["assistant_message"]["output"]))
         self.assertIn("Specialist B", str(b_events))
         history += [{"role": "user", "content": "profile b question"}]

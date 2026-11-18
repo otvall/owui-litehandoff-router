@@ -40,6 +40,10 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state["max_tasks"], 0)
             spec = (await client.get(url + "/spec")).json()
             self.assertEqual(spec["properties"]["max_parallel_tasks"]["minimum"], 0)
+            self.assertEqual(set(spec["properties"]), {
+                "priority", "max_parallel_tasks", "parallel_timeout_seconds",
+                "base_tool_ids", "base_skill_ids", "tool_result_history_limit",
+            })
             for bad in (True, "0.5", -1):
                 result = await client.post(url + "/update", json={"max_parallel_tasks": bad})
                 self.assertEqual(result.status_code, 400, (bad, result.text))
@@ -47,33 +51,27 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
 
             text_values = {
                 "priority": "-2", "max_parallel_tasks": "0", "parallel_timeout_seconds": "300",
-                "tool_result_history_limit": "0", "context_input_budget_tokens": "12000",
-                "context_safety_margin_tokens": "0", "context_model_input_budgets": {"agent": "6000"},
-                "context_summary_trigger_ratio": "0.9", "context_summary_target_ratio": "0.7",
-                "context_summary_input_budget_tokens": "8192", "context_summary_max_tokens": "1024",
-                "context_summary_timeout_seconds": "60", "context_summary_max_chunks": "8",
+                "tool_result_history_limit": "0",
             }
+            previous_values = {
+                "tool_result_history_limit": 5, "max_parallel_tasks": 0,
+                "context_input_budget_tokens": 12000, "context_model_input_budgets": {"agent": 6000},
+                "context_summary_enabled": True, "context_summary_model_id": "summary",
+            }
+            await Functions.update_function_valves_by_id(identifier, previous_values)
+            previous = module.Valves(**(await client.get(url)).json())
+            self.assertEqual(previous.tool_result_history_limit, 5)
+            self.assertEqual(previous.max_parallel_tasks, 0)
+            self.assertNotIn("context_summary_enabled", previous.model_dump())
+
             result = await client.post(url + "/update", json=text_values)
             self.assertEqual(result.status_code, 200, result.text)
             saved = (await client.get(url)).json()
-            for name, value in text_values.items():
-                expected = ({"agent": 6000} if isinstance(value, dict) else
-                            float(value) if name.endswith("_ratio") else int(value))
-                self.assertEqual(saved[name], expected)
-                self.assertIs(type(saved[name]), type(expected))
-            policy = module.Valves(**saved).snapshot()
-            self.assertEqual(policy["tool_result_history_limit"], 0)
-            self.assertEqual(policy["context_safety_margin_tokens"], 0)
-            self.assertEqual(policy["context_model_input_budgets"], {"agent": 6000})
-            for invalid in ({"tool_result_history_limit": "1.5"}, {"context_summary_target_ratio": "nan"},
-                            {"context_safety_margin_tokens": True}, {"context_summary_timeout_seconds": "0"},
-                            {"context_safety_margin_tokens": 0, "context_model_input_budgets": {"a": True}}):
-                result = await client.post(url + "/update", json=invalid)
-                self.assertEqual(result.status_code, 400, (invalid, result.text))
+            self.assertEqual(saved, {name: int(value) for name, value in text_values.items()})
+            for bad in (True, "1.5", -1):
+                result = await client.post(url + "/update", json={"tool_result_history_limit": bad})
+                self.assertEqual(result.status_code, 400, (bad, result.text))
             self.assertEqual((await client.get(url)).json(), saved)
-            result = await client.post(url + "/update", json={
-                **text_values, "tool_result_history_limit": None, "context_input_budget_tokens": None})
+            result = await client.post(url + "/update", json={**text_values, "tool_result_history_limit": None})
             self.assertEqual(result.status_code, 200, result.text)
-            policy = module.Valves(**(await client.get(url)).json()).snapshot()
-            self.assertIsNone(policy["tool_result_history_limit"])
-            self.assertIsNone(policy["context_input_budget_tokens"])
+            self.assertIsNone(module.Valves(**(await client.get(url)).json()).tool_result_history_limit)

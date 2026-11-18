@@ -265,7 +265,7 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_same_agent_workers_receive_only_their_assignment_and_selected_files(self):
         request, metadata, state, user = self.setup_request()
-        state["context_policy"].update(tool_result_history_limit=2, context_model_input_budgets={"a": 6000})
+        state["context_policy"]["tool_result_history_limit"] = 2
         state["source"].insert(1, {"role": "assistant", "content": "PARENT_VISIBLE_ANSWER"})
         state["source"][2]["content"] = "PARENT_REQUEST: сделай 2 параллельных вызова в этот агент"
         state["user_boundary"] = 2
@@ -284,8 +284,6 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
             worker = scope["lite_handoff_router"]
             self.assertEqual(worker["context_policy"], state["context_policy"])
             self.assertIsNot(worker["context_policy"], state["context_policy"])
-            self.assertIsNot(worker["context_policy"]["context_model_input_budgets"],
-                             state["context_policy"]["context_model_input_budgets"])
             self.assertTrue(worker["worker"])
             self.assertEqual(worker["active_agent"], "a")
             self.assertEqual(worker["source"], worker["original_source"])

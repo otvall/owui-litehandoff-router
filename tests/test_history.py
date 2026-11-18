@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from tests.test_protocol import call
 
 FIXTURE = Path(__file__).parent / "fixtures/owui_0123_grouped.json"
+VIZ_BLOCK = "@@@VIZ-START\n<svg>FOREIGN_PRESENTATION_CODE</svg>\n@@@VIZ-END"
+VIZ_PLACEHOLDER = "[Визуализация доступна в исходном чате.]"
 
 
 def turn(agent, value):
@@ -25,6 +27,83 @@ def turn(agent, value):
 
 
 class HistoryTest(unittest.TestCase):
+    def test_handoff_filters_routing_prose_and_describes_foreign_visualizer_blocks(self):
+        history = turn("visualizer", "done")
+        history[1]["content"] = "Forwarding to the visualizer."
+        history.insert(1, {"role": "assistant", "content": "Router classification."})
+        history[-1:-1] = [
+            {"role": "assistant", "tool_calls": [call("visualize", "viz1", {"title": "Sales\n& costs"}),
+                                                 call("visualize", "viz2", {"title": "Volumes"})]},
+            {"role": "tool", "tool_call_id": "viz1", "content": "Wrapper mounted. Example:\n" + VIZ_BLOCK},
+            {"role": "tool", "tool_call_id": "viz2", "content": "Wrapper mounted."},
+        ]
+        plain_html = "~~~html\n<html><body>STANDALONE_HTML</body></html>\n~~~"
+        example = "~~~text\n@@@VIZ-START\nexample\n@@@VIZ-END\n~~~"
+        history[-1]["content"] = (
+            "Two alternatives are ready.\n" + VIZ_BLOCK + "\n[Open the slides](slides.html)\n"
+            + VIZ_BLOCK.replace("FOREIGN_PRESENTATION_CODE", "SECOND_PRESENTATION_CODE")
+            + "\n" + plain_html + "\n" + example)
+        history += [{"role": "user", "content": "What is the total?"},
+                    {"role": "assistant", "content": "The total is 42."}]
+        current = turn("analyst", "current")
+        current[1]["content"] = "Routing the follow-up to the analyst."
+        state = {"source": history + current, "user_boundary": len(history),
+                 "pending": [json.loads(current[2]["content"])]}
+        source = copy.deepcopy(state["source"])
+
+        view = agent_projection(state, "analyst", {"lookup"}, set())
+        for text in ("Router classification.", "Forwarding to the visualizer.",
+                     "Routing the follow-up", "FOREIGN_PRESENTATION_CODE", "SECOND_PRESENTATION_CODE"):
+            self.assertNotIn(text, str(view))
+        expected = ("Two alternatives are ready.\n[Визуализация «Sales & costs» доступна в исходном чате.]\n"
+                    "[Open the slides](slides.html)\n[Визуализация «Volumes» доступна в исходном чате.]\n"
+                    + plain_html + "\n" + example)
+        self.assertIn({"role": "assistant", "content": expected}, view)
+        for text in ("Two alternatives are ready.",
+                     "[Open the slides](slides.html)", "The total is 42.", "task analyst"):
+            self.assertIn(text, str(view))
+        own = agent_projection(state, "visualizer", {"lookup"}, set())
+        self.assertIn("FOREIGN_PRESENTATION_CODE", str(own))
+        self.assertIn("SECOND_PRESENTATION_CODE", str(own))
+        self.assertEqual(state["source"], source)
+
+    def test_ambiguous_handoff_keeps_dialogue_and_visualizer_source(self):
+        history = turn("visualizer", "done")
+        history[1]["content"] = "Text with uncertain attribution."
+        history[1]["tool_calls"].append(call("lite_delegate", "unpaired", {"agent_id": "other"}))
+        history[-1]["content"] = VIZ_BLOCK
+        history.append({"role": "user", "content": "Follow-up"})
+        view = agent_projection({"source": history}, "other", set(), set())
+        self.assertIn("Text with uncertain attribution.", str(view))
+        self.assertIn({"role": "assistant", "content": VIZ_BLOCK}, view)
+
+    def test_only_complete_visualizer_blocks_within_one_message_are_replaced(self):
+        malformed = ("@@@VIZ-START\nouter\n" + VIZ_BLOCK + "\n@@@VIZ-END\n"
+                     "@@@VIZ-START\nUnclosed")
+        attachment = {"type": "image_url", "image_url": {"url": "attachment"}}
+        parts = [
+            {"type": "text", "text": VIZ_BLOCK.replace("\n", "\r\n") + "\r\nFollow-up"},
+            attachment,
+            {"type": "text", "text": malformed},
+        ]
+        history = turn("visualizer", "done")
+        history[-1]["content"] = parts
+        history += [{"role": "user", "content": "Follow-up"}]
+        view = agent_projection({"source": history}, "other", set(), set())
+        self.assertIn({"role": "assistant", "content": [
+            {"type": "text", "text": VIZ_PLACEHOLDER + "\r\nFollow-up"},
+            attachment,
+            {"type": "text", "text": malformed},
+        ]}, view)
+
+    def test_inconsistent_visualizer_call_count_uses_untitled_placeholders(self):
+        history = turn("visualizer", "done")
+        history[-3]["tool_calls"] = [call("visualize", "repeated", {"title": "Ambiguous title"})]
+        history[-1]["content"] = VIZ_BLOCK + "\nBetween\n" + VIZ_BLOCK
+        history += [{"role": "user", "content": "Follow-up"}]
+        view = agent_projection({"source": history}, "other", set(), set())
+        self.assertIn({"role": "assistant", "content": VIZ_PLACEHOLDER + "\nBetween\n" + VIZ_PLACEHOLDER}, view)
+
     def test_router_sees_all_old_results_as_data_without_skill_payloads_or_capabilities(self):
         messages = json.loads(FIXTURE.read_text())["messages"] + [
             {"role": "user", "content": "intervening general question"},

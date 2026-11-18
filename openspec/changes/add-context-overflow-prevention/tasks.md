@@ -6,9 +6,9 @@
 
 ## 1. Administrative policy and runtime propagation
 
-- [x] 1.1 Добавить Valves и чистое разрешение policy/budget по Workspace Model ID согласно design; проверить unit-тестами значения по умолчанию, N=null/0/positive, строгие типы, reserve, override и зависимости summary-настроек.
+- [x] 1.1 Добавить в Valves окно Tool results. Проверить N=null/0/positive, строгие типы модели политики и числовой ввод OWUI.
 - [x] 1.2 Сохранить проверенный snapshot в `runtime.begin` и передать его работникам через серверный execution entry/`prepare_worker`; проверить два child одной модели, новый пользовательский запрос и невозможность подмены через body/metadata/task.
-- [x] 1.3 Описать поля, выключенные defaults и последовательное включение в `docs/setup.md`; сверить примеры Valves с реальной валидацией без включения native compaction OWUI.
+- [x] 1.3 Описать окно и его выключенное значение по умолчанию в `docs/setup.md`. Сверить примеры Valves с реальной валидацией при выключенном native compaction OWUI.
 
 ## 2. Implemented intermediate result window
 
@@ -45,10 +45,13 @@
 - [x] 4.9 Проверить native loop обоих экспортов, свежесть после смены Skills, N=0, handoff/workers, отсутствие callable/schema и обходов через старые каталоги или inlets; адаптировать детерминированные provider fixtures к служебному контексту.
 - [x] 4.10 Обновить документацию и фактический Docker-пример system/request; пересобрать экспорты, выполнить unit/native/strict проверки, не заявляя смысловую приёмку GLM.
 
+- [x] 4.11 Очистить представление агента от текста Router по подтверждённому handoff и реализовать первоначальную эвристику скрытия чужого HTML без LLM. Проверить текущий и прошлый handoff, повторный выбор автора, сохранение обычных ответов и исходных данных. Пересобрать экспорты.
+- [x] 4.12 Заменить эвристику HTML обработкой закрытых Inline Visualizer блоков в истории других агентов. Проверить заголовок из связанного вызова и общую заглушку, несколько блоков, пропущенные или вложенные маркеры, Markdown-примеры, обычный HTML, сохранность других артефактов и повторный выбор автора. В изолированной OWUI 0.13.3 с Tool/Skill 2.2.3 сравнить фактические запросы при A → B → A и сохранённые `content`, `output`, `embeds`. Обновить пример контекста и пересобрать экспорты.
+
 ## 5. Later stage: complete request budget and diagnostics
 
 - [ ] 5.1 Реализовать чистый оценщик полного входа и breakdown с exact/estimated режимом, overhead и multimodal reserve без сетевых загрузок; проверить сообщения, схемы Tools, прямые и вложенные handoff results, summary, мультимодальный резерв и исключение служебных cache/origin metadata.
-- [ ] 5.2 Добавить budget gate после inlets и перед каждой рабочей генерацией, с разрешением B по получателю; проверить Router -> агент с меньшим бюджетом, worker override, budget-only режим и повторную оценку после Tool.
+- [ ] 5.2 Вместе добавить Valves входного бюджета и budget gate после inlets перед каждой рабочей генерацией. Проверить типы, reserve, разрешение B по Workspace Model ID, Router -> агент с меньшим бюджетом, worker override, budget-only режим и повторную оценку после Tool.
 - [ ] 5.3 Ввести типизированные ошибки и обезличенные метрики объёма/плашек, сохраняя атомарную подготовку и cleanup; проверить огромный свежий результат, один лишь protected context, provider overflow и отсутствие повторного выполнения действий.
 - [ ] 5.4 Документировать входной бюджет с резервом ответа, safety margin, ограничения оценщика и категории ошибок в `docs/setup.md`/`docs/context.md`; сверить формулы и примеры с unit-тестами.
 
@@ -66,15 +69,15 @@
 - [ ] 7.1 Добавить adapter-вызов выделенной summary model с проверкой actor access, отдельным request state и payload allowlist, без Router Pipe/Tools/native preprocessing; native-тестом проверить фактический запрос, отсутствие наследованных metadata/prompts/callables и неизменность родительского state.
 - [ ] 7.2 Реализовать контракт summary и проверку ответа, input/output limits, общий deadline, max_chunks и отмену; проверить пустой/невалидный ответ, Tool calls, слишком большой блок, таймаут, Stop и отсутствие рекурсии/исполнения Tools.
 - [ ] 7.3 Добавить выбор ограниченных порций из старого N-limited префикса и chaining предыдущего summary; тестами доказать отсутствие скрытых маркеров, raw Tool results, Skill/native content и foreign data во всех summary-запросах.
-- [ ] 7.4 Описать конфигурацию summary model, её отдельные бюджеты/стоимость, требования доступа и bounded failure в `docs/setup.md`; проверить пример настроек на изолированном тестовом провайдере.
+- [ ] 7.4 Проверить параметры модели суммаризации, отдельные бюджеты, доступ и обработку сбоев на изолированном тестовом провайдере.
 
 ## 8. Later stage: compaction planning and effective context integration
 
 - [ ] 8.1 Реализовать planner целых старых ходов и завершённых раундов текущего хода с protected tail, trigger/target и резервом summary; проверить неделимые historical delegate pairs и batches/reasoning, N=null, отсутствие безопасной границы, невозможность автоматического уменьшения N и сохранность свежих вложенных результатов внутри неделимых historical handoff pairs.
-- [ ] 8.2 Встроить checkpoint reuse, summary reference и окончательный budget gate перед binding/publish; проверить идемпотентность, cache hit без повторного summary, продление покрытия и fallback при summary failure только в пределах B.
+- [ ] 8.2 Встроить checkpoint reuse, summary reference и окончательный budget gate перед binding/publish. Добавить Valves суммаризации с проверкой модели, бюджетов и порогов. Проверить идемпотентность, cache hit без повторного summary, продление покрытия и fallback при summary failure только в пределах B.
 - [ ] 8.3 Проверить ошибки/отмену на стыке planner, persistence и рабочего вызова: checkpoint не публикуется после Stop или изменения исходного префикса, невалидная подготовка не переключает registry, выполненные Tools не повторяются; сохранить тестовые счётчики действий.
 - [ ] 8.4 Добавить native streaming регрессии длинной текущей Tool-цепочки, A -> B -> A и двух worker одной модели с callable refresh; проверить полный source, scoped summaries, актуальный native context, свежие Skills и отсутствие cache metadata у Tools.
-- [ ] 8.5 Обновить `docs/context.md`, README и `docs/compatibility.md` новым поведением summary и его ограничениями; проверить примеры защищённых данных, явного отказа и сохранения native compaction off.
+- [ ] 8.5 Описать новые Valves, бюджеты, стоимость и требования доступа в `docs/setup.md`. Обновить `docs/context.md`, README и `docs/compatibility.md` поведением summary и его ограничениями. Проверить примеры защищённых данных, явного отказа и сохранения native compaction off.
 
 ## 9. Standalone and end-to-end acceptance
 

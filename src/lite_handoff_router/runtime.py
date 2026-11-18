@@ -31,7 +31,7 @@ def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, ski
                                if body["messages"][i].get("role") == "user"), -1),
         "generation": 0, "audit": [],
         "native_context": None,
-        "context_policy": ContextPolicy.model_validate(context_policy or {}).snapshot(),
+        "context_policy": ContextPolicy.model_validate(context_policy or {}).model_dump(),
         "parallel": group_state(max_parallel_tasks, parallel_timeout_seconds),
     }
     request.scope[SCOPE_KEY] = state

@@ -24,6 +24,7 @@ system с правилами и отдельный служебный `list_avai
 - [Разработка и подготовка зависимостей](docs/development.md)
 - [Проверки совместимости](docs/compatibility.md)
 - [Контекст и обмен результатами](docs/context.md)
+- [Пример контекста Router и двух агентов в одном чате](docs/agent-context-example.md)
 - [Разделение Skills](docs/skills.md)
 - [Агент для создания routing Skills](docs/routing-author-agent.md)
 - [Фактическая приёмка](docs/acceptance.md)
