@@ -81,6 +81,8 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
             set_tool_module_in_cache(request, identifier, content, module, source)
         inlet_id = "inlet_" + suffix
         inlet_content = '''class Filter:
+    toggle = True
+
     async def inlet(self, body: dict, __model__: dict, __metadata__: dict):
         assert body["model"] == __model__["id"]
         assert "AGENT_PROMPT" in str(body["messages"])
@@ -102,7 +104,8 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
                                  "custom_params": {"seed": "123", "router_only": "true"}}, {"toolIds": [], "skillIds": []}),
             (agent_id, "specialist-a", {"system": "AGENT_PROMPT {{USER_NAME}} {{ticket}}", "temperature": 0.2,
                                        "top_p": 0.6, "top_k": 3, "custom_params": {"seed": "321", "agent_only": "true"}},
-             {"toolIds": [tool_id], "skillIds": [], "hidden": True, "filterIds": [inlet_id]}),
+             {"toolIds": [tool_id], "skillIds": [], "hidden": True,
+              "filterIds": [inlet_id], "defaultFilterIds": [inlet_id]}),
         ):
             row = await Models.insert_new_model(ModelForm(id=identifier, name=identifier, base_model_id=base, params=params, meta=meta), user.id)
             app.state.MODELS[identifier] = {"id": identifier, "name": identifier, "owned_by": "openai", "info": row.model_dump()}

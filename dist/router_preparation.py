@@ -1064,7 +1064,9 @@ class OWUIAdapter:
 
     async def inlets(self, request, body, model, extra):
         from open_webui.utils.filter import get_filter_functions, process_filter_functions
-        filters = await get_filter_functions(request, model, [])
+        meta = (model.get('info') or {}).get('meta') or {}
+        default_filter_ids = meta.get('defaultFilterIds') or []
+        filters = await get_filter_functions(request, model, default_filter_ids)
         body, _ = await process_filter_functions(request=request, filter_context=None, filter_functions=filters, filter_type='inlet', form_data=body, extra_params=extra)
         return body
 
