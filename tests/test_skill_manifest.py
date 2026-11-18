@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
 
-from lite_handoff_router.skills import manifest, skill_guidance
+from lite_handoff_router.skills import manifest, routing_guidance
 
 
 class SkillManifestTest(unittest.IsolatedAsyncioTestCase):
@@ -40,7 +40,7 @@ class SkillManifestTest(unittest.IsolatedAsyncioTestCase):
         entries = self.entries(prompt)
         self.assertEqual([e["agent_name"] for e in entries], ["Исследователь", "Аналитик", "legacy"])
         self.assertTrue(all(e["name"] == "Routing rules" for e in entries))
-        self.assertIn("Do not delegate merely to describe capabilities", skill_guidance(True))
+        self.assertIn("Do not delegate merely to describe capabilities", routing_guidance())
         adapter.skill.assert_awaited_once_with("route", None)
 
     async def test_empty_router_catalog_explicitly_has_no_agents_even_with_base_skills(self):
@@ -48,7 +48,7 @@ class SkillManifestTest(unittest.IsolatedAsyncioTestCase):
         for skill_ids in ([], ["base"]):
             with self.subTest(skill_ids=skill_ids):
                 prompt = await manifest(adapter, skill_ids, None, {})
-                self.assertIn("no agents are currently available", skill_guidance(True))
+                self.assertIn("no agents are currently available", routing_guidance())
                 self.assertFalse(any("agent_id" in e for e in self.entries(prompt)))
 
     async def test_agent_context_does_not_receive_router_capability_instructions(self):

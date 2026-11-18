@@ -215,8 +215,8 @@ class Tools:
                 self.assertNotIn("PARENT_", str(payload))
                 systems = [m["content"] for m in payload["messages"] if m["role"] == "system"]
                 self.assertEqual(len(systems), 1)
-                self.assertTrue(systems[0].startswith("The current server-provided list_available_skills"))
-                self.assertTrue(systems[0].endswith("\n\nAGENT_OWN_SYSTEM"))
+                self.assertTrue(systems[0].startswith("AGENT_OWN_SYSTEM\n\n"))
+                self.assertNotIn("list_available_skills", systems[0])
                 self.assertEqual(systems[0].count("Router already manages the group"), 1)
                 self.assertNotIn("Conversation history may include replies from other agents.", systems[0])
                 self.assertNotIn(task, systems[0])

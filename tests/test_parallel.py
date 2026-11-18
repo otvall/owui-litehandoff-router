@@ -307,7 +307,7 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
             systems = [m["content"] for m in draft["messages"] if m["role"] == "system"]
             self.assertEqual(len(systems), 1)
             self.assertEqual(systems[0].count(WORKER_PROMPT), 1)
-            self.assertTrue(systems[0].endswith(WORKER_PROMPT + "\n\nRouter"))
+            self.assertEqual(systems[0], "Router\n\n" + WORKER_PROMPT)
             self.assertNotIn("ASSIGNED_ONLY", systems[0])
             self.assertEqual([m["content"] for m in draft["messages"] if m["role"] == "user"],
                              ["ASSIGNED_ONLY: forecast"])

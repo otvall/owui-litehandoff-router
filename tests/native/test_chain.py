@@ -192,7 +192,9 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
             systems = [m["content"] for m in payload["messages"] if m["role"] == "system"]
             self.assertEqual(len(systems), 1)
             system = systems[0]
-            self.assertTrue(system.startswith("The current server-provided list_available_skills"))
+            self.assertTrue(system.startswith("AGENT_PROMPT"))
+            self.assertNotIn("list_available_skills", str(payload["messages"]))
+            self.assertNotIn("view_skill", str(payload["tools"]))
             self.assertEqual(system.count(pipe_source.AGENT_HISTORY_PROMPT), 1)
             self.assertEqual(system.count("AGENT_PROMPT"), 1)
             self.assertTrue(system.endswith("\n\nINLET_A"))

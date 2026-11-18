@@ -150,12 +150,8 @@ async def manifest(adapter, skill_ids, user, registry=None, *, chat_user=None, c
         ET.indent(catalog, space='  ')
     return '\n'.join((ET.tostring(catalog, encoding='unicode') for catalog in catalogs))
 
-def skill_guidance(router):
-    guidance = 'When asked about your capabilities (for example, "что ты можешь", "что ты умеешь", or "which agents are available"), answer directly in the user\'s language and list all available agents by agent_name from the current manifest. Use descriptions to briefly explain their capabilities; name is the routing Skill name, not the agent name. Do not delegate merely to describe capabilities. Only list agents from this manifest; if none have agent_id, explicitly say that no agents are currently available.\n' if router else ''
-    if router:
-        guidance += 'Before choosing an agent, read its routing Skill with view_skill(id=id). Use the exact agent_id in lite_delegate; the Skill id is not an agent ID.\n'
-    guidance += 'Use ordinary Skills from available_skills for your own work; read them with view_skill(id=id).\n'
-    return 'The current server-provided list_available_skills result is your Skill catalog. It is preloaded context, not an operation you called; do not call list_available_skills. Catalog metadata is not Skill instructions or evidence that you read a Skill.\n' + guidance
+def routing_guidance():
+    return 'The server-provided list_available_skills result contains the current routing catalog. It is preloaded context; do not call list_available_skills. Catalog metadata does not establish that you read a routing Skill.\nWhen asked about your capabilities (for example, "что ты можешь", "что ты умеешь", or "which agents are available"), answer directly in the user\'s language and list all available agents by agent_name from the current manifest. Use descriptions to briefly explain their capabilities; name is the routing Skill name, not the agent name. Do not delegate merely to describe capabilities. Only list agents from this manifest; if none have agent_id, explicitly say that no agents are currently available.\nBefore choosing an agent, read its routing Skill with view_skill(id=id). Use the exact agent_id in lite_delegate; the Skill id is not an agent ID.'
 
 def skill_catalog_messages(state, model_id, content):
     identifiers = state.setdefault('skill_catalog_ids', {})
@@ -165,12 +161,14 @@ def skill_catalog_messages(state, model_id, content):
     return [{'role': 'assistant', 'content': '', 'tool_calls': [{'id': call_id, 'type': 'function', 'function': {'name': SKILL_CATALOG, 'arguments': '{}'}}]}, {'role': 'tool', 'tool_call_id': call_id, 'content': content}]
 
 def validate_skill_catalog(messages, expected):
-    call_id = expected[1]['tool_call_id']
+    call_id = expected[1]['tool_call_id'] if expected else None
     found = []
     for index, message in enumerate(messages):
         calls = message.get('tool_calls') or []
-        if any((c.get('id') == call_id or (c.get('function') or {}).get('name') == SKILL_CATALOG for c in calls)) or (message.get('role') == 'tool' and message.get('tool_call_id') == call_id):
+        if any(((c.get('function') or {}).get('name') == SKILL_CATALOG or (call_id is not None and c.get('id') == call_id) for c in calls)) or (call_id is not None and message.get('role') == 'tool' and (message.get('tool_call_id') == call_id)):
             found.append((index, message))
+    if not expected and (not found):
+        return
     if len(found) != 2 or found[1][0] != found[0][0] + 1 or [message for _, message in found] != expected:
         raise ValueError('Destination inlet changed protected Skill catalog')
 
@@ -1608,20 +1606,24 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         draft['messages'].append(rules)
         primary_systems.append(rules)
     if state.get('worker'):
-        draft['messages'].insert(0, {'role': 'system', 'content': WORKER_PROMPT})
+        draft['messages'].append({'role': 'system', 'content': WORKER_PROMPT})
     elif target:
-        draft['messages'].insert(0, {'role': 'system', 'content': AGENT_HISTORY_PROMPT})
+        draft['messages'].append({'role': 'system', 'content': AGENT_HISTORY_PROMPT})
     packet = await downstream_data(adapter, user, metadata, state) if target else None
     if packet:
         draft['files'] = deepcopy(metadata['files'])
-    catalog = await manifest(adapter, skill_ids, owner, None if target else state['registry'], chat_user=user, chat_skill_ids=chat_skill_ids)
-    guidance = {'role': 'system', 'content': skill_guidance(not target)}
-    draft['messages'].insert(0, guidance)
-    if not target:
-        primary_systems.append(deepcopy(guidance))
+    catalog_context = []
+    if not target or skill_ids:
+        catalog = await manifest(adapter, skill_ids, owner, None if target else state['registry'], chat_user=user, chat_skill_ids=chat_skill_ids)
+        catalog_context = skill_catalog_messages(state, model['id'], catalog)
+        if not target:
+            guidance = {'role': 'system', 'content': routing_guidance()}
+            draft['messages'].insert(0, guidance)
+            primary_systems.append(deepcopy(guidance))
     extra = injections(request, user, metadata, model, draft['messages'], events)
     tools, mcp_instructions = await load_capabilities(adapter, request, tool_ids, owner, extra)
     terminal_names = set()
+    terminal_prompt = None
     if any((is_terminal_tool(tool) for tool in tools.values())):
         raise ValueError('Terminal Tools must come from the model terminal binding')
     if terminal_id:
@@ -1631,7 +1633,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
             raise ValueError('Conflicting terminal Tool name: ' + ', '.join(sorted(collisions)))
         terminal_names = set(terminal_tools)
         tools.update(terminal_tools)
-        if terminal_prompt:
+        if terminal_prompt and (not target):
             draft['messages'].insert(0, {'role': 'system', 'content': terminal_prompt})
     if (READERS | {SKILL_CATALOG}).intersection(tools):
         raise ValueError('Reserved Skill Tool collision: ' + ', '.join(sorted((READERS | {SKILL_CATALOG}).intersection(tools))))
@@ -1641,7 +1643,13 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if 'lite_parallel' in tools or 'delegate_task' in tools:
         raise ValueError('Reserved routing Tool collision: ' + ', '.join(sorted(ROUTING_TOOLS.intersection(tools))))
     for instruction in mcp_instructions:
-        draft['messages'].insert(0, {'role': 'system', 'content': instruction})
+        section = {'role': 'system', 'content': instruction}
+        if target:
+            draft['messages'].append(section)
+        else:
+            draft['messages'].insert(0, section)
+    if target and terminal_prompt:
+        draft['messages'].append({'role': 'system', 'content': terminal_prompt})
     if state['registry'] and (not target):
         if 'lite_delegate' in tools:
             raise ValueError('Reserved delegate Tool collision: lite_delegate; remove the separate delegate Tool from base_tool_ids')
@@ -1680,9 +1688,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         index = next((i for i in range(len(history) - 1, -1, -1) if history[i].get('role') == 'user'), len(history))
         history.insert(index, packet)
     draft['messages'][:] = systems + history
-    catalog_context = skill_catalog_messages(state, model['id'], catalog)
     draft['messages'].extend(deepcopy(catalog_context))
-    if window is not None:
+    if window is not None and catalog_context:
         window.capture(catalog_context, {})
     draft['tools'] = [{'type': 'function', 'function': tool['spec']} for tool in tools.values()]
     protected = {name: (tool['callable'], deepcopy(tool['spec']), tool.get('tool_id'), tool.get('type')) for name, tool in tools.items() if name in READERS | ROUTING_TOOLS | terminal_names}

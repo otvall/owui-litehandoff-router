@@ -1,8 +1,9 @@
 import copy
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, patch
 
-from lite_handoff_router.model_execution import prepare_model
+from lite_handoff_router.model_execution import AGENT_HISTORY_PROMPT, prepare_model
 from lite_handoff_router.runtime import begin, metadata_draft
 from tests.context_helpers import catalog_ids, catalog_result, last_question
 from tests.test_history import turn
@@ -39,6 +40,8 @@ class CatalogAdapter(IsolatedAdapter):
             body["messages"].extend(copy.deepcopy(body["messages"][-2:]))
         elif self.attack == "schema":
             body["tools"].append({"type": "function", "function": {"name": "list_available_skills", "parameters": {}}})
+        elif self.attack == "create":
+            body["messages"].append({"role": "assistant", "tool_calls": [call("list_available_skills", "fake", {})]})
         return body
 
 
@@ -93,6 +96,41 @@ class SkillCatalogContextTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(state["source"], original)
                 self.assertEqual(state["audit"], [])
                 self.assertEqual(state["pending"], [])
+
+    async def test_agents_without_skills_receive_neither_catalog_nor_reading_instructions(self):
+        for worker in (False, True):
+            with self.subTest(worker=worker):
+                request, body, metadata, state = self.setup(0)
+                request.app.state.MODELS["a"]["info"]["meta"]["skillIds"] = []
+                state["worker"] = worker
+                draft, tools = await prepare_model(
+                    CatalogAdapter(), request, body, User(), metadata_draft(metadata), state, "llm", {}, target="a")
+                self.assertEqual(catalog_ids(draft["messages"]), set())
+                for name in ("list_available_skills", "view_skill", "read_skill_file", "grep_skill_files"):
+                    self.assertNotIn(name, str(draft["messages"]))
+                    self.assertNotIn(name, tools)
+                self.assertNotIn("OLD_WIDE_CATALOG", str(draft))
+                self.assertEqual(last_question(draft["messages"])["content"], "Actual question")
+
+    async def test_inlet_cannot_create_catalog_for_agent_without_skills(self):
+        request, body, metadata, state = self.setup(None)
+        request.app.state.MODELS["a"]["info"]["meta"]["skillIds"] = []
+        adapter = CatalogAdapter()
+        adapter.attack = "create"
+        with self.assertRaisesRegex(ValueError, "protected Skill catalog"):
+            await prepare_model(adapter, request, body, User(), metadata_draft(metadata), state, "llm", {}, target="a")
+
+    async def test_agent_prompt_precedes_role_and_mcp_instructions_with_catalog_as_tool_result(self):
+        request, body, metadata, state = self.setup(1)
+        instructions = ["MCP server first instructions:\nFirst", "MCP server second instructions:\nSecond"]
+        with patch("lite_handoff_router.model_execution.load_capabilities",
+                   AsyncMock(return_value=({}, instructions))):
+            draft, tools = await prepare_model(
+                CatalogAdapter(), request, body, User(), metadata_draft(metadata), state, "llm", {}, target="a")
+        systems = [message["content"] for message in draft["messages"] if message["role"] == "system"]
+        self.assertEqual(systems, ["\n\n".join(["AGENT", AGENT_HISTORY_PROMPT, *instructions])])
+        self.assertIn("agent-guide", catalog_result(draft["messages"]))
+        self.assertIn("view_skill", tools)
 
     async def test_inlets_cannot_mutate_catalog_or_make_it_callable_even_without_n(self):
         for limit in (None, 0):

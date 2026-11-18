@@ -72,24 +72,20 @@ async def manifest(adapter, skill_ids, user, registry=None, *, chat_user=None, c
     return "\n".join(ET.tostring(catalog, encoding="unicode") for catalog in catalogs)
 
 
-def skill_guidance(router):
-    guidance = (
+def routing_guidance():
+    return (
+        "The server-provided list_available_skills result contains the current routing catalog. "
+        "It is preloaded context; do not call list_available_skills. "
+        "Catalog metadata does not establish that you read a routing Skill.\n"
         'When asked about your capabilities (for example, "что ты можешь", "что ты умеешь", '
         'or "which agents are available"), answer directly in the user\'s language and list '
         'all available agents by agent_name from the current manifest. Use descriptions to '
         'briefly explain their capabilities; name is the routing Skill name, not the agent name. '
         'Do not delegate merely to describe capabilities. Only list agents from this manifest; '
         'if none have agent_id, explicitly say that no agents are currently available.\n'
-    ) if router else ""
-    if router:
-        guidance += (
-            "Before choosing an agent, read its routing Skill with view_skill(id=id). "
-            "Use the exact agent_id in lite_delegate; the Skill id is not an agent ID.\n"
-        )
-    guidance += "Use ordinary Skills from available_skills for your own work; read them with view_skill(id=id).\n"
-    return ("The current server-provided list_available_skills result is your Skill catalog. "
-            "It is preloaded context, not an operation you called; do not call list_available_skills. "
-            "Catalog metadata is not Skill instructions or evidence that you read a Skill.\n" + guidance)
+        "Before choosing an agent, read its routing Skill with view_skill(id=id). "
+        "Use the exact agent_id in lite_delegate; the Skill id is not an agent ID."
+    )
 
 
 def skill_catalog_messages(state, model_id, content):
@@ -105,13 +101,16 @@ def skill_catalog_messages(state, model_id, content):
 
 
 def validate_skill_catalog(messages, expected):
-    call_id = expected[1]["tool_call_id"]
+    call_id = expected[1]["tool_call_id"] if expected else None
     found = []
     for index, message in enumerate(messages):
         calls = message.get("tool_calls") or []
-        if (any(c.get("id") == call_id or (c.get("function") or {}).get("name") == SKILL_CATALOG for c in calls)
-                or message.get("role") == "tool" and message.get("tool_call_id") == call_id):
+        if (any((c.get("function") or {}).get("name") == SKILL_CATALOG
+                or call_id is not None and c.get("id") == call_id for c in calls)
+                or call_id is not None and message.get("role") == "tool" and message.get("tool_call_id") == call_id):
             found.append((index, message))
+    if not expected and not found:
+        return
     if (len(found) != 2 or found[1][0] != found[0][0] + 1
             or [message for _, message in found] != expected):
         raise ValueError("Destination inlet changed protected Skill catalog")
