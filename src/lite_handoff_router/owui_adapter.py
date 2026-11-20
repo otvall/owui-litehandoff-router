@@ -633,6 +633,46 @@ class OWUIAdapter:
         if await self.child(child_id, user):
             await stop_tasks_by_chat_id_endpoint(request, child_id, user=user)
 
+    async def measure_agent_tokens(self, request, draft, user):
+        from aiohttp import ClientTimeout
+        from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
+        from open_webui.routers.openai import get_openai_connection, get_session
+        from open_webui.utils.headers import get_headers_and_cookies
+        from open_webui.utils.model_ids import strip_provider_model_prefix
+
+        logger = logging.getLogger(__name__)
+        agent = draft["model"]
+        runtime = request.app.state.MODELS.get(agent, {})
+        model = (runtime.get("info") or {}).get("base_model_id") or agent
+        candidates = getattr(request.app.state, "OPENAI_MODELS", None) or {}
+        connection = candidates.get(model) or {}
+        if "urlIdx" not in connection:
+            logger.info("Agent token count unavailable for %s (no OpenAI connection)", agent)
+            return
+        try:
+            url, key, config = await get_openai_connection(connection["urlIdx"])
+            headers, cookies = await get_headers_and_cookies(request, url, key, config, user=user)
+            payload = {name: draft[name] for name in (
+                "messages", "tools", "tool_choice", "reasoning_effort", "chat_template_kwargs",
+                "continue_final_message", "add_generation_prompt",
+            ) if name in draft}
+            payload["model"] = strip_provider_model_prefix(model, config.get("prefix_id"))
+            session = await get_session()
+            async with session.post(url.rstrip("/") + "/tokenize", json=payload, headers=headers,
+                                    cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                                    timeout=ClientTimeout(total=5)) as response:
+                if response.status != 200:
+                    logger.info("Agent token count unavailable for %s (HTTP %s)", agent, response.status)
+                    return
+                result = await response.json()
+            count = result.get("count") if isinstance(result, dict) else None
+            if type(count) is int and count > 0:
+                logger.info("Agent input tokens: agent=%s model=%s count=%d", agent, model, count)
+            else:
+                logger.info("Agent token count unavailable for %s (invalid count)", agent)
+        except Exception as error:
+            logger.info("Agent token count unavailable for %s (%s)", agent, type(error).__name__)
+
     async def save_router_usage(self, state, user, model_id, sample):
         from open_webui.models.chats import Chats
         from open_webui.utils.chat_id import is_saved_chat_id

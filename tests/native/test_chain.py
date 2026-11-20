@@ -256,10 +256,8 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         assert "B_PROMPT" in str(__messages__)
         assert "AGENT_PROMPT" not in str(__messages__)
         assert "ROUTER_PROMPT" not in str(__messages__)
-        reference_ids = {c["id"] for m in __messages__ for c in m.get("tool_calls", [])
-                         if c["function"]["name"] == "historical_agent_turn"}
-        assert reference_ids
-        assert all(m.get("tool_call_id") in reference_ids for m in __messages__ if m["role"] == "tool")
+        assert "[Conversation history]" in str(__messages__[1]["content"])
+        assert all(m["role"] != "tool" for m in __messages__)
         assert "[Tool result withheld from other agents]" in str(__messages__)
         return "B_PRIVATE_RESULT_42"
 '''
@@ -317,7 +315,9 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p["temperature"] for p in b_seen], [0.8, 0.8, 0.4, 0.4])
         self.assertEqual(b_request.scope["lite_handoff_router"]["active_agent"], b_id)
         for payload in b_seen[2:]:
-            self.assertIn("historical_agent_turn", str(payload["messages"]))
+            self.assertIn("[Conversation history]", str(payload["messages"]))
+            self.assertFalse(any(call["function"]["name"] == "historical_agent_turn"
+                                 for message in payload["messages"] for call in message.get("tool_calls", ())))
             self.assertNotIn("historical_agent_turn", str(payload["tools"]))
             self.assertNotIn("ROUTING_PROSE", str(payload["messages"]))
             self.assertNotIn("SLIDE_SOURCE_42", str(payload["messages"]))

@@ -78,6 +78,7 @@ class SharedSummary:
         self.model_id = state["context_policy"]["shared_summary_model_id"].strip()
         self.turns = shared_turns(state) if self.model_id and not state.get("worker") else []
         self.checkpoint = None
+        self.applied_turns = 0
 
     async def status(self, description, *, done, error=False):
         if self.emitter is not None:
@@ -120,6 +121,7 @@ class SharedSummary:
         kept = [message for message in messages[start:end] if message == packet]
         summary = self.state["shared_summary_cache"][self.checkpoint["key"]]
         messages[start:end] = [{"role": "user", "content": "[Shared conversation summary]\n" + summary}, *kept]
+        self.applied_turns = count
         return True
 
     async def extend(self, draft, packet, full_messages):

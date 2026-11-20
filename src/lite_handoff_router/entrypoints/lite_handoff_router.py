@@ -5,6 +5,7 @@ from copy import deepcopy
 from pydantic import BaseModel, Field
 
 from ..model_execution import prepare_model
+from ..agent_history_block import pack_agent_history
 from ..owui_adapter import OWUIAdapter
 from ..protocol import confirmed_target
 from ..runtime import require, metadata_draft, publish
@@ -71,14 +72,24 @@ class Pipe:
                     "action": "handoff", "description": "Передача: " + agent.get("agent_name", target), "done": True,
                 }})
         track_usage = summary_enabled and not target
-        try:
+        async def complete_prepared():
+            if target and not state.get("worker"):
+                pack_agent_history(
+                    draft["messages"], state, state.get("agent_history_question"),
+                    covered_turns=summary.applied_turns if summary_enabled else 0,
+                    packet=state.get("shared_summary_packet"),
+                )
+                if policy["agent_token_count_enabled"]:
+                    await adapter.measure_agent_tokens(__request__, draft, user)
             response = await adapter.complete(__request__, draft, user)
-            if summary_enabled:
-                response = await check_initial_stream(response)
+            return await check_initial_stream(response) if summary_enabled else response
+
+        try:
+            response = await complete_prepared()
         except ProviderContextOverflow:
             if not summary_enabled or not await summary.extend(draft, packet, full_messages):
                 raise
-            response = await check_initial_stream(await adapter.complete(__request__, draft, user))
+            response = await complete_prepared()
         executor = {"kind": "agent", "agent_id": target} if target else {"kind": "router"}
         on_usage = None
         if track_usage:

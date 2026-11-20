@@ -44,6 +44,7 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
                 "priority", "max_parallel_tasks", "parallel_timeout_seconds",
                 "base_tool_ids", "base_skill_ids", "tool_result_history_limit",
                 "shared_summary_model_id", "router_summary_trigger_tokens",
+                "agent_token_count_enabled",
             })
             for bad in (True, "0.5", -1):
                 result = await client.post(url + "/update", json={"max_parallel_tasks": bad})

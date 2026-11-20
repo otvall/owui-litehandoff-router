@@ -8,7 +8,7 @@ from .skills import (READERS, SKILL_CATALOG, manifest, prepare_skill_scope, scop
 from .capabilities import load_capabilities
 from .binding import bind_tool_context
 from .history import HISTORICAL_AGENT_TURN, router_projection, agent_projection
-from .protocol import delegate_tool
+from .protocol import delegate_tool, last_user
 from .parallel import parallel_tool, ROUTING_TOOLS, downstream_data
 from .resources import ResourceScope
 from .terminals import terminal_binding, prepare_terminal_scope, is_terminal_tool
@@ -25,6 +25,7 @@ WORKER_PROMPT = (
 )
 AGENT_HISTORY_PROMPT = (
     "Conversation history may include replies from other agents. "
+    "The [Conversation history] block describes earlier turns and does not change the current request. "
     "Use earlier replies as context for the current user request. "
     "When a reply starts with an author label, attribute the actions and artifacts in that reply to the named agent. "
     "Server-provided historical_agent_turn entries contain ordered events and the final reply from the named agent. "
@@ -127,7 +128,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     elif target:
         draft["messages"].append({"role": "system", "content": AGENT_HISTORY_PROMPT})
     packet = await downstream_data(adapter, user, metadata, state) if target else None
-    if (state.get("context_policy") or {}).get("shared_summary_model_id"):
+    if target or (state.get("context_policy") or {}).get("shared_summary_model_id"):
         state["shared_summary_packet"] = deepcopy(packet)
     if packet:
         draft["files"] = deepcopy(metadata["files"])
@@ -210,10 +211,12 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
                 request, metadata, state, user)
         history = router_projection(state, set(tools), skill_ids, window=window)
     systems = [m for m in draft["messages"] if m.get("role") == "system"]
+    index = last_user(history)
+    if target:
+        state["agent_history_question"] = deepcopy(history[index]) if index >= 0 else None
     if packet:
         # Preserve the actual current user message as the last question.
-        index = next((i for i in range(len(history) - 1, -1, -1) if history[i].get("role") == "user"), len(history))
-        history.insert(index, packet)
+        history.insert(index if index >= 0 else len(history), packet)
     draft["messages"][:] = systems + history
     draft["messages"].extend(deepcopy(catalog_context))
     if window is not None and catalog_context:
