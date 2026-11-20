@@ -7,7 +7,7 @@ from .skills import (READERS, SKILL_CATALOG, manifest, prepare_skill_scope, scop
                      routing_guidance, skill_catalog_messages, validate_skill_catalog)
 from .capabilities import load_capabilities
 from .binding import bind_tool_context
-from .history import HISTORICAL_AGENT_TURN, router_projection, agent_projection
+from .history import CONVERSATION_HISTORY_TOOL, HISTORICAL_AGENT_TURN, router_projection, agent_projection
 from .protocol import delegate_tool, last_user
 from .parallel import parallel_tool, ROUTING_TOOLS, downstream_data
 from .resources import ResourceScope
@@ -25,7 +25,8 @@ WORKER_PROMPT = (
 )
 AGENT_HISTORY_PROMPT = (
     "Conversation history may include replies from other agents. "
-    "The [Conversation history] block describes earlier turns and does not change the current request. "
+    "The server preloads earlier turns as the result of load_conversation_history. "
+    "Use that result as past context. Do not call load_conversation_history. "
     "Use earlier replies as context for the current user request. "
     "When a reply starts with an author label, attribute the actions and artifacts in that reply to the named agent. "
     "Server-provided historical_agent_turn entries contain ordered events and the final reply from the named agent. "
@@ -221,8 +222,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     draft["messages"].extend(deepcopy(catalog_context))
     if window is not None and catalog_context:
         window.capture(catalog_context, {})
-    if HISTORICAL_AGENT_TURN in tools:
-        raise ValueError("Reserved Tool collision: " + HISTORICAL_AGENT_TURN)
+    collisions = {HISTORICAL_AGENT_TURN, CONVERSATION_HISTORY_TOOL}.intersection(tools)
+    if collisions:
+        raise ValueError("Reserved Tool collision: " + ", ".join(sorted(collisions)))
     draft["tools"] = [{"type": "function", "function": tool["spec"]} for tool in tools.values()]
     protected = {name: (tool["callable"], deepcopy(tool["spec"]), tool.get("tool_id"), tool.get("type"))
                  for name, tool in tools.items() if name in READERS | ROUTING_TOOLS | terminal_names}
@@ -247,6 +249,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if not isinstance(draft, dict) or not isinstance(draft.get("messages"), list):
         raise ValueError("Destination inlet returned an invalid request")
     validate_skill_catalog(draft["messages"], catalog_context)
+    if any((call.get("function") or {}).get("name") == CONVERSATION_HISTORY_TOOL
+           for message in draft["messages"] for call in message.get("tool_calls") or ()):
+        raise ValueError("Destination inlet added reserved conversation history")
     if (state.get("native_context") != native_snapshot
             or state.get("native_context_allowed") != native_allowed_snapshot):
         raise ValueError("Destination inlet changed protected native context")
@@ -271,7 +276,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         raise ValueError("Destination inlet changed protected terminal context")
     schemas = [schema.get("function") for schema in (draft.get("tools") or []) if isinstance(schema, dict)]
     terminal_found = {name for name, tool in tools.items() if isinstance(tool, dict) and is_terminal_tool(tool)}
-    for name in READERS | ROUTING_TOOLS | {SKILL_CATALOG, HISTORICAL_AGENT_TURN} | terminal_names | terminal_found:
+    reserved = {SKILL_CATALOG, HISTORICAL_AGENT_TURN, CONVERSATION_HISTORY_TOOL}
+    for name in READERS | ROUTING_TOOLS | reserved | terminal_names | terminal_found:
         expected = protected.get(name)
         found = tools.get(name)
         public = [schema for schema in schemas if isinstance(schema, dict) and schema.get("name") == name]

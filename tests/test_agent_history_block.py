@@ -3,7 +3,8 @@ import json
 from unittest import TestCase
 
 from lite_handoff_router.agent_history_block import AGENT_HISTORY_HEADING, pack_agent_history
-from lite_handoff_router.history import agent_projection
+from lite_handoff_router.history import CONVERSATION_HISTORY_TOOL, agent_projection
+from lite_handoff_router.protocol import completed_pairs
 from lite_handoff_router.tool_history import ToolResultWindow, result_placeholder
 from tests.test_history import turn
 from tests.test_protocol import call
@@ -29,20 +30,27 @@ class AgentHistoryBlockTest(TestCase):
         system = {"role": "system", "content": "Agent A"}
         packet = {"role": "user", "content": "Confirmed parallel task results."}
         messages[:] = [system, *messages[:-1], packet, current, *live]
+        unformatted = deepcopy(messages)
         pack_agent_history(messages, state, current, packet=packet)
 
-        self.assertEqual(messages[:1] + messages[2:], [system, packet, current, *live])
-        self.assertEqual(messages[1]["role"], "user")
-        text, preserved_image = messages[1]["content"]
+        self.assertEqual(messages[:1] + messages[4:], [system, packet, current, *live])
+        self.assertEqual(completed_pairs(messages), [(1, 0, 2), (6, 0, 7)])
+        self.assertEqual(messages[1]["tool_calls"][0]["function"], {"name": CONVERSATION_HISTORY_TOOL, "arguments": "{}"})
+        self.assertEqual(messages[3]["role"], "user")
+        label, preserved_image = messages[3]["content"]
+        self.assertIn("[Conversation history media]", label["text"])
         self.assertEqual(preserved_image, image)
-        self.assertTrue(text["text"].startswith(AGENT_HISTORY_HEADING))
-        block = json.loads(text["text"].split("\n", 1)[1])
+        text = messages[2]["content"]
+        self.assertTrue(text.startswith(AGENT_HISTORY_HEADING))
+        block = json.loads(text.split("\n", 1)[1])
         self.assertEqual([turn["agent_id"] for turn in block["turns"]], ["a", "b"])
         self.assertEqual(block["turns"][0]["question"], ["Inspect this", {"media_index": 1}])
-        self.assertIn("OWN_RESULT", text["text"])
-        self.assertNotIn("FOREIGN_RESULT", text["text"])
-        self.assertIn("withheld from other agents", text["text"])
+        self.assertIn("OWN_RESULT", text)
+        self.assertNotIn("FOREIGN_RESULT", text)
+        self.assertIn("withheld from other agents", text)
         self.assertEqual(source, snapshot)
+        pack_agent_history(unformatted, state, current, packet=packet)
+        self.assertEqual(unformatted, messages)
 
     def test_includes_applied_summary_in_the_same_history_block(self):
         old = {"role": "user", "content": "Old"}
@@ -50,9 +58,10 @@ class AgentHistoryBlockTest(TestCase):
         summary = {"role": "user", "content": "[Shared conversation summary]\nPrevious decisions"}
         messages = [{"role": "system", "content": "Prompt"}, summary, current]
         pack_agent_history(messages, {"source": [old, current], "user_boundary": 1}, current, covered_turns=1)
-        self.assertEqual(json.loads(messages[1]["content"].split("\n", 1)[1]),
+        self.assertEqual(completed_pairs(messages), [(1, 0, 2)])
+        self.assertEqual(json.loads(messages[2]["content"].split("\n", 1)[1]),
                          {"summary": "Previous decisions", "turns": []})
-        self.assertEqual(messages[2], current)
+        self.assertEqual(messages[3], current)
 
     def test_hiding_result_does_not_change_tool_status(self):
         source = turn("a", "Error: PRIVATE_ERROR")
@@ -63,6 +72,7 @@ class AgentHistoryBlockTest(TestCase):
         messages = agent_projection(state, "a", {"lookup"}, set(), window=window)
         window.apply(messages)
         pack_agent_history(messages, state, current)
-        calls = json.loads(messages[0]["content"].split("\n", 1)[1])["turns"][0]["events"][0]["calls"]
+        self.assertEqual(completed_pairs(messages), [(0, 0, 1)])
+        calls = json.loads(messages[1]["content"].split("\n", 1)[1])["turns"][0]["events"][0]["calls"]
         self.assertEqual(calls[0]["status"], "error")
         self.assertEqual(calls[0]["result"], result_placeholder("Error:"))

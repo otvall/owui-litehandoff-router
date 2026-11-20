@@ -11,6 +11,7 @@ from .native_context import NATIVE_CONTEXT_NAMES, native_record, project_native_
 from .tool_history import result_status
 
 HISTORICAL_AGENT_TURN = "historical_agent_turn"
+CONVERSATION_HISTORY_TOOL = "load_conversation_history"
 
 
 def fingerprint(call):
@@ -178,7 +179,7 @@ def router_projection(state, tool_names, skill_ids, *, window=None):
     native_seen = set()
     for exchange in exchanges:
         name = exchange_name(messages, exchange)
-        if name in {SKILL_CATALOG, HISTORICAL_AGENT_TURN}:
+        if name in {SKILL_CATALOG, HISTORICAL_AGENT_TURN, CONVERSATION_HISTORY_TOOL}:
             continue
         record = native_record(state, messages[exchange.batch]["tool_calls"][exchange.call_index],
                                messages[exchange.result_index])
@@ -391,7 +392,8 @@ def foreign_turn(state, handoff, end, owner, batches, overrides):
     messages = state["source"]
     events, moved = [], []
     reply = None
-    excluded = READERS | NATIVE_CONTEXT_NAMES | {HISTORICAL_AGENT_TURN, "lite_delegate", "delegate_task"}
+    excluded = READERS | NATIVE_CONTEXT_NAMES | {
+        HISTORICAL_AGENT_TURN, CONVERSATION_HISTORY_TOOL, "lite_delegate", "delegate_task"}
     for i in range(handoff.batch, end):
         message = messages[i]
         if message.get("role") != "assistant":
@@ -431,14 +433,14 @@ def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
     exchanges = analyze(messages, current_boundary=boundary, audit=state.get("audit", []))
     selected = [e for e in exchanges if e.executor == {"kind": "agent", "agent_id": agent_id}
                 and exchange_name(messages, e) in tool_names
-                and exchange_name(messages, e) not in {SKILL_CATALOG, HISTORICAL_AGENT_TURN}
+                and exchange_name(messages, e) not in {SKILL_CATALOG, HISTORICAL_AGENT_TURN, CONVERSATION_HISTORY_TOOL}
                 and (exchange_name(messages, e) not in READERS
                      or e.batch > boundary and skill_is_current(messages, e, skill_ids))]
     selected = [e for e in selected if not native_record(
         state, messages[e.batch]["tool_calls"][e.call_index], messages[e.result_index])]
     native_seen = set()
     for exchange in exchanges:
-        if exchange_name(messages, exchange) in {SKILL_CATALOG, HISTORICAL_AGENT_TURN}:
+        if exchange_name(messages, exchange) in {SKILL_CATALOG, HISTORICAL_AGENT_TURN, CONVERSATION_HISTORY_TOOL}:
             continue
         record = native_record(state, messages[exchange.batch]["tool_calls"][exchange.call_index],
                                messages[exchange.result_index])

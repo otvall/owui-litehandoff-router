@@ -256,8 +256,11 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         assert "B_PROMPT" in str(__messages__)
         assert "AGENT_PROMPT" not in str(__messages__)
         assert "ROUTER_PROMPT" not in str(__messages__)
-        assert "[Conversation history]" in str(__messages__[1]["content"])
-        assert all(m["role"] != "tool" for m in __messages__)
+        assert __messages__[1]["tool_calls"][0]["function"]["name"] == "load_conversation_history"
+        assert __messages__[2]["role"] == "tool"
+        assert __messages__[2]["tool_call_id"] == __messages__[1]["tool_calls"][0]["id"]
+        assert __messages__[2]["content"].startswith("[Conversation history]")
+        assert all(m["role"] != "tool" for m in __messages__[3:])
         assert "[Tool result withheld from other agents]" in str(__messages__)
         return "B_PRIVATE_RESULT_42"
 '''
@@ -315,10 +318,12 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p["temperature"] for p in b_seen], [0.8, 0.8, 0.4, 0.4])
         self.assertEqual(b_request.scope["lite_handoff_router"]["active_agent"], b_id)
         for payload in b_seen[2:]:
-            self.assertIn("[Conversation history]", str(payload["messages"]))
+            self.assertEqual(payload["messages"][1]["tool_calls"][0]["function"]["name"], "load_conversation_history")
+            self.assertTrue(payload["messages"][2]["content"].startswith("[Conversation history]"))
             self.assertFalse(any(call["function"]["name"] == "historical_agent_turn"
                                  for message in payload["messages"] for call in message.get("tool_calls", ())))
             self.assertNotIn("historical_agent_turn", str(payload["tools"]))
+            self.assertNotIn("load_conversation_history", str(payload["tools"]))
             self.assertNotIn("ROUTING_PROSE", str(payload["messages"]))
             self.assertNotIn("SLIDE_SOURCE_42", str(payload["messages"]))
             self.assertIn("[Визуализация доступна в исходном чате.]", str(payload["messages"]))

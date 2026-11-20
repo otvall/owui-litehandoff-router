@@ -10,7 +10,6 @@ import re
 from .history import agent_dialogue, analyze
 from .protocol import tool_image
 
-SUMMARY_LIMIT = 16000
 SUMMARY_INPUT_LIMIT = 60000
 OVERFLOW_MESSAGES = re.compile(
     r"context.length.exceeded|(?:context|input|prompt) (?:window|length)(?: limit)? "
@@ -75,7 +74,9 @@ class SharedSummary:
     def __init__(self, adapter, request, user, state, *, emitter=None):
         self.adapter, self.request, self.user, self.state = adapter, request, user, state
         self.emitter = emitter
-        self.model_id = state["context_policy"]["shared_summary_model_id"].strip()
+        policy = state["context_policy"]
+        self.model_id = policy["shared_summary_model_id"].strip()
+        self.context_percent = policy["shared_summary_context_percent"]
         self.turns = shared_turns(state) if self.model_id and not state.get("worker") else []
         self.checkpoint = None
         self.applied_turns = 0
@@ -108,7 +109,7 @@ class SharedSummary:
         if cache is None:
             cache = await self.adapter.shared_summary_cache(self.state, self.user, self.model_id)
             self.state["shared_summary_cache"] = cache
-        self.checkpoint = next((turn for turn in reversed(self.turns) if turn["key"] in cache), None)
+        self.checkpoint = next((turn for turn in reversed(self.turns) if cache.get(turn["key"])), None)
 
     def apply(self, draft, packet):
         if not self.checkpoint or self.checkpoint["key"] not in self.eligible(draft, packet):
@@ -128,17 +129,22 @@ class SharedSummary:
         candidate = {**draft, "messages": full_messages}
         eligible = self.eligible(candidate, packet)
         start = self.turns.index(self.checkpoint) + 1 if self.checkpoint else 0
+        candidates = self.turns[start:]
+        while candidates and candidates[-1]["key"] not in eligible:
+            candidates.pop()
+        sizes = [sum(len(message["content"]) for message in turn["messages"]) for turn in candidates]
+        budget = sum(sizes) * self.context_percent // 100
         added, length = [], 0
-        for turn in self.turns[start:]:
-            length += sum(len(message["content"]) for message in turn["messages"])
-            if length > SUMMARY_INPUT_LIMIT:
+        for turn, size in zip(candidates, sizes):
+            # Always allow the first whole turn within the hard input limit.
+            if length + size > SUMMARY_INPUT_LIMIT or (added and length + size > budget):
                 break
             added.append(turn)
-        while added and added[-1]["key"] not in eligible:
-            added.pop()
+            length += size
         if not added:
             return False
-        previous = self.state["shared_summary_cache"].get(self.checkpoint["key"]) if self.checkpoint else None
+        cache = self.state["shared_summary_cache"]
+        previous = cache[self.checkpoint["key"]] if self.checkpoint else None
         description = "Не удалось сократить контекст"
         failed = True
         try:
@@ -150,11 +156,11 @@ class SharedSummary:
             except Exception as error:
                 logging.getLogger(__name__).warning("Shared summary unavailable (%s)", type(error).__name__)
                 return False
-            if not 0 < len(summary.strip()) <= SUMMARY_LIMIT:
+            if not summary:
                 return False
             self.checkpoint = added[-1]
             key = self.checkpoint["key"]
-            self.state["shared_summary_cache"][key] = summary
+            cache[key] = summary
             await self.adapter.save_shared_summary(self.state, self.user, self.model_id, key, summary)
             draft["messages"][:] = deepcopy(full_messages)
             applied = self.apply(draft, packet)

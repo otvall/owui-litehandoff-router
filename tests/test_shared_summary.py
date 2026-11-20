@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock
 
+from lite_handoff_router.context_policy import ContextPolicy
 from lite_handoff_router.observation import observe_response
 from lite_handoff_router.shared_summary import (ProviderContextOverflow, SharedSummary, check_initial_stream,
                                                 last_agent_prompt_tokens, last_router_prompt_tokens, prompt_token_count)
@@ -45,7 +46,7 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         current_tool = {"role": "tool", "tool_call_id": "fresh", "content": "CURRENT_RESULT"}
         source += [question, current_tool]
         state = {"source": source, "user_boundary": 6, "audit": [],
-                 "context_policy": {"shared_summary_model_id": "summary"}}
+                 "context_policy": ContextPolicy(shared_summary_model_id="summary").model_dump()}
         adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
                                   generate_shared_summary=AsyncMock(return_value="Common summary"),
                                   save_shared_summary=AsyncMock())
@@ -74,6 +75,30 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         self.assertFalse(await receiver.extend(new_view, packet, original))
         self.assertEqual(emitter.await_count, 2)
 
+    async def test_summary_share_uses_character_count_and_whole_turns(self):
+        first = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b" * 5}]
+        second = [{"role": "user", "content": "c"}, {"role": "assistant", "content": "d"}]
+        third = [{"role": "user", "content": "e"}, {"role": "assistant", "content": "f"}]
+        current = {"role": "user", "content": "current"}
+        past = first + second + third
+        source = past + [current]
+        for settings, covered in (({}, first), ({"shared_summary_context_percent": 1}, first),
+                                  ({"shared_summary_context_percent": 80}, first + second),
+                                  ({"shared_summary_context_percent": 100}, past)):
+            with self.subTest(settings=settings):
+                state = {"source": source, "user_boundary": len(past), "audit": [],
+                         "context_policy": ContextPolicy(shared_summary_model_id="summary", **settings).model_dump()}
+                adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
+                                          generate_shared_summary=AsyncMock(return_value="Summary"),
+                                          save_shared_summary=AsyncMock())
+                summary = SharedSummary(adapter, None, None, state)
+                await summary.load()
+                view = {"messages": deepcopy(source)}
+                self.assertTrue(await summary.extend(view, None, source))
+                adapter.generate_shared_summary.assert_awaited_once_with(
+                    None, None, "summary", covered, None)
+                self.assertEqual(view["messages"][1:], source[len(covered):])
+
     async def test_summary_status_closes_on_failure_and_cancellation(self):
         for failure, text, error in (
             (RuntimeError(), "Не удалось сократить контекст", True),
@@ -82,7 +107,7 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
             with self.subTest(failure=type(failure).__name__):
                 messages = turn("a", "result") + [{"role": "user", "content": "New question"}]
                 state = {"source": messages, "user_boundary": 6, "audit": [],
-                         "context_policy": {"shared_summary_model_id": "summary"}}
+                         "context_policy": ContextPolicy(shared_summary_model_id="summary").model_dump()}
                 adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
                                           generate_shared_summary=AsyncMock(side_effect=failure))
                 emitter = AsyncMock()

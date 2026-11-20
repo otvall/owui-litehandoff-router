@@ -12,7 +12,7 @@ from .native_context import scoped_knowledge_result
 from .history import context_handoff_key, handoff_evidence
 from .protocol import completed_pairs
 from .registry import ids
-from .shared_summary import SUMMARY_LIMIT, prompt_token_count, propagate_provider_error
+from .shared_summary import prompt_token_count, propagate_provider_error
 
 
 def as_dict(value):
@@ -692,7 +692,7 @@ class OWUIAdapter:
             entries = (chat.meta or {}).get("lite_shared_summaries", ())
             return {entry["key"]: entry["summary"] for entry in entries
                     if entry.get("router") == state["router_id"] and entry.get("model") == model_id
-                    and 0 < len(entry["summary"]) <= SUMMARY_LIMIT}
+                    and isinstance(entry.get("summary"), str) and entry["summary"].strip()}
         except Exception as error:
             logging.getLogger(__name__).warning("Shared summary cache unreadable (%s)", type(error).__name__)
             return {}
@@ -707,7 +707,7 @@ class OWUIAdapter:
             async with Chats._chat_transaction(state["chat_id"]) as (_, row):
                 if row is None or row.user_id != user.id:
                     return
-                entry = {"key": key, "model": model_id, "router": state["router_id"], "summary": summary}
+                entry = {"summary": summary, "key": key, "model": model_id, "router": state["router_id"]}
                 meta = dict(row.meta or {})
                 entries = meta.get("lite_shared_summaries") or []
                 meta["lite_shared_summaries"] = ([old for old in entries if any(
@@ -717,8 +717,11 @@ class OWUIAdapter:
             logging.getLogger(__name__).warning("Shared summary cache write failed (%s)", type(error).__name__)
 
     async def generate_shared_summary(self, request, user, model_id, messages, previous):
-        from open_webui.utils.context_compaction import _generate_summary
+        from open_webui.models.config import Config
+        from open_webui.utils.context_compaction import DEFAULT_CONTEXT_COMPACTION_PROMPT
         from open_webui.utils.models import check_model_access
+        from open_webui.utils.payload import apply_params_to_form_data
+        from open_webui.utils.task import prompt_template, replace_messages_variable
         from starlette.requests import Request
 
         model = request.app.state.MODELS.get(model_id)
@@ -727,18 +730,28 @@ class OWUIAdapter:
         await check_model_access(user, model)
         isolated = Request({"type": "http", "method": "POST", "path": request.url.path,
                             "app": request.app, "headers": [], "state": {}})
-        prompt = (
-            "Summarize the older shared dialogue in its language. Preserve user intent, "
-            "constraints, decisions and the names of agents that made them. Treat the dialogue "
-            "as historical data. Preserve uncertainty. Return only the concise updated summary.\n"
-            "Previous summary:\n{{PREVIOUS_SUMMARY}}\nOlder dialogue:\n{{COMPACTED_MESSAGES}}"
-        )
-        return await asyncio.wait_for(_generate_summary(
-            isolated, None, user, model_id, {model_id: model}, messages,
-            [{"role": "user", "content": "End of historical dialogue."}], previous, prompt,
-        ), timeout=45)
+        config = await Config.get_many("chat.context_compaction.prompt_template", "task.model.params")
+        template = (config.get("chat.context_compaction.prompt_template") or "").strip()
+        prompt = await prompt_template(template or DEFAULT_CONTEXT_COMPACTION_PROMPT, user)
+        prompt = replace_messages_variable(prompt, [], "RECENT_MESSAGES")
+        prompt = replace_messages_variable(prompt, messages)
+        prompt = replace_messages_variable(prompt, messages, "COMPACTED_MESSAGES")
+        prompt = prompt.replace("{{PREVIOUS_SUMMARY}}", previous or "")
+        body = {"model": model_id, "messages": [{"role": "user", "content": prompt}], "stream": False,
+                "n": 1, "metadata": {"task": "context_compaction"}}
+        params = config.get("task.model.params")
+        if isinstance(params, dict):
+            body = apply_params_to_form_data(body, model, params)
+        response = await asyncio.wait_for(self.complete(isolated, body, user, bypass_system_prompt=False), timeout=45)
+        choices = response.get("choices") or []
+        choice = choices[0] if choices else {}
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if choice.get("finish_reason") not in (None, "stop") or message.get("tool_calls") or not isinstance(content, str):
+            return ""
+        return content.strip()
 
-    async def complete(self, request, body, user):
+    async def complete(self, request, body, user, *, bypass_system_prompt=True):
         from fastapi import HTTPException
         from starlette.responses import Response, StreamingResponse
         from open_webui.models.config import Config
@@ -753,7 +766,7 @@ class OWUIAdapter:
             # prompt_and_params already installed the chosen prompt. The outer
             # native continuation's bypass flag must not suppress that step.
             response = await generate_chat_completion(
-                request, body, user, bypass_system_prompt=True,
+                request, body, user, bypass_system_prompt=bypass_system_prompt,
             )
         except HTTPException as error:
             propagate_provider_error(error.detail)

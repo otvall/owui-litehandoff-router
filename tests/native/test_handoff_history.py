@@ -68,3 +68,16 @@ class NativeHandoffHistoryTest(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(saved["a1"]["output"], output)
         self.assertEqual(saved["a1"]["error"], before["a1"]["error"])
+
+        summary_state = {**state, "router_id": "router"}
+        await adapter.save_shared_summary(summary_state, actor, "summary", "old", "Older summary")
+        async with Chats._chat_transaction(cid) as (_, row):
+            meta = dict(row.meta)
+            meta["lite_shared_summaries"] = [*meta["lite_shared_summaries"], {
+                "key": "new", "router": "router", "model": "summary", "summary": "Newer summary",
+                "completion_tokens": 9000,
+            }]
+            row.meta = meta
+        self.assertEqual(await adapter.shared_summary_cache(summary_state, actor, "summary"), {
+            "old": "Older summary", "new": "Newer summary",
+        })
