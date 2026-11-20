@@ -26,7 +26,7 @@ class Filter:
 
         @field_validator(
             "priority", "max_parallel_tasks", "parallel_timeout_seconds",
-            "tool_result_history_limit", mode="before")
+            "tool_result_history_limit", "router_summary_trigger_tokens", mode="before")
         @classmethod
         def reject_boolean_number(cls, value):
             if isinstance(value, bool):
@@ -50,6 +50,6 @@ class Filter:
               ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids),
               max_parallel_tasks=self.valves.max_parallel_tasks,
               parallel_timeout_seconds=self.valves.parallel_timeout_seconds,
-              context_policy={"tool_result_history_limit": self.valves.tool_result_history_limit},
+              context_policy=self.valves.model_dump(include=set(ContextPolicy.model_fields)),
               chat_skill_ids=chat_skill_ids)
         return body

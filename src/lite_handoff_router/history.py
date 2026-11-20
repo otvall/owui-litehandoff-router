@@ -7,8 +7,10 @@ import re
 
 from .protocol import completed_pairs, object_value, tool_image, last_user
 from .skills import READERS, SKILL_CATALOG
-from .native_context import native_record, project_native_results
+from .native_context import NATIVE_CONTEXT_NAMES, native_record, project_native_results
 from .tool_history import result_status
+
+HISTORICAL_AGENT_TURN = "historical_agent_turn"
 
 
 def fingerprint(call):
@@ -120,12 +122,16 @@ def skill_is_current(messages, exchange, skill_ids):
     return object_value(call.get("function", {}).get("arguments")).get("id") in skill_ids
 
 
-def reconstruct(messages, selected, *, images=False, positions=None, assistant_content=None):
+def reconstruct(messages, selected, *, images=False, positions=None, assistant_content=None,
+                historical_turns=None):
     calls = {(e.batch, e.call_index) for e in selected}
     results = {e.result_index for e in selected}
+    historical_turns = historical_turns or {}
     output = []
     for i, message in enumerate(messages):
         role = message.get("role")
+        if i in historical_turns:
+            output.extend(historical_turns[i])
         if role == "system" or role == "tool" and i not in results:
             continue
         if tool_image(message):
@@ -172,7 +178,7 @@ def router_projection(state, tool_names, skill_ids, *, window=None):
     native_seen = set()
     for exchange in exchanges:
         name = exchange_name(messages, exchange)
-        if name == SKILL_CATALOG:
+        if name in {SKILL_CATALOG, HISTORICAL_AGENT_TURN}:
             continue
         record = native_record(state, messages[exchange.batch]["tool_calls"][exchange.call_index],
                                messages[exchange.result_index])
@@ -314,13 +320,14 @@ def visualizer_title(call, exchange, messages, owner):
     return " ".join(title.split())[:160] if isinstance(title, str) else ""
 
 
-def agent_dialogue_overrides(state, agent_id, exchanges, boundary):
+def agent_dialogue(state, agent_id, exchanges, boundary):
     """Derive text ownership from the same turn and handoff evidence as Tool history."""
     messages = state["source"]
     batches = {}
     for exchange in exchanges:
         batches.setdefault(exchange.batch, []).append(exchange)
     overrides = {}
+    historical_turns = {}
     starts = [i for i, m in enumerate(messages)
               if m.get("role") == "user" and (i == boundary or not tool_image(m))]
     for start, end in zip(starts, starts[1:] + [len(messages)]):
@@ -363,7 +370,59 @@ def agent_dialogue_overrides(state, agent_id, exchanges, boundary):
                 for ordinal, call in enumerate(message.get("tool_calls") or []):
                     if call.get("function", {}).get("name") == "visualize":
                         titles.append(visualizer_title(call, by_index.get(ordinal), messages, owner))
-    return overrides
+        if start < boundary and author != agent_id:
+            payload, moved = foreign_turn(state, handoff, end, owner, batches, overrides)
+            if payload:
+                call_id = f"lhr_turn_{start}"
+                anchor = max(exchange.result_index for exchange in batches[batch]) + 1
+                historical_turns[anchor] = [
+                    {"role": "assistant", "content": "", "tool_calls": [{
+                        "id": call_id, "type": "function",
+                        "function": {"name": HISTORICAL_AGENT_TURN, "arguments": "{}"},
+                    }]},
+                    {"role": "tool", "tool_call_id": call_id,
+                     "content": json.dumps(payload, ensure_ascii=False)},
+                ]
+                overrides.update(dict.fromkeys(moved, ""))
+    return overrides, historical_turns
+
+
+def foreign_turn(state, handoff, end, owner, batches, overrides):
+    messages = state["source"]
+    events, moved = [], []
+    reply = None
+    excluded = READERS | NATIVE_CONTEXT_NAMES | {HISTORICAL_AGENT_TURN, "lite_delegate", "delegate_task"}
+    for i in range(handoff.batch, end):
+        message = messages[i]
+        if message.get("role") != "assistant":
+            continue
+        group = batches.get(i, ())
+        tool_calls = message.get("tool_calls") or []
+        content = overrides.get(i, message.get("content"))
+        if i > handoff.result_index and content:
+            if (len(group) != len(tool_calls) or any(exchange.executor != owner for exchange in group)
+                    or isinstance(content, list) and any(
+                        not isinstance(part, dict) or part.get("type") != "text" for part in content)):
+                # Keep native dialogue when its attribution or media cannot be represented as text.
+                return None, []
+            moved.append(i)
+            if i == end - 1 and not tool_calls:
+                reply = content
+            else:
+                events.append({"type": "assistant", "content": content})
+        calls = []
+        for exchange in sorted(group, key=lambda item: item.call_index):
+            name = exchange_name(messages, exchange)
+            if exchange.executor == owner and exchange.result_index > handoff.result_index and name not in excluded:
+                result = messages[exchange.result_index]
+                if not native_record(state, tool_calls[exchange.call_index], result):
+                    calls.append({"tool": name, "status": result_status(result.get("content")),
+                                  "result": "[Tool result withheld from other agents]"})
+        if calls:
+            events.append({"type": "tool_calls", "calls": calls})
+    if not events and reply is None:
+        return None, []
+    return {"agent_id": owner["agent_id"], "events": events, "reply": reply}, moved
 
 
 def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
@@ -372,14 +431,14 @@ def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
     exchanges = analyze(messages, current_boundary=boundary, audit=state.get("audit", []))
     selected = [e for e in exchanges if e.executor == {"kind": "agent", "agent_id": agent_id}
                 and exchange_name(messages, e) in tool_names
-                and exchange_name(messages, e) != SKILL_CATALOG
+                and exchange_name(messages, e) not in {SKILL_CATALOG, HISTORICAL_AGENT_TURN}
                 and (exchange_name(messages, e) not in READERS
                      or e.batch > boundary and skill_is_current(messages, e, skill_ids))]
     selected = [e for e in selected if not native_record(
         state, messages[e.batch]["tool_calls"][e.call_index], messages[e.result_index])]
     native_seen = set()
     for exchange in exchanges:
-        if exchange_name(messages, exchange) == SKILL_CATALOG:
+        if exchange_name(messages, exchange) in {SKILL_CATALOG, HISTORICAL_AGENT_TURN}:
             continue
         record = native_record(state, messages[exchange.batch]["tool_calls"][exchange.call_index],
                                messages[exchange.result_index])
@@ -399,9 +458,10 @@ def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
         ):
             image_indices.add(index)
     positions = {}
-    assistant_content = agent_dialogue_overrides(state, agent_id, exchanges, boundary)
+    assistant_content, historical_turns = agent_dialogue(state, agent_id, exchanges, boundary)
     output = project_native_results(reconstruct(
-        messages, selected, images=image_indices, positions=positions, assistant_content=assistant_content), state)
+        messages, selected, images=image_indices, positions=positions, assistant_content=assistant_content,
+        historical_turns=historical_turns), state)
     if window is not None:
         window.capture(output, ordinary_origins(state, selected, positions))
     return output

@@ -3,7 +3,9 @@ import json
 from pathlib import Path
 import unittest
 
-from lite_handoff_router.history import analyze, refresh_source, router_projection, agent_projection
+from lite_handoff_router.history import (HISTORICAL_AGENT_TURN, analyze, refresh_source,
+                                         router_projection, agent_projection)
+from lite_handoff_router.protocol import completed_pairs
 from lite_handoff_router.runtime import begin
 from types import SimpleNamespace
 from tests.test_protocol import call
@@ -58,7 +60,10 @@ class HistoryTest(unittest.TestCase):
         expected = ("Two alternatives are ready.\n[Визуализация «Sales & costs» доступна в исходном чате.]\n"
                     "[Open the slides](slides.html)\n[Визуализация «Volumes» доступна в исходном чате.]\n"
                     + plain_html + "\n" + example)
-        self.assertIn({"role": "assistant", "content": expected}, view)
+        packet = next(json.loads(view[r]["content"]) for i, n, r in completed_pairs(view)
+                      if view[i]["tool_calls"][n]["function"]["name"] == HISTORICAL_AGENT_TURN)
+        self.assertEqual(packet["reply"], expected)
+        self.assertNotIn({"role": "assistant", "content": expected}, view)
         for text in ("Two alternatives are ready.",
                      "[Open the slides](slides.html)", "The total is 42.", "task analyst"):
             self.assertIn(text, str(view))
@@ -76,6 +81,40 @@ class HistoryTest(unittest.TestCase):
         view = agent_projection({"source": history}, "other", set(), set())
         self.assertIn("Text with uncertain attribution.", str(view))
         self.assertIn({"role": "assistant", "content": VIZ_BLOCK}, view)
+        self.assertNotIn(HISTORICAL_AGENT_TURN, str(view))
+
+    def test_foreign_turn_preserves_batches_and_interleaved_prose(self):
+        history = turn("a", "PRIVATE_PAYLOAD")
+        history[3]["tool_calls"].append(call("second", "x", {"private": "PRIVATE_ARGUMENT"}))
+        history.insert(4, {"role": "tool", "tool_call_id": "x", "content": "Error: PRIVATE_ERROR"})
+        history[-1:-1] = [
+            {"role": "assistant", "content": "Checking another source."},
+            {"role": "assistant", "tool_calls": [call("third", "x", {})]},
+            {"role": "tool", "tool_call_id": "x", "content": "OTHER_PRIVATE_PAYLOAD"},
+        ]
+        history.append({"role": "user", "content": "Follow-up"})
+        view = agent_projection({"source": history}, "b", {"lookup"}, set())
+        self.assertEqual(completed_pairs(view), [(1, 0, 2)])
+        self.assertEqual([m["role"] for m in view], ["user", "assistant", "tool", "user"])
+        packet = json.loads(view[2]["content"])
+        self.assertEqual(packet["agent_id"], "a")
+        self.assertEqual(packet["reply"], "Visible answer a")
+        self.assertEqual([event["type"] for event in packet["events"]],
+                         ["tool_calls", "assistant", "tool_calls"])
+        self.assertEqual(packet["events"][1]["content"], "Checking another source.")
+        self.assertEqual([[record["tool"], record["status"]]
+                          for event in packet["events"] for record in event.get("calls", [])],
+                         [["lookup", "completed"], ["second", "error"], ["third", "completed"]])
+        self.assertNotIn("PRIVATE_", str(view))
+
+    def test_foreign_turn_packs_a_reply_without_tools(self):
+        history = turn("a", "unused")
+        del history[3:5]
+        history.append({"role": "user", "content": "Follow-up"})
+        view = agent_projection({"source": history}, "b", set(), set())
+        self.assertEqual(completed_pairs(view), [(1, 0, 2)])
+        self.assertEqual(json.loads(view[2]["content"]), {
+            "agent_id": "a", "events": [], "reply": "Visible answer a"})
 
     def test_only_complete_visualizer_blocks_within_one_message_are_replaced(self):
         malformed = ("@@@VIZ-START\nouter\n" + VIZ_BLOCK + "\n@@@VIZ-END\n"
@@ -102,7 +141,8 @@ class HistoryTest(unittest.TestCase):
         history[-1]["content"] = VIZ_BLOCK + "\nBetween\n" + VIZ_BLOCK
         history += [{"role": "user", "content": "Follow-up"}]
         view = agent_projection({"source": history}, "other", set(), set())
-        self.assertIn({"role": "assistant", "content": VIZ_PLACEHOLDER + "\nBetween\n" + VIZ_PLACEHOLDER}, view)
+        self.assertEqual(json.loads(view[2]["content"])["reply"],
+                         VIZ_PLACEHOLDER + "\nBetween\n" + VIZ_PLACEHOLDER)
 
     def test_router_sees_all_old_results_as_data_without_skill_payloads_or_capabilities(self):
         messages = json.loads(FIXTURE.read_text())["messages"] + [

@@ -5,13 +5,21 @@ import codecs
 import json
 
 
-def observe_response(response, state, executor):
+def observe_response(response, state, executor, *, on_usage=None):
     state["generation"] = state.get("generation", 0) + 1
     generation = state["generation"]
     calls = {}
     finished = False
+    usage = None
 
     def event(data):
+        nonlocal usage
+        if on_usage:
+            reported = data.get("usage")
+            if not reported and data.get("type") == "response.completed":
+                reported = (data.get("response") or {}).get("usage")
+            if isinstance(reported, dict) and reported:
+                usage = reported
         if finished:
             return
         for choice in data.get("choices", []):
@@ -88,5 +96,7 @@ def observe_response(response, state, executor):
             finish()
             if hasattr(original, "aclose"):
                 await original.aclose()
+            if on_usage and usage:
+                await on_usage(usage)
     response.body_iterator = stream()
     return response

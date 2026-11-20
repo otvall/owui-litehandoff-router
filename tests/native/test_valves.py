@@ -43,6 +43,7 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(set(spec["properties"]), {
                 "priority", "max_parallel_tasks", "parallel_timeout_seconds",
                 "base_tool_ids", "base_skill_ids", "tool_result_history_limit",
+                "shared_summary_model_id", "router_summary_trigger_tokens",
             })
             for bad in (True, "0.5", -1):
                 result = await client.post(url + "/update", json={"max_parallel_tasks": bad})
@@ -51,7 +52,7 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
 
             text_values = {
                 "priority": "-2", "max_parallel_tasks": "0", "parallel_timeout_seconds": "300",
-                "tool_result_history_limit": "0",
+                "tool_result_history_limit": "0", "router_summary_trigger_tokens": "40000",
             }
             previous_values = {
                 "tool_result_history_limit": 5, "max_parallel_tasks": 0,
@@ -64,12 +65,17 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(previous.max_parallel_tasks, 0)
             self.assertNotIn("context_summary_enabled", previous.model_dump())
 
-            result = await client.post(url + "/update", json=text_values)
+            result = await client.post(url + "/update", json={**text_values, "shared_summary_model_id": "summary"})
             self.assertEqual(result.status_code, 200, result.text)
             saved = (await client.get(url)).json()
-            self.assertEqual(saved, {name: int(value) for name, value in text_values.items()})
+            self.assertEqual(saved, {**{name: int(value) for name, value in text_values.items()},
+                                     "shared_summary_model_id": "summary"})
             for bad in (True, "1.5", -1):
                 result = await client.post(url + "/update", json={"tool_result_history_limit": bad})
+                self.assertEqual(result.status_code, 400, (bad, result.text))
+            self.assertEqual((await client.get(url)).json(), saved)
+            for bad in (True, "1.5", 0):
+                result = await client.post(url + "/update", json={"router_summary_trigger_tokens": bad})
                 self.assertEqual(result.status_code, 400, (bad, result.text))
             self.assertEqual((await client.get(url)).json(), saved)
             result = await client.post(url + "/update", json={**text_values, "tool_result_history_limit": None})

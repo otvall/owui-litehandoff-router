@@ -41,3 +41,11 @@ class NativeHandoffHistoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await adapter.historical_handoff_statuses(None, {}, {**state, "user_id": other.id}, other), {})
         self.assertEqual(await adapter.historical_handoff_statuses(None, {}, {**state, "message_id": "missing"}, actor), {})
         self.assertEqual(await Chats.get_messages_map_by_chat_id(cid), before)
+        sample = {"prompt_tokens": 900}
+        await adapter.save_router_usage({**state, "message_id": "a1"}, actor, "router-llm", sample)
+        state["context_policy"] = {"shared_summary_model_id": "summary"}
+        self.assertEqual(await adapter.historical_handoff_statuses(None, {}, state, actor), found)
+        self.assertEqual(state["historical_router_usage"], {"router-llm": {"model": "router-llm", **sample}})
+        saved = await Chats.get_messages_map_by_chat_id(cid)
+        self.assertEqual(saved["a1"]["output"], output)
+        self.assertEqual(saved["a1"]["error"], before["a1"]["error"])

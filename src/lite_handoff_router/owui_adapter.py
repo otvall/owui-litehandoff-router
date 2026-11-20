@@ -12,6 +12,7 @@ from .native_context import scoped_knowledge_result
 from .history import context_handoff_key, handoff_evidence
 from .protocol import completed_pairs
 from .registry import ids
+from .shared_summary import SUMMARY_LIMIT, propagate_provider_error
 
 
 def as_dict(value):
@@ -76,6 +77,15 @@ class OWUIAdapter:
             if current not in (messages or {}):
                 current = metadata.get("user_message_id")
             branch = get_message_list(messages or {}, current)
+            if (state.get("context_policy") or {}).get("shared_summary_model_id"):
+                usage = {}
+                for message in branch:
+                    if message.get("id") == state["message_id"] or message.get("role") != "assistant":
+                        continue
+                    sample = (message.get("meta") or {}).get("lite_router_usage")
+                    if isinstance(sample, dict) and isinstance(sample.get("model"), str):
+                        usage[sample["model"]] = sample
+                state["historical_router_usage"] = usage
             return saved_handoff_statuses(branch, convert_output_to_messages)
         except Exception as error:
             logging.getLogger(__name__).warning("Historical terminal evidence unavailable (%s)", type(error).__name__)
@@ -623,6 +633,82 @@ class OWUIAdapter:
         if await self.child(child_id, user):
             await stop_tasks_by_chat_id_endpoint(request, child_id, user=user)
 
+    async def save_router_usage(self, state, user, model_id, sample):
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+
+        if not is_saved_chat_id(state["chat_id"]) or not state["message_id"]:
+            return
+        try:
+            chat = await Chats.get_accessible_chat_by_id(state["chat_id"], user)
+            if chat is None or chat.user_id != user.id:
+                return
+            async with Chats.edit_message_output(chat.id, state["message_id"]) as message:
+                if message is not None and message.get("role") == "assistant":
+                    message["meta"] = {**(message.get("meta") or {}),
+                                       "lite_router_usage": {"model": model_id, **sample}}
+        except Exception as error:
+            logging.getLogger(__name__).warning("Router token usage could not be saved (%s)", type(error).__name__)
+
+    async def shared_summary_cache(self, state, user, model_id):
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+
+        if not is_saved_chat_id(state["chat_id"]):
+            return {}
+        try:
+            chat = await Chats.get_accessible_chat_by_id(state["chat_id"], user)
+            if chat is None or chat.user_id != user.id:
+                return {}
+            entries = (chat.meta or {}).get("lite_shared_summaries", ())
+            return {entry["key"]: entry["summary"] for entry in entries
+                    if entry.get("router") == state["router_id"] and entry.get("model") == model_id
+                    and 0 < len(entry["summary"]) <= SUMMARY_LIMIT}
+        except Exception as error:
+            logging.getLogger(__name__).warning("Shared summary cache unreadable (%s)", type(error).__name__)
+            return {}
+
+    async def save_shared_summary(self, state, user, model_id, key, summary):
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+
+        if not is_saved_chat_id(state["chat_id"]):
+            return
+        try:
+            async with Chats._chat_transaction(state["chat_id"]) as (_, row):
+                if row is None or row.user_id != user.id:
+                    return
+                entry = {"key": key, "model": model_id, "router": state["router_id"], "summary": summary}
+                meta = dict(row.meta or {})
+                entries = meta.get("lite_shared_summaries") or []
+                meta["lite_shared_summaries"] = ([old for old in entries if any(
+                    old.get(field) != entry[field] for field in ("router", "model", "key"))] + [entry])[-8:]
+                row.meta = meta
+        except Exception as error:
+            logging.getLogger(__name__).warning("Shared summary cache write failed (%s)", type(error).__name__)
+
+    async def generate_shared_summary(self, request, user, model_id, messages, previous):
+        from open_webui.utils.context_compaction import _generate_summary
+        from open_webui.utils.models import check_model_access
+        from starlette.requests import Request
+
+        model = request.app.state.MODELS.get(model_id)
+        if not model or model.get("pipe") or model.get("pipeline") or model.get("owned_by") != "openai":
+            raise ValueError("Shared summary requires a real OpenAI-compatible inference model")
+        await check_model_access(user, model)
+        isolated = Request({"type": "http", "method": "POST", "path": request.url.path,
+                            "app": request.app, "headers": [], "state": {}})
+        prompt = (
+            "Summarize the older shared dialogue in its language. Preserve user intent, "
+            "constraints, decisions and the names of agents that made them. Treat the dialogue "
+            "as historical data. Preserve uncertainty. Return only the concise updated summary.\n"
+            "Previous summary:\n{{PREVIOUS_SUMMARY}}\nOlder dialogue:\n{{COMPACTED_MESSAGES}}"
+        )
+        return await asyncio.wait_for(_generate_summary(
+            isolated, None, user, model_id, {model_id: model}, messages,
+            [{"role": "user", "content": "End of historical dialogue."}], previous, prompt,
+        ), timeout=45)
+
     async def complete(self, request, body, user):
         from fastapi import HTTPException
         from starlette.responses import Response, StreamingResponse
@@ -641,15 +727,15 @@ class OWUIAdapter:
                 request, body, user, bypass_system_prompt=True,
             )
         except HTTPException as error:
-            raise RuntimeError(str(error.detail)) from error
+            propagate_provider_error(error.detail)
         if isinstance(response, Response) and response.status_code >= 400:
             raw = getattr(response, "body", b"")
             detail = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
-            raise RuntimeError(detail or f"Provider HTTP {response.status_code}")
+            propagate_provider_error(detail or f"Provider HTTP {response.status_code}")
         if isinstance(response, StreamingResponse):
             return response
         if isinstance(response, Response):
             response = json.loads(response.body)
         if response is None or (isinstance(response, dict) and response.get("error")):
-            raise RuntimeError(str(response or "Provider returned no response"))
+            propagate_provider_error(response or "Provider returned no response")
         return response

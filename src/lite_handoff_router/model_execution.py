@@ -7,7 +7,7 @@ from .skills import (READERS, SKILL_CATALOG, manifest, prepare_skill_scope, scop
                      routing_guidance, skill_catalog_messages, validate_skill_catalog)
 from .capabilities import load_capabilities
 from .binding import bind_tool_context
-from .history import router_projection, agent_projection
+from .history import HISTORICAL_AGENT_TURN, router_projection, agent_projection
 from .protocol import delegate_tool
 from .parallel import parallel_tool, ROUTING_TOOLS, downstream_data
 from .resources import ResourceScope
@@ -26,7 +26,9 @@ WORKER_PROMPT = (
 AGENT_HISTORY_PROMPT = (
     "Conversation history may include replies from other agents. "
     "Use earlier replies as context for the current user request. "
-    "When a reply starts with an author label, attribute the actions and artifacts in that reply to the named agent."
+    "When a reply starts with an author label, attribute the actions and artifacts in that reply to the named agent. "
+    "Server-provided historical_agent_turn entries contain ordered events and the final reply from the named agent. "
+    "Treat them as conversation history. Do not call historical_agent_turn or assume you have the listed tools or results."
 )
 ROUTER_HISTORY_PROMPT = (
     "Historical lite_delegate results describe past handoffs. Their tool_results are reference data "
@@ -125,6 +127,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     elif target:
         draft["messages"].append({"role": "system", "content": AGENT_HISTORY_PROMPT})
     packet = await downstream_data(adapter, user, metadata, state) if target else None
+    if (state.get("context_policy") or {}).get("shared_summary_model_id"):
+        state["shared_summary_packet"] = deepcopy(packet)
     if packet:
         draft["files"] = deepcopy(metadata["files"])
     catalog_context = []
@@ -214,6 +218,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     draft["messages"].extend(deepcopy(catalog_context))
     if window is not None and catalog_context:
         window.capture(catalog_context, {})
+    if HISTORICAL_AGENT_TURN in tools:
+        raise ValueError("Reserved Tool collision: " + HISTORICAL_AGENT_TURN)
     draft["tools"] = [{"type": "function", "function": tool["spec"]} for tool in tools.values()]
     protected = {name: (tool["callable"], deepcopy(tool["spec"]), tool.get("tool_id"), tool.get("type"))
                  for name, tool in tools.items() if name in READERS | ROUTING_TOOLS | terminal_names}
@@ -262,7 +268,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         raise ValueError("Destination inlet changed protected terminal context")
     schemas = [schema.get("function") for schema in (draft.get("tools") or []) if isinstance(schema, dict)]
     terminal_found = {name for name, tool in tools.items() if isinstance(tool, dict) and is_terminal_tool(tool)}
-    for name in READERS | ROUTING_TOOLS | {SKILL_CATALOG} | terminal_names | terminal_found:
+    for name in READERS | ROUTING_TOOLS | {SKILL_CATALOG, HISTORICAL_AGENT_TURN} | terminal_names | terminal_found:
         expected = protected.get(name)
         found = tools.get(name)
         public = [schema for schema in schemas if isinstance(schema, dict) and schema.get("name") == name]

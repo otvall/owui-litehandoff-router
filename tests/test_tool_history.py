@@ -3,8 +3,9 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from lite_handoff_router.history import agent_projection, router_projection
+from lite_handoff_router.history import HISTORICAL_AGENT_TURN, agent_projection, router_projection
 from lite_handoff_router.model_execution import prepare_model
+from lite_handoff_router.protocol import completed_pairs
 from lite_handoff_router.runtime import begin
 from lite_handoff_router.native_context import capture_native_context
 from lite_handoff_router.tool_history import ToolResultWindow
@@ -36,7 +37,17 @@ class ToolHistoryTest(unittest.TestCase):
                 self.assertEqual("OLD_HTML" in text, old)
                 self.assertEqual("NEW_HTML" in text, new)
                 self.assertNotIn("FOREIGN_HTML", text)
-                self.assertEqual(sum(m.get("role") == "tool" for m in messages), 2)
+                pairs = completed_pairs(messages)
+                self.assertEqual(len(pairs), 3)
+                batch, ordinal, result = pairs[1]
+                self.assertEqual(messages[batch]["tool_calls"][ordinal]["function"], {
+                    "name": HISTORICAL_AGENT_TURN, "arguments": "{}"})
+                self.assertEqual(json.loads(messages[result]["content"]), {
+                    "agent_id": "b", "reply": "Visible answer b",
+                    "events": [{"type": "tool_calls", "calls": [
+                        {"tool": "lookup", "status": "completed",
+                         "result": "[Tool result withheld from other agents]"},
+                    ]}]})
         self.assertEqual(state, original)
 
     def test_router_shares_one_window_between_handoff_and_current(self):
