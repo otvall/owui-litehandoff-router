@@ -103,6 +103,7 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
     async def test_summary_uses_native_template_without_router_output_limit(self):
         from open_webui.models.config import Config
         from open_webui.utils import chat, models
+        from starlette.responses import StreamingResponse
 
         request = SimpleNamespace(
             url=SimpleNamespace(path="/api/chat/completions"),
@@ -110,12 +111,25 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
         )
         messages = [{"role": "user", "content": "Old question"}]
         custom = "Custom {{PREVIOUS_SUMMARY}} / {{COMPACTED_MESSAGES}} / {{RECENT_MESSAGES}}"
-        for template, reason, task_params in (("", "stop", {}), (custom, "length", {"max_tokens": 999})):
+        for template, reason, task_params in (
+            ("", "stop", {}),
+            (custom, "length", {"max_tokens": 999}),
+            ("", "stream", {"stream": True, "stream_response": True}),
+        ):
             with self.subTest(template=template, reason=reason):
                 config = {"chat.context_compaction.prompt_template": template, "task.model.params": task_params}
                 response = {"choices": [{"message": {"content": " Result "}, "finish_reason": reason}]}
                 if reason == "stop":
                     response = [response]
+                if reason == "stream":
+                    async def chunks():
+                        data = ('data: {"choices":[{"delta":{"content":"Result"}}]}\r\n\r\n'
+                                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                                'data: [DONE]\n\n').encode()
+                        yield data[:21]
+                        yield data[21:]
+
+                    response = StreamingResponse(chunks(), media_type="text/event-stream")
                 with (
                     patch.object(chat, "generate_openai_chat_completion", AsyncMock(return_value=response)) as provider,
                     patch.object(Config, "get_many", AsyncMock(return_value=config)),
@@ -131,6 +145,7 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                         summary = await operation
                 access.assert_awaited_once()
                 body = provider.await_args.kwargs["form_data"]
+                self.assertIs(body["stream"], False)
                 prompt = body["messages"][0]["content"]
                 self.assertNotIn("max_completion_tokens", body)
                 if template:

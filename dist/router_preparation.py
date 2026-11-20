@@ -1527,6 +1527,59 @@ from uuid import UUID
 def as_dict(value):
     return value.model_dump() if hasattr(value, 'model_dump') else dict(value or {})
 
+async def collect_summary_stream(stream):
+    """Consume an unexpected provider SSE response without streaming it into the chat."""
+    from open_webui.routers.openai import convert_responses_result
+    pending = b''
+    received = 0
+    parts = []
+    finish_reason = None
+    message = {}
+    try:
+        async for chunk in stream:
+            chunk = chunk.encode() if isinstance(chunk, str) else chunk
+            received += len(chunk)
+            if received > 4 * 1024 * 1024:
+                raise SummaryGenerationError('Поток сводки превысил предел в 4 МиБ.')
+            lines = (pending + chunk).split(b'\n')
+            pending = lines.pop()
+            for line in lines:
+                if not line.startswith(b'data:'):
+                    continue
+                data = line[5:].strip()
+                if data == b'[DONE]':
+                    finish_reason = finish_reason or 'stop'
+                    break
+                if not data:
+                    continue
+                event = json.loads(data)
+                if event.get('error'):
+                    propagate_provider_error(event['error'])
+                kind = event.get('type')
+                if kind in ('response.completed', 'response.incomplete'):
+                    return convert_responses_result(event['response'])
+                if kind in ('error', 'response.failed'):
+                    propagate_provider_error((event.get('response') or {}).get('error') or event)
+                for choice in event.get('choices') or ():
+                    if choice.get('index', 0) != 0:
+                        continue
+                    delta = choice.get('delta') or {}
+                    if isinstance(delta.get('content'), str):
+                        parts.append(delta['content'])
+                    if delta.get('tool_calls') or delta.get('function_call'):
+                        message['tool_calls'] = True
+                    finish_reason = choice.get('finish_reason') or finish_reason
+            else:
+                continue
+            break
+    finally:
+        if hasattr(stream, 'aclose'):
+            await stream.aclose()
+    if not finish_reason:
+        raise SummaryGenerationError('Поток сводки завершился без признака окончания.')
+    message['content'] = ''.join(parts)
+    return {'choices': [{'message': message, 'finish_reason': finish_reason}]}
+
 def register_model_tool(registry, name, tool, namespace):
     alias = bounded_tool_name(name)
     while alias in registry:
@@ -2147,13 +2200,12 @@ class OWUIAdapter:
         params = config.get('task.model.params')
         if isinstance(params, dict):
             body = apply_params_to_form_data(body, model, params)
-        response = await asyncio.wait_for(self.complete(isolated, body, user, bypass_system_prompt=False), timeout=45)
-        if isinstance(response, list) and len(response) == 1:
-            response = response[0]
-        if isinstance(response, StreamingResponse):
-            if hasattr(response.body_iterator, 'aclose'):
-                await response.body_iterator.aclose()
-            raise SummaryGenerationError('Модель суммаризации вернула поток вместо обычного ответа.')
+        async with asyncio.timeout(45):
+            response = await self.complete(isolated, body, user, bypass_system_prompt=False)
+            if isinstance(response, list) and len(response) == 1:
+                response = response[0]
+            if isinstance(response, StreamingResponse):
+                response = await collect_summary_stream(response.body_iterator)
         if not isinstance(response, dict):
             raise SummaryGenerationError('Провайдер вернул ответ сводки в неожиданном формате.')
         if response.get('error'):
