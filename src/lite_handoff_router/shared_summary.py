@@ -25,6 +25,10 @@ class ProviderContextOverflow(RuntimeError):
     pass
 
 
+class SummaryGenerationError(RuntimeError):
+    """A diagnostic that is safe to display in the chat."""
+
+
 def propagate_provider_error(detail):
     text = str(detail)
     if OVERFLOW_MESSAGES.search(text):
@@ -125,7 +129,7 @@ class SharedSummary:
         self.applied_turns = count
         return True
 
-    async def extend(self, draft, packet, full_messages):
+    async def extend(self, draft, packet, full_messages, *, trigger):
         candidate = {**draft, "messages": full_messages}
         eligible = self.eligible(candidate, packet)
         start = self.turns.index(self.checkpoint) + 1 if self.checkpoint else 0
@@ -142,21 +146,34 @@ class SharedSummary:
             added.append(turn)
             length += size
         if not added:
+            await self.status(f"Сжатие пропущено ({trigger}). Нет доступных целых ходов в пределах лимита входа.",
+                              done=True)
             return False
         cache = self.state["shared_summary_cache"]
         previous = cache[self.checkpoint["key"]] if self.checkpoint else None
         description = "Не удалось сократить контекст"
         failed = True
         try:
-            await self.status("Сжимаю контекст…", done=False)
+            await self.status(f"Сжимаю контекст… {trigger}. Модель {self.model_id}. "
+                              f"Ходов {len(added)}, символов {length}.", done=False)
             try:
                 summary = await self.adapter.generate_shared_summary(
                     self.request, self.user, self.model_id,
                     [message for turn in added for message in turn["messages"]], previous)
             except Exception as error:
                 logging.getLogger(__name__).warning("Shared summary unavailable (%s)", type(error).__name__)
+                if isinstance(error, SummaryGenerationError):
+                    reason = str(error)
+                elif isinstance(error, TimeoutError):
+                    reason = "Модель суммаризации не ответила за 45 секунд."
+                elif isinstance(error, ProviderContextOverflow):
+                    reason = "Переполнено окно модели суммаризации."
+                else:
+                    reason = f"Ошибка запроса к модели суммаризации ({type(error).__name__})."
+                description = f"{description}. {reason}"
                 return False
             if not summary:
+                description += ". Модель вернула пустую сводку."
                 return False
             self.checkpoint = added[-1]
             key = self.checkpoint["key"]
@@ -165,8 +182,10 @@ class SharedSummary:
             draft["messages"][:] = deepcopy(full_messages)
             applied = self.apply(draft, packet)
             if applied:
-                description = "Контекст сокращён"
+                description = f"Контекст сокращён. Ходов в общей сводке {self.applied_turns}."
                 failed = False
+            else:
+                description += ". Граница сводки не совпала с историей запроса."
             return applied
         except CancelledError:
             description = "Сжатие контекста отменено"

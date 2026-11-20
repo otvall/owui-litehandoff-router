@@ -68,7 +68,9 @@ class Pipe:
                     previous_tokens = last_router_prompt_tokens(state, model)
                     threshold = policy["router_summary_trigger_tokens"]
                 if previous_tokens is not None and previous_tokens > threshold:
-                    await summary.extend(draft, packet, full_messages)
+                    executor_name = "Агент" if target else "Роутер"
+                    await summary.extend(draft, packet, full_messages,
+                                         trigger=f"{executor_name}, предыдущий вход {previous_tokens} токенов, порог {threshold}")
         except BaseException:
             sessions = __request__.scope.get("lite_handoff_mcp", {})
             await close_mcp_sessions(sessions.pop(key) for key in list(sessions) if key not in sessions_before)
@@ -96,7 +98,9 @@ class Pipe:
         try:
             response = await complete_prepared()
         except ProviderContextOverflow:
-            if not summary_enabled or not await summary.extend(draft, packet, full_messages):
+            if not summary_enabled or not await summary.extend(
+                draft, packet, full_messages, trigger="Переполнение контекста основного запроса",
+            ):
                 raise
             response = await complete_prepared()
         executor = {"kind": "agent", "agent_id": target} if target else {"kind": "router"}

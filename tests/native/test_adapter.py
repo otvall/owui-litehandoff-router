@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from lite_handoff_router.owui_adapter import OWUIAdapter
+from lite_handoff_router.shared_summary import SummaryGenerationError
 
 
 class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
@@ -119,8 +120,13 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                     patch.object(Config, "get", AsyncMock(return_value=False)),
                     patch.object(models, "check_model_access", AsyncMock()) as access,
                 ):
-                    summary = await OWUIAdapter().generate_shared_summary(
+                    operation = OWUIAdapter().generate_shared_summary(
                         request, SimpleNamespace(id="u", role="admin"), "llm", messages, "Earlier")
+                    if reason == "length":
+                        with self.assertRaisesRegex(SummaryGenerationError, "finish_reason=length"):
+                            await operation
+                    else:
+                        summary = await operation
                 access.assert_awaited_once()
                 body = provider.await_args.kwargs["form_data"]
                 prompt = body["messages"][0]["content"]
@@ -128,7 +134,6 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                 if template:
                     self.assertEqual(prompt, "Custom Earlier / USER: Old question / ")
                     self.assertEqual(body["max_tokens"], 999)
-                    self.assertEqual(summary, "")
                 else:
                     self.assertIn("Summarize the conversation history", prompt)
                     self.assertIn("Earlier", prompt)

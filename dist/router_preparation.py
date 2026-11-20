@@ -1247,6 +1247,9 @@ OVERFLOW_MESSAGES = re.compile('context.length.exceeded|(?:context|input|prompt)
 class ProviderContextOverflow(RuntimeError):
     pass
 
+class SummaryGenerationError(RuntimeError):
+    """A diagnostic that is safe to display in the chat."""
+
 def propagate_provider_error(detail):
     text = str(detail)
     if OVERFLOW_MESSAGES.search(text):
@@ -1337,7 +1340,7 @@ class SharedSummary:
         self.applied_turns = count
         return True
 
-    async def extend(self, draft, packet, full_messages):
+    async def extend(self, draft, packet, full_messages, *, trigger):
         candidate = {**draft, 'messages': full_messages}
         eligible = self.eligible(candidate, packet)
         start = self.turns.index(self.checkpoint) + 1 if self.checkpoint else 0
@@ -1353,19 +1356,30 @@ class SharedSummary:
             added.append(turn)
             length += size
         if not added:
+            await self.status(f'Сжатие пропущено ({trigger}). Нет доступных целых ходов в пределах лимита входа.', done=True)
             return False
         cache = self.state['shared_summary_cache']
         previous = cache[self.checkpoint['key']] if self.checkpoint else None
         description = 'Не удалось сократить контекст'
         failed = True
         try:
-            await self.status('Сжимаю контекст…', done=False)
+            await self.status(f'Сжимаю контекст… {trigger}. Модель {self.model_id}. Ходов {len(added)}, символов {length}.', done=False)
             try:
                 summary = await self.adapter.generate_shared_summary(self.request, self.user, self.model_id, [message for turn in added for message in turn['messages']], previous)
             except Exception as error:
                 logging.getLogger(__name__).warning('Shared summary unavailable (%s)', type(error).__name__)
+                if isinstance(error, SummaryGenerationError):
+                    reason = str(error)
+                elif isinstance(error, TimeoutError):
+                    reason = 'Модель суммаризации не ответила за 45 секунд.'
+                elif isinstance(error, ProviderContextOverflow):
+                    reason = 'Переполнено окно модели суммаризации.'
+                else:
+                    reason = f'Ошибка запроса к модели суммаризации ({type(error).__name__}).'
+                description = f'{description}. {reason}'
                 return False
             if not summary:
+                description += '. Модель вернула пустую сводку.'
                 return False
             self.checkpoint = added[-1]
             key = self.checkpoint['key']
@@ -1374,8 +1388,10 @@ class SharedSummary:
             draft['messages'][:] = deepcopy(full_messages)
             applied = self.apply(draft, packet)
             if applied:
-                description = 'Контекст сокращён'
+                description = f'Контекст сокращён. Ходов в общей сводке {self.applied_turns}.'
                 failed = False
+            else:
+                description += '. Граница сводки не совпала с историей запроса.'
             return applied
         except CancelledError:
             description = 'Сжатие контекста отменено'
@@ -2068,8 +2084,11 @@ class OWUIAdapter:
         from starlette.requests import Request
         model = request.app.state.MODELS.get(model_id)
         if not model or model.get('pipe') or model.get('pipeline') or (model.get('owned_by') != 'openai'):
-            raise ValueError('Shared summary requires a real OpenAI-compatible inference model')
-        await check_model_access(user, model)
+            raise SummaryGenerationError('Модель суммаризации не найдена или несовместима с OpenAI API.')
+        try:
+            await check_model_access(user, model)
+        except Exception as error:
+            raise SummaryGenerationError('Open WebUI не подтвердил доступ к модели суммаризации.') from error
         isolated = Request({'type': 'http', 'method': 'POST', 'path': request.url.path, 'app': request.app, 'headers': [], 'state': {}})
         config = await Config.get_many('chat.context_compaction.prompt_template', 'task.model.params')
         template = (config.get('chat.context_compaction.prompt_template') or '').strip()
@@ -2087,9 +2106,13 @@ class OWUIAdapter:
         choice = choices[0] if choices else {}
         message = choice.get('message') or {}
         content = message.get('content')
-        if choice.get('finish_reason') not in (None, 'stop') or message.get('tool_calls') or (not isinstance(content, str)):
-            return ''
-        return content.strip()
+        if choice.get('finish_reason') == 'length':
+            raise SummaryGenerationError('Генерация сводки достигла лимита модели (finish_reason=length).')
+        if message.get('tool_calls'):
+            raise SummaryGenerationError('Модель суммаризации вернула вызов инструмента.')
+        if choice.get('finish_reason') not in (None, 'stop'):
+            raise SummaryGenerationError('Провайдер прервал генерацию сводки.')
+        return content.strip() if isinstance(content, str) else ''
 
     async def complete(self, request, body, user, *, bypass_system_prompt=True):
         from fastapi import HTTPException

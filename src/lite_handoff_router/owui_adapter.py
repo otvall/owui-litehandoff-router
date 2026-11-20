@@ -12,7 +12,7 @@ from .native_context import scoped_knowledge_result
 from .history import context_handoff_key, handoff_evidence
 from .protocol import completed_pairs
 from .registry import ids
-from .shared_summary import prompt_token_count, propagate_provider_error
+from .shared_summary import SummaryGenerationError, prompt_token_count, propagate_provider_error
 
 
 def as_dict(value):
@@ -726,8 +726,11 @@ class OWUIAdapter:
 
         model = request.app.state.MODELS.get(model_id)
         if not model or model.get("pipe") or model.get("pipeline") or model.get("owned_by") != "openai":
-            raise ValueError("Shared summary requires a real OpenAI-compatible inference model")
-        await check_model_access(user, model)
+            raise SummaryGenerationError("Модель суммаризации не найдена или несовместима с OpenAI API.")
+        try:
+            await check_model_access(user, model)
+        except Exception as error:
+            raise SummaryGenerationError("Open WebUI не подтвердил доступ к модели суммаризации.") from error
         isolated = Request({"type": "http", "method": "POST", "path": request.url.path,
                             "app": request.app, "headers": [], "state": {}})
         config = await Config.get_many("chat.context_compaction.prompt_template", "task.model.params")
@@ -747,9 +750,13 @@ class OWUIAdapter:
         choice = choices[0] if choices else {}
         message = choice.get("message") or {}
         content = message.get("content")
-        if choice.get("finish_reason") not in (None, "stop") or message.get("tool_calls") or not isinstance(content, str):
-            return ""
-        return content.strip()
+        if choice.get("finish_reason") == "length":
+            raise SummaryGenerationError("Генерация сводки достигла лимита модели (finish_reason=length).")
+        if message.get("tool_calls"):
+            raise SummaryGenerationError("Модель суммаризации вернула вызов инструмента.")
+        if choice.get("finish_reason") not in (None, "stop"):
+            raise SummaryGenerationError("Провайдер прервал генерацию сводки.")
+        return content.strip() if isinstance(content, str) else ""
 
     async def complete(self, request, body, user, *, bypass_system_prompt=True):
         from fastapi import HTTPException

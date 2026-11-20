@@ -55,16 +55,18 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         await summary.load()
         view = {"messages": source[:6] + [packet, question, current_tool]}
         original = deepcopy(view["messages"])
-        self.assertTrue(await summary.extend(view, packet, original))
+        self.assertTrue(await summary.extend(view, packet, original, trigger="Порог"))
         self.assertEqual(view["messages"][1:], [packet, question, current_tool])
         self.assertEqual(state["source"], source)
         summary_input = adapter.generate_shared_summary.await_args.args[3]
         self.assertIn("Visible answer a", str(summary_input))
         self.assertNotIn("PRIVATE_RESULT", str(summary_input))
+        summary_start = emitter.await_args_list[0].args[0]["data"]["description"]
+        self.assertTrue(summary_start.startswith("Сжимаю контекст… Порог. Модель summary. Ходов 1, символов "))
         self.assertEqual([event.args[0] for event in emitter.await_args_list], [
-            {"type": "status", "data": {"action": "lite_shared_summary", "description": "Сжимаю контекст…",
+            {"type": "status", "data": {"action": "lite_shared_summary", "description": summary_start,
                                         "done": False, "error": False}},
-            {"type": "status", "data": {"action": "lite_shared_summary", "description": "Контекст сокращён",
+            {"type": "status", "data": {"action": "lite_shared_summary", "description": "Контекст сокращён. Ходов в общей сводке 1.",
                                         "done": True, "error": False}},
         ])
         receiver = SharedSummary(adapter, None, None, state, emitter=emitter)
@@ -72,8 +74,9 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         new_view = {"messages": deepcopy(original)}
         self.assertTrue(receiver.apply(new_view, packet))
         self.assertEqual(new_view["messages"], view["messages"])
-        self.assertFalse(await receiver.extend(new_view, packet, original))
-        self.assertEqual(emitter.await_count, 2)
+        self.assertFalse(await receiver.extend(new_view, packet, original, trigger="Порог"))
+        self.assertEqual(emitter.await_count, 3)
+        self.assertIn("Сжатие пропущено", emitter.await_args.args[0]["data"]["description"])
 
     async def test_summary_share_uses_character_count_and_whole_turns(self):
         first = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b" * 5}]
@@ -94,14 +97,15 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
                 summary = SharedSummary(adapter, None, None, state)
                 await summary.load()
                 view = {"messages": deepcopy(source)}
-                self.assertTrue(await summary.extend(view, None, source))
+                self.assertTrue(await summary.extend(view, None, source, trigger="Порог"))
                 adapter.generate_shared_summary.assert_awaited_once_with(
                     None, None, "summary", covered, None)
                 self.assertEqual(view["messages"][1:], source[len(covered):])
 
     async def test_summary_status_closes_on_failure_and_cancellation(self):
         for failure, text, error in (
-            (RuntimeError(), "Не удалось сократить контекст", True),
+            (RuntimeError(), "Не удалось сократить контекст. Ошибка запроса к модели суммаризации (RuntimeError).", True),
+            (TimeoutError(), "Не удалось сократить контекст. Модель суммаризации не ответила за 45 секунд.", True),
             (CancelledError(), "Сжатие контекста отменено", False),
         ):
             with self.subTest(failure=type(failure).__name__):
@@ -113,7 +117,7 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
                 emitter = AsyncMock()
                 summary = SharedSummary(adapter, None, None, state, emitter=emitter)
                 await summary.load()
-                operation = summary.extend({"messages": deepcopy(messages)}, None, messages)
+                operation = summary.extend({"messages": deepcopy(messages)}, None, messages, trigger="Порог")
                 if isinstance(failure, CancelledError):
                     with self.assertRaises(CancelledError):
                         await operation
