@@ -421,7 +421,7 @@ class ContextPolicy(BaseModel):
     tool_result_history_limit: int | None = Field(default=None, ge=0)
     shared_summary_model_id: str = ''
     router_summary_trigger_tokens: int = Field(default=40000, gt=0)
-    agent_token_count_enabled: bool = Field(default=False, description="Measure agent requests with the provider's tokenize endpoint")
+    agent_summary_trigger_tokens: int = Field(default=40000, gt=0)
 
 # Source: runtime
 """Trusted lifecycle state shared by independent uploads through the ASGI scope.
@@ -2069,6 +2069,10 @@ def last_router_prompt_tokens(state, model_id):
     current = prompt_token_count((state.get('router_usage') or {}).get(model_id))
     return current or prompt_token_count((state.get('historical_router_usage') or {}).get(model_id))
 
+def last_agent_prompt_tokens(state, agent_id, model_id):
+    key = (agent_id, model_id)
+    return state.get('agent_prompt_tokens', {}).get(key) or state.get('historical_agent_prompt_tokens', {}).get(key)
+
 async def check_initial_stream(response):
     if not hasattr(response, 'body_iterator'):
         return response
@@ -2186,14 +2190,28 @@ class OWUIAdapter:
                 current = metadata.get('user_message_id')
             branch = get_message_list(messages or {}, current)
             if (state.get('context_policy') or {}).get('shared_summary_model_id'):
-                usage = {}
+                router_usage, agent_usage = ({}, {})
+                resume = getattr(getattr(request, 'state', None), 'tool_approval_resume', None)
+                resumed_current = isinstance(resume, (tuple, list)) and tuple(resume[:2]) == (state['chat_id'], state['message_id'])
                 for message in branch:
-                    if message.get('id') == state['message_id'] or message.get('role') != 'assistant':
+                    if message.get('role') != 'assistant':
                         continue
-                    sample = (message.get('meta') or {}).get('lite_router_usage')
-                    if isinstance(sample, dict) and isinstance(sample.get('model'), str):
-                        usage[sample['model']] = sample
-                state['historical_router_usage'] = usage
+                    meta = message.get('meta') or {}
+                    is_current = message.get('id') == state['message_id']
+                    if not is_current:
+                        sample = meta.get('lite_router_usage')
+                        if isinstance(sample, dict) and isinstance(sample.get('model'), str):
+                            router_usage[sample['model']] = sample
+                    if is_current and (not resumed_current):
+                        continue
+                    samples = meta.get('lite_agent_usage')
+                    if isinstance(samples, list):
+                        for sample in samples:
+                            tokens = prompt_token_count(sample)
+                            if tokens is not None and isinstance(sample.get('agent_id'), str) and isinstance(sample.get('model'), str):
+                                agent_usage[sample['agent_id'], sample['model']] = tokens
+                state['historical_router_usage'] = router_usage
+                state['historical_agent_prompt_tokens'] = agent_usage
             return saved_handoff_statuses(branch, convert_output_to_messages)
         except Exception as error:
             logging.getLogger(__name__).warning('Historical terminal evidence unavailable (%s)', type(error).__name__)
@@ -2654,43 +2672,14 @@ class OWUIAdapter:
         if await self.child(child_id, user):
             await stop_tasks_by_chat_id_endpoint(request, child_id, user=user)
 
-    async def measure_agent_tokens(self, request, draft, user):
-        from aiohttp import ClientTimeout
-        from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
-        from open_webui.routers.openai import get_openai_connection, get_session
-        from open_webui.utils.headers import get_headers_and_cookies
-        from open_webui.utils.model_ids import strip_provider_model_prefix
-        logger = logging.getLogger(__name__)
-        agent = draft['model']
-        runtime = request.app.state.MODELS.get(agent, {})
-        model = (runtime.get('info') or {}).get('base_model_id') or agent
-        candidates = getattr(request.app.state, 'OPENAI_MODELS', None) or {}
-        connection = candidates.get(model) or {}
-        if 'urlIdx' not in connection:
-            logger.info('Agent token count unavailable for %s (no OpenAI connection)', agent)
-            return
-        try:
-            url, key, config = await get_openai_connection(connection['urlIdx'])
-            headers, cookies = await get_headers_and_cookies(request, url, key, config, user=user)
-            payload = {name: draft[name] for name in ('messages', 'tools', 'tool_choice', 'reasoning_effort', 'chat_template_kwargs', 'continue_final_message', 'add_generation_prompt') if name in draft}
-            payload['model'] = strip_provider_model_prefix(model, config.get('prefix_id'))
-            session = await get_session()
-            async with session.post(url.rstrip('/') + '/tokenize', json=payload, headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_SSL, timeout=ClientTimeout(total=5)) as response:
-                if response.status != 200:
-                    logger.info('Agent token count unavailable for %s (HTTP %s)', agent, response.status)
-                    return
-                result = await response.json()
-            count = result.get('count') if isinstance(result, dict) else None
-            if type(count) is int and count > 0:
-                logger.info('Agent input tokens: agent=%s model=%s count=%d', agent, model, count)
-            else:
-                logger.info('Agent token count unavailable for %s (invalid count)', agent)
-        except Exception as error:
-            logger.info('Agent token count unavailable for %s (%s)', agent, type(error).__name__)
-
-    async def save_router_usage(self, state, user, model_id, sample):
+    async def save_prompt_usage(self, state, user, model_id, prompt_tokens, *, agent_id=None, generation=None):
         from open_webui.models.chats import Chats
         from open_webui.utils.chat_id import is_saved_chat_id
+        logger = logging.getLogger(__name__)
+        sample = {'model': model_id, 'prompt_tokens': prompt_tokens}
+        if agent_id:
+            sample.update(agent_id=agent_id, generation=generation, request_id=state['request_id'])
+            logger.info('Agent input tokens: agent=%s model=%s request=%s generation=%s prompt_tokens=%d', agent_id, model_id, state['request_id'], generation, prompt_tokens)
         if not is_saved_chat_id(state['chat_id']) or not state['message_id']:
             return
         try:
@@ -2699,9 +2688,17 @@ class OWUIAdapter:
                 return
             async with Chats.edit_message_output(chat.id, state['message_id']) as message:
                 if message is not None and message.get('role') == 'assistant':
-                    message['meta'] = {**(message.get('meta') or {}), 'lite_router_usage': {'model': model_id, **sample}}
+                    meta = {**(message.get('meta') or {})}
+                    if agent_id:
+                        previous = meta.get('lite_agent_usage')
+                        entries = previous if isinstance(previous, list) else []
+                        updated = [entry for entry in entries if not isinstance(entry, dict) or (entry.get('request_id'), entry.get('generation')) != (state['request_id'], generation)]
+                        meta['lite_agent_usage'] = [*updated, sample]
+                    else:
+                        meta['lite_router_usage'] = sample
+                    message['meta'] = meta
         except Exception as error:
-            logging.getLogger(__name__).warning('Router token usage could not be saved (%s)', type(error).__name__)
+            logger.warning('Prompt token usage could not be saved (%s)', type(error).__name__)
 
     async def shared_summary_cache(self, state, user, model_id):
         from open_webui.models.chats import Chats
@@ -2897,15 +2894,26 @@ class Pipe:
         summary_enabled = bool(policy['shared_summary_model_id'].strip()) and (not state.get('worker'))
         sessions_before = set(__request__.scope.get('lite_handoff_mcp', {}))
         try:
+            if target and summary_enabled and (state.get('historical_handoff_statuses') is None):
+                state['historical_handoff_statuses'] = await adapter.historical_handoff_statuses(__request__, __metadata__, state, user)
             draft, tools = await prepare_model(adapter, __request__, body, user, metadata_draft(__metadata__), state, self.valves.orchestrator_model_id, {'__event_emitter__': __event_emitter__, '__event_call__': __event_call__, '__oauth_token__': __oauth_token__}, target=target)
+            model = draft['model']
+            if target:
+                info = (draft['metadata'].get('model') or {}).get('info') or {}
+                model = info.get('base_model_id') or model
             if summary_enabled:
                 summary = SharedSummary(adapter, __request__, user, state, emitter=__event_emitter__)
                 packet = state.get('shared_summary_packet')
                 full_messages = deepcopy(draft['messages'])
                 await summary.load()
                 summary.apply(draft, packet)
-                previous_tokens = last_router_prompt_tokens(state, draft['model']) if not target else None
-                if previous_tokens is not None and previous_tokens > policy['router_summary_trigger_tokens']:
+                if target:
+                    previous_tokens = last_agent_prompt_tokens(state, target, model)
+                    threshold = policy['agent_summary_trigger_tokens']
+                else:
+                    previous_tokens = last_router_prompt_tokens(state, model)
+                    threshold = policy['router_summary_trigger_tokens']
+                if previous_tokens is not None and previous_tokens > threshold:
                     await summary.extend(draft, packet, full_messages)
         except BaseException:
             sessions = __request__.scope.get('lite_handoff_mcp', {})
@@ -2919,13 +2927,10 @@ class Pipe:
             if not was_active and __event_emitter__:
                 agent = state['registry'][target]
                 await __event_emitter__({'type': 'status', 'data': {'action': 'handoff', 'description': 'Передача: ' + agent.get('agent_name', target), 'done': True}})
-        track_usage = summary_enabled and (not target)
 
         async def complete_prepared():
             if target and (not state.get('worker')):
                 pack_agent_history(draft['messages'], state, state.get('agent_history_question'), covered_turns=summary.applied_turns if summary_enabled else 0, packet=state.get('shared_summary_packet'))
-                if policy['agent_token_count_enabled']:
-                    await adapter.measure_agent_tokens(__request__, draft, user)
             response = await adapter.complete(__request__, draft, user)
             return await check_initial_stream(response) if summary_enabled else response
         try:
@@ -2936,18 +2941,20 @@ class Pipe:
             response = await complete_prepared()
         executor = {'kind': 'agent', 'agent_id': target} if target else {'kind': 'router'}
         on_usage = None
-        if track_usage:
+        if target or summary_enabled:
+            generation = state.get('generation', 0) + 1
 
-            async def record_router_usage(usage):
+            async def record_usage(usage):
                 tokens = prompt_token_count(usage)
                 if tokens is None:
                     return
-                sample = {'prompt_tokens': tokens}
-                model = draft['model']
-                state.setdefault('router_usage', {})[model] = sample
-                await adapter.save_router_usage(state, user, model, sample)
+                if target:
+                    state.setdefault('agent_prompt_tokens', {})[target, model] = tokens
+                else:
+                    state.setdefault('router_usage', {})[model] = {'prompt_tokens': tokens}
+                await adapter.save_prompt_usage(state, user, model, tokens, agent_id=target, generation=generation)
             if isinstance(response, dict):
-                await record_router_usage(response.get('usage'))
+                await record_usage(response.get('usage'))
             else:
-                on_usage = record_router_usage
+                on_usage = record_usage
         return observe_response(response, state, executor, on_usage=on_usage)

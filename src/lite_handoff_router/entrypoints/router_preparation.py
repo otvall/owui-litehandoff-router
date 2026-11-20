@@ -26,7 +26,8 @@ class Filter:
 
         @field_validator(
             "priority", "max_parallel_tasks", "parallel_timeout_seconds",
-            "tool_result_history_limit", "router_summary_trigger_tokens", mode="before")
+            "tool_result_history_limit", "router_summary_trigger_tokens", "agent_summary_trigger_tokens",
+            mode="before")
         @classmethod
         def reject_boolean_number(cls, value):
             if isinstance(value, bool):

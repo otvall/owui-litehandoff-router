@@ -3,6 +3,7 @@
 import copy
 import json
 import unittest
+from types import SimpleNamespace
 from uuid import uuid4
 
 from lite_handoff_router.history import context_handoff_key
@@ -42,10 +43,28 @@ class NativeHandoffHistoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await adapter.historical_handoff_statuses(None, {}, {**state, "message_id": "missing"}, actor), {})
         self.assertEqual(await Chats.get_messages_map_by_chat_id(cid), before)
         sample = {"prompt_tokens": 900}
-        await adapter.save_router_usage({**state, "message_id": "a1"}, actor, "router-llm", sample)
+        saved_turn = {**state, "message_id": "a1", "request_id": suffix}
+        await adapter.save_prompt_usage(saved_turn, actor, "router-llm", sample["prompt_tokens"])
+        await adapter.save_prompt_usage(saved_turn, actor, "model-a", 2000, agent_id="agent-a", generation=3)
+        await adapter.save_prompt_usage(saved_turn, actor, "model-a", 2200, agent_id="agent-a", generation=4)
+        await adapter.save_prompt_usage(saved_turn, actor, "model-a", 2250, agent_id="agent-a", generation=4)
+        await adapter.save_prompt_usage(saved_turn, other, "model-a", 1, agent_id="agent-a", generation=5)
         state["context_policy"] = {"shared_summary_model_id": "summary"}
         self.assertEqual(await adapter.historical_handoff_statuses(None, {}, state, actor), found)
         self.assertEqual(state["historical_router_usage"], {"router-llm": {"model": "router-llm", **sample}})
+        self.assertEqual(state["historical_agent_prompt_tokens"], {("agent-a", "model-a"): 2250})
+        current = {**state, "message_id": "a1"}
+        await adapter.historical_handoff_statuses(None, {}, current, actor)
+        self.assertEqual(current["historical_agent_prompt_tokens"], {})
+        resume = SimpleNamespace(state=SimpleNamespace(tool_approval_resume=(cid, "a1", "tools")))
+        await adapter.historical_handoff_statuses(resume, {}, current, actor)
+        self.assertEqual(current["historical_agent_prompt_tokens"], {("agent-a", "model-a"): 2250})
+        self.assertEqual(current["historical_router_usage"], {})
         saved = await Chats.get_messages_map_by_chat_id(cid)
+        self.assertEqual(saved["a1"]["meta"]["lite_agent_usage"], [
+            {"model": "model-a", "agent_id": "agent-a", "request_id": suffix, "generation": generation,
+             "prompt_tokens": tokens}
+            for generation, tokens in ((3, 2000), (4, 2250))
+        ])
         self.assertEqual(saved["a1"]["output"], output)
         self.assertEqual(saved["a1"]["error"], before["a1"]["error"])

@@ -6,11 +6,21 @@ from unittest.mock import AsyncMock
 
 from lite_handoff_router.observation import observe_response
 from lite_handoff_router.shared_summary import (ProviderContextOverflow, SharedSummary, check_initial_stream,
-                                                last_router_prompt_tokens, prompt_token_count)
+                                                last_agent_prompt_tokens, last_router_prompt_tokens, prompt_token_count)
 from tests.test_history import turn
 
 
 class SharedSummaryTest(IsolatedAsyncioTestCase):
+    def test_agent_token_count_uses_the_latest_sample_for_the_same_agent_and_model(self):
+        state = {
+            "historical_agent_prompt_tokens": {("a", "base"): 43000, ("b", "base"): 1200},
+            "agent_prompt_tokens": {("a", "base"): 2000},
+        }
+        self.assertEqual(last_agent_prompt_tokens(state, "a", "base"), 2000)
+        self.assertEqual(last_agent_prompt_tokens(state, "b", "base"), 1200)
+        self.assertIsNone(last_agent_prompt_tokens(state, "a", "other-base"))
+        self.assertIsNone(last_agent_prompt_tokens(state, "c", "base"))
+
     async def test_router_uses_only_the_last_reported_input_usage(self):
         async def stream():
             yield b'data: {"choices":[{"finish_reason":"stop"}]}\n\n'

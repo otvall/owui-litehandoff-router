@@ -14,7 +14,7 @@ from ..capabilities import close_mcp_sessions
 from ..observation import observe_response
 from ..native_context import capture_native_context
 from ..shared_summary import (ProviderContextOverflow, SharedSummary, check_initial_stream,
-                              last_router_prompt_tokens, prompt_token_count)
+                              last_agent_prompt_tokens, last_router_prompt_tokens, prompt_token_count)
 
 
 class Pipe:
@@ -42,20 +42,32 @@ class Pipe:
         summary_enabled = bool(policy["shared_summary_model_id"].strip()) and not state.get("worker")
         sessions_before = set(__request__.scope.get("lite_handoff_mcp", {}))
         try:
+            if target and summary_enabled and state.get("historical_handoff_statuses") is None:
+                state["historical_handoff_statuses"] = await adapter.historical_handoff_statuses(
+                    __request__, __metadata__, state, user)
             draft, tools = await prepare_model(
                 adapter, __request__, body, user, metadata_draft(__metadata__), state,
                 self.valves.orchestrator_model_id,
                 {"__event_emitter__": __event_emitter__, "__event_call__": __event_call__,
                  "__oauth_token__": __oauth_token__}, target=target,
             )
+            model = draft["model"]
+            if target:
+                info = (draft["metadata"].get("model") or {}).get("info") or {}
+                model = info.get("base_model_id") or model
             if summary_enabled:
                 summary = SharedSummary(adapter, __request__, user, state, emitter=__event_emitter__)
                 packet = state.get("shared_summary_packet")
                 full_messages = deepcopy(draft["messages"])
                 await summary.load()
                 summary.apply(draft, packet)
-                previous_tokens = last_router_prompt_tokens(state, draft["model"]) if not target else None
-                if previous_tokens is not None and previous_tokens > policy["router_summary_trigger_tokens"]:
+                if target:
+                    previous_tokens = last_agent_prompt_tokens(state, target, model)
+                    threshold = policy["agent_summary_trigger_tokens"]
+                else:
+                    previous_tokens = last_router_prompt_tokens(state, model)
+                    threshold = policy["router_summary_trigger_tokens"]
+                if previous_tokens is not None and previous_tokens > threshold:
                     await summary.extend(draft, packet, full_messages)
         except BaseException:
             sessions = __request__.scope.get("lite_handoff_mcp", {})
@@ -71,7 +83,6 @@ class Pipe:
                 await __event_emitter__({"type": "status", "data": {
                     "action": "handoff", "description": "Передача: " + agent.get("agent_name", target), "done": True,
                 }})
-        track_usage = summary_enabled and not target
         async def complete_prepared():
             if target and not state.get("worker"):
                 pack_agent_history(
@@ -79,8 +90,6 @@ class Pipe:
                     covered_turns=summary.applied_turns if summary_enabled else 0,
                     packet=state.get("shared_summary_packet"),
                 )
-                if policy["agent_token_count_enabled"]:
-                    await adapter.measure_agent_tokens(__request__, draft, user)
             response = await adapter.complete(__request__, draft, user)
             return await check_initial_stream(response) if summary_enabled else response
 
@@ -92,18 +101,21 @@ class Pipe:
             response = await complete_prepared()
         executor = {"kind": "agent", "agent_id": target} if target else {"kind": "router"}
         on_usage = None
-        if track_usage:
-            async def record_router_usage(usage):
+        if target or summary_enabled:
+            generation = state.get("generation", 0) + 1
+
+            async def record_usage(usage):
                 tokens = prompt_token_count(usage)
                 if tokens is None:
                     return
-                sample = {"prompt_tokens": tokens}
-                model = draft["model"]
-                state.setdefault("router_usage", {})[model] = sample
-                await adapter.save_router_usage(state, user, model, sample)
+                if target:
+                    state.setdefault("agent_prompt_tokens", {})[target, model] = tokens
+                else:
+                    state.setdefault("router_usage", {})[model] = {"prompt_tokens": tokens}
+                await adapter.save_prompt_usage(state, user, model, tokens, agent_id=target, generation=generation)
 
             if isinstance(response, dict):
-                await record_router_usage(response.get("usage"))
+                await record_usage(response.get("usage"))
             else:
-                on_usage = record_router_usage
+                on_usage = record_usage
         return observe_response(response, state, executor, on_usage=on_usage)

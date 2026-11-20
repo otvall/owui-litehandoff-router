@@ -184,6 +184,12 @@ def last_router_prompt_tokens(state, model_id):
     return current or prompt_token_count((state.get("historical_router_usage") or {}).get(model_id))
 
 
+def last_agent_prompt_tokens(state, agent_id, model_id):
+    key = agent_id, model_id
+    return (state.get("agent_prompt_tokens", {}).get(key)
+            or state.get("historical_agent_prompt_tokens", {}).get(key))
+
+
 async def check_initial_stream(response):
     if not hasattr(response, "body_iterator"):
         return response
