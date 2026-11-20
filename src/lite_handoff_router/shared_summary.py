@@ -6,6 +6,8 @@ import hashlib
 import json
 import logging
 import re
+import traceback
+from pathlib import PurePath
 
 from .history import agent_dialogue, analyze
 from .protocol import tool_image
@@ -27,6 +29,46 @@ class ProviderContextOverflow(RuntimeError):
 
 class SummaryGenerationError(RuntimeError):
     """A diagnostic that is safe to display in the chat."""
+
+
+def summary_error_details(error):
+    details = []
+    for failure in (error, error.__cause__):
+        if failure is None:
+            continue
+        message = str(failure).strip()
+        if message.startswith(("{", "[")):
+            try:
+                payload = json.loads(message)
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                payload = payload.get("error", payload)
+                message = payload.get("message", "") if isinstance(payload, dict) else ""
+            else:
+                message = ""
+        if isinstance(message, str):
+            message = re.split(r"(?i)\b(?:headers|request body|request payload|messages|prompt)\s*[:=]", message)[0]
+            message = re.sub(r"(?i)https?://[^\s<>\"']+", "[URL скрыт]", message)
+            message = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [скрыто]", message)
+            message = re.sub(
+                r"""(?i)(\b(?:api[-_ ]?key|authorization|access[-_ ]?token|token|password|secret|cookie)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
+                r"\1[скрыто]", message,
+            )
+            message = re.sub(r"\b(?:sk-[\w-]+|hf_[\w-]+|gh[pousr]_[\w-]+)\b", "[скрыто]", message)
+            message = " ".join(message.split())[:600]
+        else:
+            message = ""
+        frames = traceback.extract_tb(failure.__traceback__)
+        location = ""
+        if frames:
+            frame = frames[-1]
+            location = f" ({PurePath(frame.filename).name}:{frame.lineno}, {frame.name})"
+        status_code = getattr(failure, "status_code", None)
+        http_status = f" HTTP {status_code}" if type(status_code) is int else ""
+        if message or location or http_status:
+            details.append(f"{type(failure).__name__}{http_status}{location}" + (f" — {message}" if message else ""))
+    return " | ".join(details)
 
 
 def propagate_provider_error(detail):
@@ -136,14 +178,20 @@ class SharedSummary:
         candidates = self.turns[start:]
         while candidates and candidates[-1]["key"] not in eligible:
             candidates.pop()
-        sizes = [sum(len(message["content"]) for message in turn["messages"]) for turn in candidates]
-        budget = sum(sizes) * self.context_percent // 100
-        added, length = [], 0
-        for turn, size in zip(candidates, sizes):
-            # Always allow the first whole turn within the hard input limit.
-            if length + size > SUMMARY_INPUT_LIMIT or (added and length + size > budget):
+        # Open WebUI's estimate for text messages, applied to the summary projection.
+        turn_tokens = [sum(4 + (max(1, len(text) // 4) if text else 0)
+                           for text in (message["content"] for message in turn["messages"]))
+                       for turn in candidates]
+        total_tokens = sum(turn_tokens)
+        target_tokens = total_tokens * self.context_percent // 100
+        added, selected_tokens, length = [], 0, 0
+        for turn, tokens in zip(candidates, turn_tokens):
+            size = sum(len(message["content"]) for message in turn["messages"])
+            # The oldest whole turn stays eligible even for a small percentage.
+            if length + size > SUMMARY_INPUT_LIMIT or (added and selected_tokens + tokens > target_tokens):
                 break
             added.append(turn)
+            selected_tokens += tokens
             length += size
         if not added:
             await self.status(f"Сжатие пропущено ({trigger}). Нет доступных целых ходов в пределах лимита входа.",
@@ -155,7 +203,9 @@ class SharedSummary:
         failed = True
         try:
             await self.status(f"Сжимаю контекст… {trigger}. Модель {self.model_id}. "
-                              f"Ходов {len(added)}, символов {length}.", done=False)
+                              f"Ходов {len(added)}, символов {length}. "
+                              f"Токенов по оценке Open WebUI {selected_tokens} из {total_tokens}. "
+                              f"Целевой объём {target_tokens}.", done=False)
             try:
                 summary = await self.adapter.generate_shared_summary(
                     self.request, self.user, self.model_id,
@@ -168,9 +218,13 @@ class SharedSummary:
                     reason = "Модель суммаризации не ответила за 45 секунд."
                 elif isinstance(error, ProviderContextOverflow):
                     reason = "Переполнено окно модели суммаризации."
+                elif isinstance(error, AttributeError) and isinstance(error.name, str) and error.name.isidentifier():
+                    reason = f"Ошибка Open WebUI (AttributeError: {type(error.obj).__name__}.{error.name})."
                 else:
                     reason = f"Ошибка запроса к модели суммаризации ({type(error).__name__})."
                 description = f"{description}. {reason}"
+                if details := summary_error_details(error):
+                    description += f" Подробности — {details}"
                 return False
             if not summary:
                 description += ". Модель вернула пустую сводку."

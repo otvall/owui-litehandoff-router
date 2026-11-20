@@ -723,6 +723,7 @@ class OWUIAdapter:
         from open_webui.utils.payload import apply_params_to_form_data
         from open_webui.utils.task import prompt_template, replace_messages_variable
         from starlette.requests import Request
+        from starlette.responses import StreamingResponse
 
         model = request.app.state.MODELS.get(model_id)
         if not model or model.get("pipe") or model.get("pipeline") or model.get("owned_by") != "openai":
@@ -746,6 +747,16 @@ class OWUIAdapter:
         if isinstance(params, dict):
             body = apply_params_to_form_data(body, model, params)
         response = await asyncio.wait_for(self.complete(isolated, body, user, bypass_system_prompt=False), timeout=45)
+        if isinstance(response, list) and len(response) == 1:
+            response = response[0]
+        if isinstance(response, StreamingResponse):
+            if hasattr(response.body_iterator, "aclose"):
+                await response.body_iterator.aclose()
+            raise SummaryGenerationError("Модель суммаризации вернула поток вместо обычного ответа.")
+        if not isinstance(response, dict):
+            raise SummaryGenerationError("Провайдер вернул ответ сводки в неожиданном формате.")
+        if response.get("error"):
+            raise SummaryGenerationError("Провайдер вернул ошибку в ответе суммаризации.")
         choices = response.get("choices") or []
         choice = choices[0] if choices else {}
         message = choice.get("message") or {}
@@ -776,7 +787,10 @@ class OWUIAdapter:
                 request, body, user, bypass_system_prompt=bypass_system_prompt,
             )
         except HTTPException as error:
-            propagate_provider_error(error.detail)
+            try:
+                propagate_provider_error(error.detail)
+            except RuntimeError as provider_error:
+                raise provider_error from error
         if isinstance(response, Response) and response.status_code >= 400:
             raw = getattr(response, "body", b"")
             detail = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)

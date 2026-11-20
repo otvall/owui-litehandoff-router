@@ -78,34 +78,46 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         self.assertEqual(emitter.await_count, 3)
         self.assertIn("Сжатие пропущено", emitter.await_args.args[0]["data"]["description"])
 
-    async def test_summary_share_uses_character_count_and_whole_turns(self):
-        first = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b" * 5}]
+    async def test_summary_share_uses_estimated_tokens_and_whole_turns(self):
+        first = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b" * 12}]
         second = [{"role": "user", "content": "c"}, {"role": "assistant", "content": "d"}]
         third = [{"role": "user", "content": "e"}, {"role": "assistant", "content": "f"}]
         current = {"role": "user", "content": "current"}
         past = first + second + third
         source = past + [current]
-        for settings, covered in (({}, first), ({"shared_summary_context_percent": 1}, first),
-                                  ({"shared_summary_context_percent": 80}, first + second),
-                                  ({"shared_summary_context_percent": 100}, past)):
+        for settings, covered, estimated, budget in (
+            ({}, first, 12, 19),
+            ({"shared_summary_context_percent": 1}, first, 12, 0),
+            ({"shared_summary_context_percent": 80}, first + second, 22, 25),
+            ({"shared_summary_context_percent": 100}, past, 32, 32),
+        ):
             with self.subTest(settings=settings):
                 state = {"source": source, "user_boundary": len(past), "audit": [],
                          "context_policy": ContextPolicy(shared_summary_model_id="summary", **settings).model_dump()}
+                emitter = AsyncMock()
                 adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
                                           generate_shared_summary=AsyncMock(return_value="Summary"),
                                           save_shared_summary=AsyncMock())
-                summary = SharedSummary(adapter, None, None, state)
+                summary = SharedSummary(adapter, None, None, state, emitter=emitter)
                 await summary.load()
                 view = {"messages": deepcopy(source)}
                 self.assertTrue(await summary.extend(view, None, source, trigger="Порог"))
                 adapter.generate_shared_summary.assert_awaited_once_with(
                     None, None, "summary", covered, None)
                 self.assertEqual(view["messages"][1:], source[len(covered):])
+                status = emitter.await_args_list[0].args[0]["data"]["description"]
+                self.assertIn(f"Токенов по оценке Open WebUI {estimated} из 32.", status)
+                self.assertIn(f"Целевой объём {budget}.", status)
 
     async def test_summary_status_closes_on_failure_and_cancellation(self):
         for failure, text, error in (
             (RuntimeError(), "Не удалось сократить контекст. Ошибка запроса к модели суммаризации (RuntimeError).", True),
             (TimeoutError(), "Не удалось сократить контекст. Модель суммаризации не ответила за 45 секунд.", True),
+            (AttributeError("private provider detail", name="get", obj=[]),
+             "Не удалось сократить контекст. Ошибка Open WebUI (AttributeError: list.get).", True),
+            (RuntimeError('{"error":{"message":"Model missing at https://private.example/v1. '
+                          'api_key=test-secret; request body: private chat"}}'),
+             "Не удалось сократить контекст. Ошибка запроса к модели суммаризации (RuntimeError).", True),
             (CancelledError(), "Сжатие контекста отменено", False),
         ):
             with self.subTest(failure=type(failure).__name__):
@@ -124,9 +136,19 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
                 else:
                     self.assertFalse(await operation)
                 self.assertEqual([event.args[0]["data"]["done"] for event in emitter.await_args_list], [False, True])
-                self.assertEqual(emitter.await_args.args[0]["data"], {
-                    "action": "lite_shared_summary", "description": text, "done": True, "error": error,
-                })
+                status = emitter.await_args.args[0]["data"]
+                self.assertEqual((status["action"], status["done"], status["error"]),
+                                 ("lite_shared_summary", True, error))
+                self.assertTrue(status["description"].startswith(text))
+                if not isinstance(failure, CancelledError):
+                    self.assertIn("Подробности", status["description"])
+                if isinstance(failure, AttributeError):
+                    self.assertIn("private provider detail", status["description"])
+                if str(failure).startswith("{"):
+                    self.assertIn("Model missing", status["description"])
+                    self.assertRegex(status["description"], r"\.py:\d+")
+                    for hidden in ("private.example", "test-secret", "private chat"):
+                        self.assertNotIn(hidden, status["description"])
 
     async def test_stream_overflow_is_recoverable_only_before_content(self):
         async def stream(*events):

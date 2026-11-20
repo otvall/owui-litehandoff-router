@@ -114,6 +114,8 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(template=template, reason=reason):
                 config = {"chat.context_compaction.prompt_template": template, "task.model.params": task_params}
                 response = {"choices": [{"message": {"content": " Result "}, "finish_reason": reason}]}
+                if reason == "stop":
+                    response = [response]
                 with (
                     patch.object(chat, "generate_openai_chat_completion", AsyncMock(return_value=response)) as provider,
                     patch.object(Config, "get_many", AsyncMock(return_value=config)),

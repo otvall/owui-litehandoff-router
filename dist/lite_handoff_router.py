@@ -420,7 +420,7 @@ class ContextPolicy(BaseModel):
     model_config = ConfigDict(validate_assignment=True, strict=True)
     tool_result_history_limit: int | None = Field(default=None, ge=0)
     shared_summary_model_id: str = ''
-    shared_summary_context_percent: int = Field(default=60, ge=1, le=100, description='Percentage by character count of eligible unsummarized history to summarize in one update')
+    shared_summary_context_percent: int = Field(default=60, ge=1, le=100, description='Percentage of estimated tokens in eligible unsummarized history to summarize in one update')
     router_summary_trigger_tokens: int = Field(default=40000, gt=0)
     agent_summary_trigger_tokens: int = Field(default=40000, gt=0)
 
@@ -1933,6 +1933,8 @@ import hashlib
 import json
 import logging
 import re
+import traceback
+from pathlib import PurePath
 SUMMARY_INPUT_LIMIT = 60000
 OVERFLOW_MESSAGES = re.compile('context.length.exceeded|(?:context|input|prompt) (?:window|length)(?: limit)? (?:is |was )?(?:exceeded|too (?:long|large))|maximum context length|(?:exceeds|exceeded) (?:the )?(?:maximum |max(?:imum)? supported )?(?:model )?context length|(?:input|prompt) (?:is )?too long|input length \\(\\d+\\) is longer than|(?:input|prompt)(?: length)?\\s+\\([^)]*tokens?[^)]*\\) (?:is longer than|exceeds the maximum allowed length)', re.IGNORECASE)
 
@@ -1941,6 +1943,42 @@ class ProviderContextOverflow(RuntimeError):
 
 class SummaryGenerationError(RuntimeError):
     """A diagnostic that is safe to display in the chat."""
+
+def summary_error_details(error):
+    details = []
+    for failure in (error, error.__cause__):
+        if failure is None:
+            continue
+        message = str(failure).strip()
+        if message.startswith(('{', '[')):
+            try:
+                payload = json.loads(message)
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                payload = payload.get('error', payload)
+                message = payload.get('message', '') if isinstance(payload, dict) else ''
+            else:
+                message = ''
+        if isinstance(message, str):
+            message = re.split('(?i)\\b(?:headers|request body|request payload|messages|prompt)\\s*[:=]', message)[0]
+            message = re.sub('(?i)https?://[^\\s<>\\"\']+', '[URL скрыт]', message)
+            message = re.sub('(?i)\\bBearer\\s+\\S+', 'Bearer [скрыто]', message)
+            message = re.sub('(?i)(\\b(?:api[-_ ]?key|authorization|access[-_ ]?token|token|password|secret|cookie)\\b["\']?\\s*[:=]\\s*)(?:"[^"]*"|\'[^\']*\'|[^\\s,;]+)', '\\1[скрыто]', message)
+            message = re.sub('\\b(?:sk-[\\w-]+|hf_[\\w-]+|gh[pousr]_[\\w-]+)\\b', '[скрыто]', message)
+            message = ' '.join(message.split())[:600]
+        else:
+            message = ''
+        frames = traceback.extract_tb(failure.__traceback__)
+        location = ''
+        if frames:
+            frame = frames[-1]
+            location = f' ({PurePath(frame.filename).name}:{frame.lineno}, {frame.name})'
+        status_code = getattr(failure, 'status_code', None)
+        http_status = f' HTTP {status_code}' if type(status_code) is int else ''
+        if message or location or http_status:
+            details.append(f'{type(failure).__name__}{http_status}{location}' + (f' — {message}' if message else ''))
+    return ' | '.join(details)
 
 def propagate_provider_error(detail):
     text = str(detail)
@@ -2039,13 +2077,16 @@ class SharedSummary:
         candidates = self.turns[start:]
         while candidates and candidates[-1]['key'] not in eligible:
             candidates.pop()
-        sizes = [sum((len(message['content']) for message in turn['messages'])) for turn in candidates]
-        budget = sum(sizes) * self.context_percent // 100
-        added, length = ([], 0)
-        for turn, size in zip(candidates, sizes):
-            if length + size > SUMMARY_INPUT_LIMIT or (added and length + size > budget):
+        turn_tokens = [sum((4 + (max(1, len(text) // 4) if text else 0) for text in (message['content'] for message in turn['messages']))) for turn in candidates]
+        total_tokens = sum(turn_tokens)
+        target_tokens = total_tokens * self.context_percent // 100
+        added, selected_tokens, length = ([], 0, 0)
+        for turn, tokens in zip(candidates, turn_tokens):
+            size = sum((len(message['content']) for message in turn['messages']))
+            if length + size > SUMMARY_INPUT_LIMIT or (added and selected_tokens + tokens > target_tokens):
                 break
             added.append(turn)
+            selected_tokens += tokens
             length += size
         if not added:
             await self.status(f'Сжатие пропущено ({trigger}). Нет доступных целых ходов в пределах лимита входа.', done=True)
@@ -2055,7 +2096,7 @@ class SharedSummary:
         description = 'Не удалось сократить контекст'
         failed = True
         try:
-            await self.status(f'Сжимаю контекст… {trigger}. Модель {self.model_id}. Ходов {len(added)}, символов {length}.', done=False)
+            await self.status(f'Сжимаю контекст… {trigger}. Модель {self.model_id}. Ходов {len(added)}, символов {length}. Токенов по оценке Open WebUI {selected_tokens} из {total_tokens}. Целевой объём {target_tokens}.', done=False)
             try:
                 summary = await self.adapter.generate_shared_summary(self.request, self.user, self.model_id, [message for turn in added for message in turn['messages']], previous)
             except Exception as error:
@@ -2066,9 +2107,13 @@ class SharedSummary:
                     reason = 'Модель суммаризации не ответила за 45 секунд.'
                 elif isinstance(error, ProviderContextOverflow):
                     reason = 'Переполнено окно модели суммаризации.'
+                elif isinstance(error, AttributeError) and isinstance(error.name, str) and error.name.isidentifier():
+                    reason = f'Ошибка Open WebUI (AttributeError: {type(error.obj).__name__}.{error.name}).'
                 else:
                     reason = f'Ошибка запроса к модели суммаризации ({type(error).__name__}).'
                 description = f'{description}. {reason}'
+                if (details := summary_error_details(error)):
+                    description += f' Подробности — {details}'
                 return False
             if not summary:
                 description += '. Модель вернула пустую сводку.'
@@ -2774,6 +2819,7 @@ class OWUIAdapter:
         from open_webui.utils.payload import apply_params_to_form_data
         from open_webui.utils.task import prompt_template, replace_messages_variable
         from starlette.requests import Request
+        from starlette.responses import StreamingResponse
         model = request.app.state.MODELS.get(model_id)
         if not model or model.get('pipe') or model.get('pipeline') or (model.get('owned_by') != 'openai'):
             raise SummaryGenerationError('Модель суммаризации не найдена или несовместима с OpenAI API.')
@@ -2794,6 +2840,16 @@ class OWUIAdapter:
         if isinstance(params, dict):
             body = apply_params_to_form_data(body, model, params)
         response = await asyncio.wait_for(self.complete(isolated, body, user, bypass_system_prompt=False), timeout=45)
+        if isinstance(response, list) and len(response) == 1:
+            response = response[0]
+        if isinstance(response, StreamingResponse):
+            if hasattr(response.body_iterator, 'aclose'):
+                await response.body_iterator.aclose()
+            raise SummaryGenerationError('Модель суммаризации вернула поток вместо обычного ответа.')
+        if not isinstance(response, dict):
+            raise SummaryGenerationError('Провайдер вернул ответ сводки в неожиданном формате.')
+        if response.get('error'):
+            raise SummaryGenerationError('Провайдер вернул ошибку в ответе суммаризации.')
         choices = response.get('choices') or []
         choice = choices[0] if choices else {}
         message = choice.get('message') or {}
@@ -2816,7 +2872,10 @@ class OWUIAdapter:
         try:
             response = await generate_chat_completion(request, body, user, bypass_system_prompt=bypass_system_prompt)
         except HTTPException as error:
-            propagate_provider_error(error.detail)
+            try:
+                propagate_provider_error(error.detail)
+            except RuntimeError as provider_error:
+                raise provider_error from error
         if isinstance(response, Response) and response.status_code >= 400:
             raw = getattr(response, 'body', b'')
             detail = raw.decode(errors='replace') if isinstance(raw, bytes) else str(raw)
