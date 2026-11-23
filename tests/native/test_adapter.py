@@ -5,7 +5,6 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from lite_handoff_router.owui_adapter import OWUIAdapter
-from lite_handoff_router.shared_summary import SummaryGenerationError
 
 
 class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
@@ -100,7 +99,7 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await Config.upsert({"chat.context_compaction.enable": original})
 
-    async def test_summary_uses_native_template_without_router_output_limit(self):
+    async def test_summary_uses_native_generation_and_stream_fallback(self):
         from open_webui.models.config import Config
         from open_webui.utils import chat, models
         from starlette.responses import StreamingResponse
@@ -110,53 +109,31 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
             app=SimpleNamespace(state=SimpleNamespace(MODELS={"llm": {"id": "llm", "owned_by": "openai"}})),
         )
         messages = [{"role": "user", "content": "Old question"}]
-        custom = "Custom {{PREVIOUS_SUMMARY}} / {{COMPACTED_MESSAGES}} / {{RECENT_MESSAGES}}"
-        for template, reason, task_params in (
-            ("", "stop", {}),
-            (custom, "length", {"max_tokens": 999}),
-            ("", "stream", {"stream": True, "stream_response": True}),
-        ):
-            with self.subTest(template=template, reason=reason):
-                config = {"chat.context_compaction.prompt_template": template, "task.model.params": task_params}
-                response = {"choices": [{"message": {"content": " Result "}, "finish_reason": reason}]}
-                if reason == "stop":
-                    response = [response]
-                if reason == "stream":
-                    async def chunks():
-                        data = ('data: {"choices":[{"delta":{"content":"Result"}}]}\r\n\r\n'
-                                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
-                                'data: [DONE]\n\n').encode()
-                        yield data[:21]
-                        yield data[21:]
-
-                    response = StreamingResponse(chunks(), media_type="text/event-stream")
+        template = "Custom {{PREVIOUS_SUMMARY}} / {{COMPACTED_MESSAGES}} / {{RECENT_MESSAGES}}"
+        for streamed in (False, True):
+            with self.subTest(streamed=streamed):
+                response = {"choices": [{"message": {"content": "Result"}, "finish_reason": "stop"}]}
+                if streamed:
+                    response = StreamingResponse(iter(['data: {"choices":[{"delta":{"content":"Result"}}]}\n\n']),
+                                                 media_type="text/event-stream")
                 with (
                     patch.object(chat, "generate_openai_chat_completion", AsyncMock(return_value=response)) as provider,
-                    patch.object(Config, "get_many", AsyncMock(return_value=config)),
-                    patch.object(Config, "get", AsyncMock(return_value=False)),
+                    patch.object(Config, "get_many", AsyncMock(return_value={
+                        "task.model.params": {"temperature": 0.2, "stream": True},
+                    })),
+                    patch.object(Config, "get", AsyncMock(return_value=template)),
                     patch.object(models, "check_model_access", AsyncMock()) as access,
                 ):
-                    operation = OWUIAdapter().generate_shared_summary(
+                    summary = await OWUIAdapter().generate_shared_summary(
                         request, SimpleNamespace(id="u", role="admin"), "llm", messages, "Earlier")
-                    if reason == "length":
-                        with self.assertRaisesRegex(SummaryGenerationError, "finish_reason=length"):
-                            await operation
-                    else:
-                        summary = await operation
                 access.assert_awaited_once()
                 body = provider.await_args.kwargs["form_data"]
                 self.assertIs(body["stream"], False)
-                prompt = body["messages"][0]["content"]
-                self.assertNotIn("max_completion_tokens", body)
-                if template:
-                    self.assertEqual(prompt, "Custom Earlier / USER: Old question / ")
-                    self.assertEqual(body["max_tokens"], 999)
-                else:
-                    self.assertIn("Summarize the conversation history", prompt)
-                    self.assertIn("Earlier", prompt)
-                    self.assertIn("USER: Old question", prompt)
-                    self.assertNotIn("max_tokens", body)
-                    self.assertEqual(summary, "Result")
+                self.assertEqual(body["messages"][0]["content"],
+                                 "Custom Earlier / USER: Old question / USER: End of historical dialogue.")
+                self.assertEqual(body["temperature"], 0.2)
+                self.assertEqual(body["metadata"]["task"], "context_compaction")
+                self.assertEqual(summary, "Earlier\n- user: Old question" if streamed else "Result")
 
 
 if __name__ == "__main__":

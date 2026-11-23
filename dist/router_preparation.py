@@ -1520,65 +1520,13 @@ async def check_initial_stream(response):
 """All imports of Open WebUI internal APIs live behind this boundary."""
 import asyncio
 from copy import deepcopy
+from inspect import signature
 import json
 import logging
 from uuid import UUID
 
 def as_dict(value):
     return value.model_dump() if hasattr(value, 'model_dump') else dict(value or {})
-
-async def collect_summary_stream(stream):
-    """Consume an unexpected provider SSE response without streaming it into the chat."""
-    from open_webui.routers.openai import convert_responses_result
-    pending = b''
-    received = 0
-    parts = []
-    finish_reason = None
-    message = {}
-    try:
-        async for chunk in stream:
-            chunk = chunk.encode() if isinstance(chunk, str) else chunk
-            received += len(chunk)
-            if received > 4 * 1024 * 1024:
-                raise SummaryGenerationError('Поток сводки превысил предел в 4 МиБ.')
-            lines = (pending + chunk).split(b'\n')
-            pending = lines.pop()
-            for line in lines:
-                if not line.startswith(b'data:'):
-                    continue
-                data = line[5:].strip()
-                if data == b'[DONE]':
-                    finish_reason = finish_reason or 'stop'
-                    break
-                if not data:
-                    continue
-                event = json.loads(data)
-                if event.get('error'):
-                    propagate_provider_error(event['error'])
-                kind = event.get('type')
-                if kind in ('response.completed', 'response.incomplete'):
-                    return convert_responses_result(event['response'])
-                if kind in ('error', 'response.failed'):
-                    propagate_provider_error((event.get('response') or {}).get('error') or event)
-                for choice in event.get('choices') or ():
-                    if choice.get('index', 0) != 0:
-                        continue
-                    delta = choice.get('delta') or {}
-                    if isinstance(delta.get('content'), str):
-                        parts.append(delta['content'])
-                    if delta.get('tool_calls') or delta.get('function_call'):
-                        message['tool_calls'] = True
-                    finish_reason = choice.get('finish_reason') or finish_reason
-            else:
-                continue
-            break
-    finally:
-        if hasattr(stream, 'aclose'):
-            await stream.aclose()
-    if not finish_reason:
-        raise SummaryGenerationError('Поток сводки завершился без признака окончания.')
-    message['content'] = ''.join(parts)
-    return {'choices': [{'message': message, 'finish_reason': finish_reason}]}
 
 def register_model_tool(registry, name, tool, namespace):
     alias = bounded_tool_name(name)
@@ -2175,12 +2123,9 @@ class OWUIAdapter:
 
     async def generate_shared_summary(self, request, user, model_id, messages, previous):
         from open_webui.models.config import Config
-        from open_webui.utils.context_compaction import DEFAULT_CONTEXT_COMPACTION_PROMPT
+        from open_webui.utils.context_compaction import _generate_summary
         from open_webui.utils.models import check_model_access
-        from open_webui.utils.payload import apply_params_to_form_data
-        from open_webui.utils.task import prompt_template, replace_messages_variable
         from starlette.requests import Request
-        from starlette.responses import StreamingResponse
         model = request.app.state.MODELS.get(model_id)
         if not model or model.get('pipe') or model.get('pipeline') or (model.get('owned_by') != 'openai'):
             raise SummaryGenerationError('Модель суммаризации не найдена или несовместима с OpenAI API.')
@@ -2189,40 +2134,13 @@ class OWUIAdapter:
         except Exception as error:
             raise SummaryGenerationError('Open WebUI не подтвердил доступ к модели суммаризации.') from error
         isolated = Request({'type': 'http', 'method': 'POST', 'path': request.url.path, 'app': request.app, 'headers': [], 'state': {}})
-        config = await Config.get_many('chat.context_compaction.prompt_template', 'task.model.params')
-        template = (config.get('chat.context_compaction.prompt_template') or '').strip()
-        prompt = await prompt_template(template or DEFAULT_CONTEXT_COMPACTION_PROMPT, user)
-        prompt = replace_messages_variable(prompt, [], 'RECENT_MESSAGES')
-        prompt = replace_messages_variable(prompt, messages)
-        prompt = replace_messages_variable(prompt, messages, 'COMPACTED_MESSAGES')
-        prompt = prompt.replace('{{PREVIOUS_SUMMARY}}', previous or '')
-        body = {'model': model_id, 'messages': [{'role': 'user', 'content': prompt}], 'stream': False, 'n': 1, 'metadata': {'task': 'context_compaction'}}
-        params = config.get('task.model.params')
-        if isinstance(params, dict):
-            body = apply_params_to_form_data(body, model, params)
+        template = await Config.get('chat.context_compaction.prompt_template') or ''
+        recent = [{'role': 'user', 'content': 'End of historical dialogue.'}]
+        options = {'form_data': None} if 'form_data' in signature(_generate_summary).parameters else {}
         async with asyncio.timeout(45):
-            response = await self.complete(isolated, body, user, bypass_system_prompt=False)
-            if isinstance(response, list) and len(response) == 1:
-                response = response[0]
-            if isinstance(response, StreamingResponse):
-                response = await collect_summary_stream(response.body_iterator)
-        if not isinstance(response, dict):
-            raise SummaryGenerationError('Провайдер вернул ответ сводки в неожиданном формате.')
-        if response.get('error'):
-            raise SummaryGenerationError('Провайдер вернул ошибку в ответе суммаризации.')
-        choices = response.get('choices') or []
-        choice = choices[0] if choices else {}
-        message = choice.get('message') or {}
-        content = message.get('content')
-        if choice.get('finish_reason') == 'length':
-            raise SummaryGenerationError('Генерация сводки достигла лимита модели (finish_reason=length).')
-        if message.get('tool_calls'):
-            raise SummaryGenerationError('Модель суммаризации вернула вызов инструмента.')
-        if choice.get('finish_reason') not in (None, 'stop'):
-            raise SummaryGenerationError('Провайдер прервал генерацию сводки.')
-        return content.strip() if isinstance(content, str) else ''
+            return await _generate_summary(isolated, user=user, model_id=model_id, models={model_id: model}, compacted_messages=messages, recent_messages=recent, previous_summary=previous, summary_prompt_template=template, **options)
 
-    async def complete(self, request, body, user, *, bypass_system_prompt=True):
+    async def complete(self, request, body, user):
         from fastapi import HTTPException
         from starlette.responses import Response, StreamingResponse
         from open_webui.models.config import Config
@@ -2230,7 +2148,7 @@ class OWUIAdapter:
         if await Config.get('chat.context_compaction.enable', False):
             raise RuntimeError('Lite Handoff Router requires full history: disable chat.context_compaction.enable in OWUI before continuing')
         try:
-            response = await generate_chat_completion(request, body, user, bypass_system_prompt=bypass_system_prompt)
+            response = await generate_chat_completion(request, body, user, bypass_system_prompt=True)
         except HTTPException as error:
             try:
                 propagate_provider_error(error.detail)
