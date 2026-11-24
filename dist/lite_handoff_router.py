@@ -2403,59 +2403,69 @@ from uuid import UUID
 def as_dict(value):
     return value.model_dump() if hasattr(value, 'model_dump') else dict(value or {})
 
-async def collect_summary_stream(stream):
-    """Consume an unexpected provider SSE response without streaming it into the chat."""
-    from open_webui.routers.openai import convert_responses_result
+async def summary_stream_lines(stream):
     pending = b''
     received = 0
+    async for chunk in stream:
+        chunk = chunk.encode() if isinstance(chunk, str) else chunk
+        received += len(chunk)
+        if received > 4 * 1024 * 1024:
+            raise SummaryGenerationError('Поток сводки превысил предел в 4 МиБ.')
+        lines = (pending + chunk).split(b'\n')
+        pending = lines.pop()
+        for line in lines:
+            yield line
+    if pending:
+        yield pending
+
+async def collect_summary_stream(stream):
+    """Consume an unexpected provider SSE response without streaming it into the chat."""
     parts = []
     finish_reason = None
+    done_marker = False
     message = {}
     try:
-        async for chunk in stream:
-            chunk = chunk.encode() if isinstance(chunk, str) else chunk
-            received += len(chunk)
-            if received > 4 * 1024 * 1024:
-                raise SummaryGenerationError('Поток сводки превысил предел в 4 МиБ.')
-            lines = (pending + chunk).split(b'\n')
-            pending = lines.pop()
-            for line in lines:
-                if not line.startswith(b'data:'):
-                    continue
-                data = line[5:].strip()
-                if data == b'[DONE]':
-                    break
-                if not data:
-                    continue
-                event = json.loads(data)
-                if not isinstance(event, dict):
-                    raise SummaryGenerationError('Некорректное событие в потоке сводки.')
-                if event.get('error'):
-                    propagate_provider_error(event['error'])
-                kind = event.get('type')
-                if kind == 'response.incomplete':
-                    raise SummaryGenerationError('Провайдер не завершил генерацию сводки.')
-                if kind == 'response.completed':
-                    return convert_responses_result(event['response'])
-                if kind in ('error', 'response.failed'):
-                    propagate_provider_error((event.get('response') or {}).get('error') or event)
-                for choice in event.get('choices') or ():
-                    if choice.get('index', 0) != 0:
-                        continue
-                    delta = choice.get('delta') or {}
-                    if isinstance(delta.get('content'), str):
-                        parts.append(delta['content'])
-                    if delta.get('tool_calls') or delta.get('function_call'):
-                        message['tool_calls'] = True
-                    finish_reason = choice.get('finish_reason') or finish_reason
-            else:
+        async for line in summary_stream_lines(stream):
+            if not line.startswith(b'data:'):
                 continue
-            break
+            data = line[5:].strip()
+            if data == b'[DONE]':
+                done_marker = True
+                break
+            if not data:
+                continue
+            try:
+                event = json.loads(data)
+            except ValueError as error:
+                raise SummaryGenerationError('Некорректное событие в потоке сводки.') from error
+            if not isinstance(event, dict):
+                raise SummaryGenerationError('Некорректное событие в потоке сводки.')
+            if event.get('error'):
+                propagate_provider_error(event['error'])
+            kind = event.get('type')
+            if kind == 'response.incomplete':
+                raise SummaryGenerationError('Провайдер не завершил генерацию сводки.')
+            if kind == 'response.completed':
+                from open_webui.routers.openai import convert_responses_result
+                return convert_responses_result(event['response'])
+            if kind in ('error', 'response.failed'):
+                propagate_provider_error((event.get('response') or {}).get('error') or event)
+            for choice in event.get('choices') or ():
+                if choice.get('index', 0) != 0:
+                    continue
+                delta = choice.get('delta') or {}
+                if isinstance(delta.get('content'), str):
+                    parts.append(delta['content'])
+                if delta.get('tool_calls') or delta.get('function_call'):
+                    message['tool_calls'] = True
+                finish_reason = choice.get('finish_reason') or finish_reason
     finally:
         if hasattr(stream, 'aclose'):
             await stream.aclose()
     if not finish_reason:
-        raise SummaryGenerationError('Поток сводки завершился без признака окончания.')
+        if done_marker:
+            raise SummaryGenerationError('Поток сводки прислал [DONE] без finish_reason или response.completed.')
+        raise SummaryGenerationError('Поток сводки закрылся без завершающего события.')
     message['content'] = ''.join(parts)
     return {'choices': [{'message': message, 'finish_reason': finish_reason}]}
 

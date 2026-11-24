@@ -111,15 +111,21 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
         )
         messages = [{"role": "user", "content": "Old question"}]
         template = "Custom {{PREVIOUS_SUMMARY}} / {{COMPACTED_MESSAGES}} / {{RECENT_MESSAGES}}"
-        for mode in ("json", "stream", "interrupted", "length", "http_error", "empty", "tool_call"):
+        for mode in ("json", "stream", "stream_final_line", "interrupted", "stream_eof",
+                     "stream_length", "length", "http_error", "empty", "tool_call"):
             with self.subTest(mode=mode):
                 choice = {"message": {"content": "Result"}, "finish_reason": "stop"}
                 response = {"choices": [choice]}
-                if mode in ("stream", "interrupted"):
+                if mode in ("stream", "stream_final_line", "interrupted", "stream_eof", "stream_length"):
                     chunks = ['data: {"choices":[{"delta":{"content":"Result"}}]}\n\n']
                     if mode == "stream":
                         chunks.append('data: {"choices":[{"finish_reason":"stop"}]}\n\n')
-                    chunks.append('data: [DONE]\n\n')
+                    if mode in ("stream", "interrupted"):
+                        chunks.append('data: [DONE]\n\n')
+                    if mode == "stream_final_line":
+                        chunks.extend(('data: {"choices":[{"finish_', 'reason":"stop"}]}'))
+                    if mode == "stream_length":
+                        chunks.append('data: {"choices":[{"finish_reason":"length"}]}')
                     response = StreamingResponse(iter(chunks), media_type="text/event-stream")
                 elif mode == "length":
                     choice["finish_reason"] = "length"
@@ -141,11 +147,12 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                 ):
                     operation = OWUIAdapter().generate_shared_summary(
                         request, SimpleNamespace(id="u", role="admin"), "llm", messages, "Earlier")
-                    if mode in ("json", "stream", "empty"):
+                    if mode in ("json", "stream", "stream_final_line", "empty"):
                         self.assertEqual(await operation, "" if mode == "empty" else "Result")
                     else:
                         expected = {
-                            "interrupted": "без признака окончания", "length": "finish_reason=length",
+                            "interrupted": r"\[DONE\].*finish_reason", "stream_eof": "без завершающего события",
+                            "length": "finish_reason=length", "stream_length": "finish_reason=length",
                             "http_error": "Fixture unavailable", "tool_call": "вызов инструмента",
                         }
                         with self.assertRaisesRegex(RuntimeError if mode == "http_error" else SummaryGenerationError,
