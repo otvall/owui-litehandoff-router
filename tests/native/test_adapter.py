@@ -112,12 +112,17 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
         )
         messages = [{"role": "user", "content": "Old question"}]
         template = "Custom {{PREVIOUS_SUMMARY}} / {{COMPACTED_MESSAGES}} / {{RECENT_MESSAGES}}"
-        for mode in ("json", "stream", "stream_final_line", "interrupted", "stream_eof", "stream_non_sse",
+        for mode in ("json", "json_text", "json_bytes", "stream", "stream_final_line", "interrupted", "stream_eof", "stream_non_sse",
+                     "stream_non_sse_incomplete", "stream_non_sse_truncated", "stream_response_json", "stream_html",
                      "stream_length", "length", "http_error", "empty", "tool_call"):
             with self.subTest(mode=mode):
                 choice = {"message": {"content": "Result"}, "finish_reason": "stop"}
                 response = {"choices": [choice]}
-                if mode in ("stream", "stream_final_line", "interrupted", "stream_eof", "stream_length"):
+                if mode == "json_text":
+                    response = json.dumps(response)
+                elif mode == "json_bytes":
+                    response = json.dumps(response).encode()
+                elif mode in ("stream", "stream_final_line", "interrupted", "stream_eof", "stream_length"):
                     chunks = ['data: {"choices":[{"delta":{"content":"Result"}}]}\n\n']
                     if mode == "stream":
                         chunks.append('data: {"choices":[{"finish_reason":"stop"}]}\n\n')
@@ -128,8 +133,20 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                     if mode == "stream_length":
                         chunks.append('data: {"choices":[{"finish_reason":"length"}]}')
                     response = StreamingResponse(iter(chunks), media_type="text/event-stream")
-                elif mode == "stream_non_sse":
-                    response = StreamingResponse(iter([json.dumps({"choices": [choice]})]),
+                elif mode.startswith("stream_non_sse"):
+                    if mode == "stream_non_sse_incomplete":
+                        choice["finish_reason"] = None
+                    raw = json.dumps({"choices": [choice]}, indent=2)
+                    if mode == "stream_non_sse_truncated":
+                        raw = raw[:-1]
+                    response = StreamingResponse(iter((raw[:85], raw[85:])), media_type="text/event-stream")
+                elif mode == "stream_response_json":
+                    raw = json.dumps({"object": "response", "status": "completed", "output": [
+                        {"type": "message", "content": [{"type": "output_text", "text": "Result"}]}
+                    ]})
+                    response = StreamingResponse(iter([raw]), media_type="text/event-stream")
+                elif mode == "stream_html":
+                    response = StreamingResponse(iter(["<html><title>502 Bad Gateway</title>Result</html>"]),
                                                  media_type="text/event-stream")
                 elif mode == "length":
                     choice["finish_reason"] = "length"
@@ -151,20 +168,23 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                 ):
                     operation = OWUIAdapter().generate_shared_summary(
                         request, SimpleNamespace(id="u", role="admin"), "llm", messages, "Earlier")
-                    if mode in ("json", "stream", "stream_final_line", "empty"):
+                    if mode in ("json", "json_text", "json_bytes", "stream", "stream_final_line",
+                                "stream_non_sse", "stream_response_json", "empty"):
                         self.assertEqual(await operation, "" if mode == "empty" else "Result")
                     else:
                         expected = {
                             "interrupted": r"\[DONE\].*finish_reason.*SSE-кадров: 1.*фрагментов текста: 1",
                             "stream_eof": r"без завершающего события.*SSE-кадров: 1.*фрагментов текста: 1",
-                            "stream_non_sse": r"без завершающего события.*SSE-кадров: 0.*фрагментов текста: 0",
+                            "stream_non_sse_incomplete": r"без завершающего события.*JSON-событий без SSE: 1",
+                            "stream_non_sse_truncated": r"без завершающего события.*SSE-кадров: 0",
+                            "stream_html": r"без завершающего события.*SSE-кадров: 0.*HTML/XML, код 502",
                             "length": "finish_reason=length", "stream_length": "finish_reason=length",
                             "http_error": "Fixture unavailable", "tool_call": "вызов инструмента",
                         }
                         with self.assertRaisesRegex(RuntimeError if mode == "http_error" else SummaryGenerationError,
                                                     expected[mode]) as failure:
                             await operation
-                        if mode in ("interrupted", "stream_eof", "stream_non_sse"):
+                        if mode in ("interrupted", "stream_eof", "stream_non_sse_truncated", "stream_html"):
                             self.assertNotIn("Result", str(failure.exception))
                 access.assert_awaited_once()
                 body = provider.await_args.kwargs["form_data"]

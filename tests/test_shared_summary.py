@@ -1,5 +1,6 @@
 from copy import deepcopy
 from asyncio import CancelledError
+import json
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock
@@ -8,12 +9,55 @@ from lite_handoff_router.agent_history_block import pack_agent_history
 from lite_handoff_router.context_policy import ContextPolicy
 from lite_handoff_router.history import agent_projection, router_projection
 from lite_handoff_router.observation import observe_response
+from lite_handoff_router.owui_adapter import collect_summary_stream
 from lite_handoff_router.shared_summary import (ProviderContextOverflow, SharedSummary, check_initial_stream,
-                                                last_prompt_tokens, prompt_token_count)
+                                                SummaryGenerationError, last_prompt_tokens, prompt_token_count)
 from tests.test_history import turn
 
 
 class SharedSummaryTest(IsolatedAsyncioTestCase):
+    async def test_summary_body_formats_preserve_utf8_and_keep_the_last_snapshot(self):
+        events = [
+            {"choices": [{"delta": {"content": "Дельта"}}]},
+            {"choices": [{"message": {"content": "Старый снимок"}}]},
+            {"choices": [{"message": {"content": "Итог 🧪"}, "finish_reason": "stop"}]},
+        ]
+        lines = [json.dumps(event, ensure_ascii=False).encode() for event in events]
+        bodies = {
+            "NDJSON": b"\n".join(lines),
+            "JSON array": b"[" + b",\n".join(lines) + b"]",
+            "SSE": b"".join(b"data: " + line + b"\n\n" for line in lines) + b"data: [DONE]\n\n",
+        }
+        expected = {"choices": [{"message": {"content": "Итог 🧪"}, "finish_reason": "stop"}]}
+        self.assertEqual(await collect_summary_stream(events), expected)
+        for name, body in bodies.items():
+            with self.subTest(format=name):
+                closed = []
+                split = body.index("🧪".encode()) + 2
+
+                async def chunks():
+                    try:
+                        yield body[:split]
+                        yield body[split:]
+                        if name == "SSE":
+                            self.fail("Chunks after [DONE] must not be read")
+                    finally:
+                        closed.append(True)
+
+                self.assertEqual(await collect_summary_stream(chunks()), expected)
+                self.assertEqual(closed, [True])
+
+    async def test_summary_unframed_events_preserve_provider_error_and_require_completion(self):
+        body = b'{"error":{"code":"context_length_exceeded","message":"Context length exceeded"}}'
+        with self.assertRaises(ProviderContextOverflow):
+            await collect_summary_stream(body)
+        first = b'{"choices":[{"delta":{"content":"One"}}]}'
+        last = b'{"choices":[{"delta":{"content":" two"},"finish_reason":"stop"}]}'
+        result = await collect_summary_stream(first + b"\n" + last)
+        self.assertEqual(result["choices"][0]["message"]["content"], "One two")
+        with self.assertRaisesRegex(SummaryGenerationError, "JSON-событий без SSE: 1"):
+            await collect_summary_stream(b"[" + first + b"]")
+
     def test_agent_token_count_uses_the_latest_sample_for_the_same_agent_and_model(self):
         state = {
             "historical_agent_usage": {

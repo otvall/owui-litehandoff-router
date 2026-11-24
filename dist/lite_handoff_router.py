@@ -2398,15 +2398,23 @@ from copy import deepcopy
 import hashlib
 import json
 import logging
+import re
 from uuid import UUID
 
 def as_dict(value):
     return value.model_dump() if hasattr(value, 'model_dump') else dict(value or {})
 
 async def summary_stream_lines(stream):
+    if isinstance(stream, (str, bytes)):
+
+        async def buffered_chunks():
+            yield stream
+        chunks = buffered_chunks()
+    else:
+        chunks = stream
     pending = b''
     received = 0
-    async for chunk in stream:
+    async for chunk in chunks:
         chunk = chunk.encode() if isinstance(chunk, str) else chunk
         received += len(chunk)
         if received > 4 * 1024 * 1024:
@@ -2418,58 +2426,114 @@ async def summary_stream_lines(stream):
     if pending:
         yield pending
 
+def summary_unframed_events(body):
+    if not body.strip():
+        return ([], '')
+    if body.lstrip().startswith(b'<'):
+        status = re.search(b'(?i)<title>\\s*([45][0-9]{2})\\b', body[:512])
+        return ([], f'HTML/XML, код {status[1].decode()}' if status else 'HTML/XML')
+    try:
+        decoded = body.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return ([], 'некорректный UTF-8')
+    try:
+        parsed = json.loads(decoded)
+        events = parsed if isinstance(parsed, list) else [parsed]
+    except ValueError:
+        try:
+            events = [json.loads(line) for line in decoded.split('\n') if line.strip()]
+        except ValueError:
+            return ([], 'нераспознанное тело')
+    if events and all((isinstance(event, dict) for event in events)):
+        return (events, '')
+    return ([], 'неожиданная структура JSON')
+
+async def summary_stream_events(stream, stats):
+    if isinstance(stream, list):
+        if not all((isinstance(event, dict) for event in stream)):
+            raise SummaryGenerationError('Некорректный список событий в ответе сводки.')
+        stats['json_events'] = len(stream)
+        for event in stream:
+            yield event
+        return
+    unframed = bytearray()
+    async for line in summary_stream_lines(stream):
+        stats['bytes'] += len(line)
+        if not line.startswith(b'data:'):
+            if not stats['frames']:
+                unframed.extend(line + b'\n')
+            continue
+        data = line[5:].strip()
+        if data == b'[DONE]':
+            stats['done'] = True
+            return
+        if not data:
+            continue
+        try:
+            event = json.loads(data)
+        except ValueError as error:
+            raise SummaryGenerationError('Некорректное событие в потоке сводки.') from error
+        if not isinstance(event, dict):
+            raise SummaryGenerationError('Некорректное событие в потоке сводки.')
+        stats['frames'] += 1
+        unframed.clear()
+        yield event
+    if not stats['frames']:
+        events, stats['format'] = summary_unframed_events(unframed)
+        stats['json_events'] = len(events)
+        for event in events:
+            yield event
+
 async def collect_summary_stream(stream):
-    """Consume an unexpected provider SSE response without streaming it into the chat."""
+    """Read Chat Completions or Responses events from the body, regardless of transport."""
     parts = []
+    snapshot = None
     finish_reason = None
-    done_marker = False
-    frame_count = 0
-    line_bytes = 0
+    stats = {'frames': 0, 'bytes': 0, 'done': False, 'format': '', 'json_events': 0}
+    text_fragments = 0
     message = {}
     try:
-        async for line in summary_stream_lines(stream):
-            line_bytes += len(line)
-            if not line.startswith(b'data:'):
-                continue
-            data = line[5:].strip()
-            if data == b'[DONE]':
-                done_marker = True
-                break
-            if not data:
-                continue
-            try:
-                event = json.loads(data)
-            except ValueError as error:
-                raise SummaryGenerationError('Некорректное событие в потоке сводки.') from error
-            if not isinstance(event, dict):
-                raise SummaryGenerationError('Некорректное событие в потоке сводки.')
-            frame_count += 1
+        async for event in summary_stream_events(stream, stats):
             if event.get('error'):
                 propagate_provider_error(event['error'])
             kind = event.get('type')
-            if kind == 'response.incomplete':
+            status = event.get('status') if event.get('object') == 'response' else None
+            if kind == 'response.incomplete' or status == 'incomplete':
                 raise SummaryGenerationError('Провайдер не завершил генерацию сводки.')
-            if kind == 'response.completed':
+            if kind == 'response.completed' or status == 'completed':
                 from open_webui.routers.openai import convert_responses_result
-                return convert_responses_result(event['response'])
+                return convert_responses_result(event['response'] if kind == 'response.completed' else event)
             if kind in ('error', 'response.failed'):
                 propagate_provider_error((event.get('response') or {}).get('error') or event)
-            for choice in event.get('choices') or ():
-                if choice.get('index', 0) != 0:
+            if status == 'failed':
+                raise SummaryGenerationError('Провайдер не завершил генерацию сводки.')
+            choices = event.get('choices') or []
+            if not isinstance(choices, list):
+                raise SummaryGenerationError('Некорректное поле choices в ответе сводки.')
+            for choice in choices:
+                if not isinstance(choice, dict) or choice.get('index', 0) != 0:
                     continue
                 delta = choice.get('delta') or {}
+                full = choice.get('message') or {}
+                if not isinstance(delta, dict) or not isinstance(full, dict):
+                    raise SummaryGenerationError('Некорректное сообщение в ответе сводки.')
                 if isinstance(delta.get('content'), str):
                     parts.append(delta['content'])
-                if delta.get('tool_calls') or delta.get('function_call'):
+                    text_fragments += 1
+                if isinstance(full.get('content'), str):
+                    snapshot = full['content']
+                    text_fragments += 1
+                if delta.get('tool_calls') or delta.get('function_call') or full.get('tool_calls') or full.get('function_call'):
                     message['tool_calls'] = True
                 finish_reason = choice.get('finish_reason') or finish_reason
     finally:
         if hasattr(stream, 'aclose'):
             await stream.aclose()
     if not finish_reason:
-        reason = 'Поток сводки прислал [DONE] без finish_reason или response.completed.' if done_marker else 'Поток сводки закрылся без завершающего события.'
-        raise SummaryGenerationError(f'{reason} SSE-кадров: {frame_count}, фрагментов текста: {len(parts)}, байт в строках: {line_bytes}.')
-    message['content'] = ''.join(parts)
+        reason = 'Поток сводки прислал [DONE] без finish_reason или response.completed.' if stats['done'] else 'Поток сводки закрылся без завершающего события.'
+        body_format = f" Формат тела: {stats['format']}." if stats['format'] else ''
+        raise SummaryGenerationError(f"{reason} SSE-кадров: {stats['frames']}, фрагментов текста: {text_fragments}, байт в строках: {stats['bytes']}, JSON-событий без SSE: {stats['json_events']}." + body_format)
+    message['content'] = snapshot if snapshot is not None else ''.join(parts)
     return {'choices': [{'message': message, 'finish_reason': finish_reason}]}
 
 def register_model_tool(registry, name, tool, namespace):
@@ -3125,12 +3189,12 @@ class OWUIAdapter:
         body.pop('stream_options', None)
         async with asyncio.timeout(45):
             response = await self.complete(isolated, body, user, bypass_system_prompt=False)
-            if isinstance(response, list) and len(response) == 1:
-                response = response[0]
-            if isinstance(response, StreamingResponse):
-                response = await collect_summary_stream(response.body_iterator)
-        if not isinstance(response, dict):
-            raise SummaryGenerationError('Провайдер вернул ответ сводки в неожиданном формате.')
+            if not isinstance(response, dict):
+                if isinstance(response, StreamingResponse):
+                    response = response.body_iterator
+                elif not isinstance(response, (str, bytes, list)):
+                    raise SummaryGenerationError('Провайдер вернул ответ сводки в неожиданном формате.')
+                response = await collect_summary_stream(response)
         if response.get('error'):
             propagate_provider_error(response['error'])
         choices = response.get('choices') or []
