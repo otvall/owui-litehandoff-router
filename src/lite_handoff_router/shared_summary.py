@@ -9,10 +9,12 @@ import re
 import traceback
 from pathlib import PurePath
 
-from .history import agent_dialogue, analyze
+from .history import agent_dialogue, analyze, describe_visualizations
 from .protocol import tool_image
 
 SUMMARY_INPUT_LIMIT = 60000
+SUMMARY_TEXT_PARTS = {"text", "input_text", "output_text"}
+SUMMARY_INLINE_MEDIA = re.compile(r"data:(?:image|audio|video)/[\w.+-]+;base64,[A-Za-z0-9+/=_-]+", re.IGNORECASE)
 OVERFLOW_MESSAGES = re.compile(
     r"context.length.exceeded|(?:context|input|prompt) (?:window|length)(?: limit)? "
     r"(?:is |was )?(?:exceeded|too (?:long|large))|maximum context length|"
@@ -86,13 +88,31 @@ def actual_user(message):
     return message.get("role") == "user" and not tool_image(message)
 
 
-
 def summary_projection_turns(messages, packet):
     """Completed turns as received before/after destination inlets."""
     starts = [i for i, message in enumerate(messages) if actual_user(message) and message != packet]
     sequence = [messages[start:end] for start, end in zip(starts, starts[1:])]
     return [[message for message in turn if message.get("role") != "system" and message != packet]
             for turn in sequence]
+
+
+def recap_dialogue_text(content):
+    if isinstance(content, list):
+        content = "\n".join(part["text"] for part in content
+                            if isinstance(part, dict) and part.get("type") in SUMMARY_TEXT_PARTS
+                            and isinstance(part.get("text"), str))
+    return SUMMARY_INLINE_MEDIA.sub("[Медиа было в исходном ходе.]", content) if isinstance(content, str) else ""
+
+
+def recap_agent_activity(content):
+    packet = json.loads(content)
+    if packet.get("reply"):
+        packet["reply"] = describe_visualizations(recap_dialogue_text(packet["reply"]), [])
+    for event in packet["events"]:
+        if event["type"] == "assistant":
+            event["content"] = describe_visualizations(recap_dialogue_text(event["content"]), [])
+    return json.dumps(packet, ensure_ascii=False)
+
 
 def shared_turns(state):
     messages = state["source"]
@@ -105,33 +125,34 @@ def shared_turns(state):
     digest = hashlib.sha256(b"lite-shared-summary-v2")
     turns = []
     for start, end in zip(starts, starts[1:] + [boundary]):
-        original = messages[start:end]
-        visible = [m for m in original if m.get("role") in ("user", "assistant") and not tool_image(m)]
-        if any(m.get("files") or m.get("embeds") or
-               not isinstance(m.get("content") or "", str) or "@@@VIZ-START" in (m.get("content") or "")
-               for m in visible):
-            return turns, f"Ход №{len(turns) + 1} содержит вложение, медиа или Inline Visualizer."
-        if any(m.get("role") == "tool" and (m.get("files") or m.get("embeds")) or tool_image(m)
-               for m in original):
-            return turns, f"Ход №{len(turns) + 1} содержит медиа или вложение в результате инструмента."
+        source_user = messages[start]
         dialogue, visible_dialogue = [], []
         for i in range(start, end):
             message = messages[i]
-            if actual_user(message):
-                line = {"role": "user", "content": message.get("content") or ""}
+            if i == start:
+                text = recap_dialogue_text(source_user.get("content"))
+                line = {"role": "user", "content": text}
                 dialogue.append(line)
                 visible_dialogue.append(line)
             for item in packets.get(i, ()):
                 if item["role"] == "tool":
-                    dialogue.append({"role": "assistant", "content": item["content"]})
-            if message["role"] == "assistant" and (text := content.get(i, message.get("content"))):
-                line = {"role": "assistant", "content": text}
-                dialogue.append(line)
-                visible_dialogue.append(line)
-        digest.update(json.dumps([messages[start].get("id"), dialogue], ensure_ascii=False).encode())
+                    dialogue.append({"role": "assistant", "content": recap_agent_activity(item["content"])})
+            if message["role"] == "assistant":
+                text = recap_dialogue_text(content.get(i, message.get("content")))
+                if text:
+                    line = {"role": "assistant", "content": describe_visualizations(text, [])}
+                    dialogue.append(line)
+                    visible_dialogue.append(line)
+        if any(m.get("files") or m.get("embeds") or
+               isinstance(m.get("content"), list) and any(
+                   isinstance(part, dict) and part.get("type") not in SUMMARY_TEXT_PARTS
+                   for part in m["content"])
+               for m in messages[start:end] if m.get("role") in {"user", "assistant", "tool"}):
+            dialogue.append({"role": "assistant", "content": "[В исходном ходе были медиа или вложения.]"})
+        digest.update(json.dumps([source_user.get("id"), dialogue], ensure_ascii=False).encode())
         turns.append({"key": digest.hexdigest(), "messages": dialogue, "visible_dialogue": visible_dialogue,
-                      "next_user": messages[end]})
-    return turns, None
+                      "source_user": source_user, "next_user": messages[end]})
+    return turns
 
 
 def shared_summary_reference(text, covered):
@@ -156,7 +177,7 @@ class SharedSummary:
         policy = state["context_policy"]
         self.model_id = policy["shared_summary_model_id"].strip()
         self.context_percent = policy["shared_summary_context_percent"]
-        self.turns, self.blocked_turn = shared_turns(state) if self.model_id and not state.get("worker") else ([], None)
+        self.turns = shared_turns(state) if self.model_id and not state.get("worker") else []
         self.checkpoint = None
         self.applied_turns = 0
 
@@ -179,7 +200,7 @@ class SharedSummary:
         eligible = set()
         for count, turn in enumerate(self.turns, 1):
             if (len(users) <= count or (guard is not None and count > guard)
-                    or (messages[users[count - 1]].get("content") or "") != turn["messages"][0]["content"]):
+                    or messages[users[count - 1]].get("content") != turn["source_user"].get("content")):
                 break
             if any(message in protected for message in messages[users[count - 1]:users[count]]):
                 break
@@ -230,8 +251,6 @@ class SharedSummary:
         if not candidates:
             if start < len(self.turns):
                 reason = "История в запросе к модели отличается от исходной. Безопасная граница сжатия не найдена."
-            elif self.blocked_turn:
-                reason = f"{self.blocked_turn} Сжатие останавливается перед этим ходом."
             elif start:
                 reason = "Все доступные старые ходы уже входят в сводку."
             else:

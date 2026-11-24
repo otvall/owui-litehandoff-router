@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock
 
+from lite_handoff_router.agent_history_block import pack_agent_history
 from lite_handoff_router.context_policy import ContextPolicy
+from lite_handoff_router.history import agent_projection, router_projection
 from lite_handoff_router.observation import observe_response
 from lite_handoff_router.shared_summary import (ProviderContextOverflow, SharedSummary, check_initial_stream,
                                                 last_prompt_tokens, prompt_token_count)
@@ -94,7 +96,6 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         past = {"role": "user", "content": "Past"}
         for old, projected, expected in (
             ([], [current], "ещё нет старых ходов"),
-            ([{**past, "files": [{"id": "fixture"}]}], [past, current], "Ход №1 содержит вложение"),
             ([past], [{**past, "content": "Rewritten"}, current], "отличается от исходной"),
             ([{**past, "content": "x" * 60001}], None, "60001 символов при лимите 60000"),
         ):
@@ -113,6 +114,61 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
                 self.assertEqual(view["messages"], messages)
                 self.assertIn(expected, emitter.await_args.args[0]["data"]["description"])
                 adapter.generate_shared_summary.assert_not_awaited()
+
+    async def test_first_turn_media_and_visualizer_compact_into_one_summary_for_router_and_agent(self):
+        image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,OLD_IMAGE"}}
+        old = turn("a", "PRIVATE_RAW_TOOL_RESULT")
+        old[0]["content"] = [{"type": "text", "text": "Посмотри фото WH-8031"}, image]
+        old[0]["files"] = [{"id": "OLD_USER_ATTACHMENT"}]
+        old[-2]["files"] = [{"id": "OLD_TOOL_ATTACHMENT"}]
+        old[-1]["content"] = (
+            "Доступно 15 единиц.\n@@@VIZ-START\n<svg>PRIVATE_CHART_SOURCE</svg>\n@@@VIZ-END\n"
+            "Следующий шаг: сверить склад."
+        )
+        old[-1]["embeds"] = ["PRIVATE_IFRAME"]
+        old.insert(-1, {"role": "user", "content": [
+            {"type": "text", "text": "Here are the images from the tool results above. Please analyze them."},
+            image,
+        ]})
+        more = [{"role": "user", "content": "Запомни дату 18.11.2026"},
+                {"role": "assistant", "content": "Дата подтверждена."}]
+        current = {"role": "user", "content": [
+            {"type": "text", "text": "Проверь новое изображение"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,CURRENT_IMAGE"}},
+        ]}
+        state = {"source": old + more + [current], "user_boundary": len(old + more), "audit": [],
+                 "context_policy": ContextPolicy(shared_summary_model_id="summary",
+                                                shared_summary_context_percent=100).model_dump()}
+        original = deepcopy(state["source"])
+        adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
+                                  save_shared_summary=AsyncMock(),
+                                  generate_shared_summary=AsyncMock(return_value="Сводка о складе"))
+        router_messages = router_projection(state, set(), set())
+        router = {"messages": deepcopy(router_messages)}
+        summary = SharedSummary(adapter, None, None, state)
+        await summary.load(router)
+        self.assertTrue(await summary.extend(router, None, router_messages, trigger="Бюджет"))
+        self.assertEqual(summary.applied_turns, 2)
+        supplied = str(adapter.generate_shared_summary.await_args.args[3])
+        for text in ("WH-8031", "Доступно 15", "Визуализация", "Следующий шаг",
+                     "В исходном ходе были медиа или вложения", "Дата подтверждена"):
+            self.assertIn(text, supplied)
+        for raw in ("OLD_IMAGE", "OLD_USER_ATTACHMENT", "OLD_TOOL_ATTACHMENT", "PRIVATE_IFRAME",
+                    "PRIVATE_CHART_SOURCE", "PRIVATE_RAW_TOOL_RESULT", "CURRENT_IMAGE"):
+            self.assertNotIn(raw, supplied)
+        self.assertEqual(router["messages"][-1], current)
+        self.assertIn("[Shared conversation summary]", router["messages"][0]["content"])
+
+        agent = {"messages": agent_projection(state, "a", {"lookup"}, set())}
+        shared = SharedSummary(adapter, None, None, state)
+        await shared.load(agent)
+        self.assertTrue(shared.apply(agent, None))
+        pack_agent_history(agent["messages"], state, current, covered_turns=shared.applied_turns)
+        self.assertEqual(agent["messages"][-1], current)
+        self.assertIn("[Conversation history]", agent["messages"][0]["content"])
+        self.assertIn("Сводка о складе", agent["messages"][0]["content"])
+        self.assertEqual(state["source"], original)
+        adapter.generate_shared_summary.assert_awaited_once()
 
     async def test_summary_share_uses_estimated_tokens_and_whole_turns(self):
         first = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b" * 12}]
