@@ -41,9 +41,12 @@ async def collect_summary_stream(stream):
     parts = []
     finish_reason = None
     done_marker = False
+    frame_count = 0
+    line_bytes = 0
     message = {}
     try:
         async for line in summary_stream_lines(stream):
+            line_bytes += len(line)
             if not line.startswith(b"data:"):
                 continue
             data = line[5:].strip()
@@ -58,6 +61,7 @@ async def collect_summary_stream(stream):
                 raise SummaryGenerationError("Некорректное событие в потоке сводки.") from error
             if not isinstance(event, dict):
                 raise SummaryGenerationError("Некорректное событие в потоке сводки.")
+            frame_count += 1
             if event.get("error"):
                 propagate_provider_error(event["error"])
             kind = event.get("type")
@@ -82,9 +86,11 @@ async def collect_summary_stream(stream):
         if hasattr(stream, "aclose"):
             await stream.aclose()
     if not finish_reason:
-        if done_marker:
-            raise SummaryGenerationError("Поток сводки прислал [DONE] без finish_reason или response.completed.")
-        raise SummaryGenerationError("Поток сводки закрылся без завершающего события.")
+        reason = ("Поток сводки прислал [DONE] без finish_reason или response.completed." if done_marker
+                  else "Поток сводки закрылся без завершающего события.")
+        raise SummaryGenerationError(
+            f"{reason} SSE-кадров: {frame_count}, фрагментов текста: {len(parts)}, байт в строках: {line_bytes}."
+        )
     message["content"] = "".join(parts)
     return {"choices": [{"message": message, "finish_reason": finish_reason}]}
 

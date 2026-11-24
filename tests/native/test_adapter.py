@@ -1,5 +1,6 @@
 import copy
 import inspect
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -111,7 +112,7 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
         )
         messages = [{"role": "user", "content": "Old question"}]
         template = "Custom {{PREVIOUS_SUMMARY}} / {{COMPACTED_MESSAGES}} / {{RECENT_MESSAGES}}"
-        for mode in ("json", "stream", "stream_final_line", "interrupted", "stream_eof",
+        for mode in ("json", "stream", "stream_final_line", "interrupted", "stream_eof", "stream_non_sse",
                      "stream_length", "length", "http_error", "empty", "tool_call"):
             with self.subTest(mode=mode):
                 choice = {"message": {"content": "Result"}, "finish_reason": "stop"}
@@ -127,6 +128,9 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                     if mode == "stream_length":
                         chunks.append('data: {"choices":[{"finish_reason":"length"}]}')
                     response = StreamingResponse(iter(chunks), media_type="text/event-stream")
+                elif mode == "stream_non_sse":
+                    response = StreamingResponse(iter([json.dumps({"choices": [choice]})]),
+                                                 media_type="text/event-stream")
                 elif mode == "length":
                     choice["finish_reason"] = "length"
                 elif mode == "http_error":
@@ -151,13 +155,17 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(await operation, "" if mode == "empty" else "Result")
                     else:
                         expected = {
-                            "interrupted": r"\[DONE\].*finish_reason", "stream_eof": "без завершающего события",
+                            "interrupted": r"\[DONE\].*finish_reason.*SSE-кадров: 1.*фрагментов текста: 1",
+                            "stream_eof": r"без завершающего события.*SSE-кадров: 1.*фрагментов текста: 1",
+                            "stream_non_sse": r"без завершающего события.*SSE-кадров: 0.*фрагментов текста: 0",
                             "length": "finish_reason=length", "stream_length": "finish_reason=length",
                             "http_error": "Fixture unavailable", "tool_call": "вызов инструмента",
                         }
                         with self.assertRaisesRegex(RuntimeError if mode == "http_error" else SummaryGenerationError,
-                                                    expected[mode]):
+                                                    expected[mode]) as failure:
                             await operation
+                        if mode in ("interrupted", "stream_eof", "stream_non_sse"):
+                            self.assertNotIn("Result", str(failure.exception))
                 access.assert_awaited_once()
                 body = provider.await_args.kwargs["form_data"]
                 self.assertIs(body["stream"], False)
