@@ -81,3 +81,44 @@ class NativeHandoffHistoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await adapter.shared_summary_cache(summary_state, actor, "summary"), {
             "old": "Older summary", "new": "Newer summary",
         })
+
+    async def test_shared_summary_save_rejects_an_edited_prefix_and_merges_metadata(self):
+        import asyncio
+        from open_webui.models.chats import Chats, ChatForm
+        from open_webui.models.users import Users
+
+        cid, actor_id = str(uuid4()), str(uuid4())
+        user = await Users.insert_new_user(actor_id, "Summary actor", actor_id + "@example.test", role="user")
+        output = [{"type": "message", "id": "m", "role": "assistant", "status": "completed",
+                   "content": [{"type": "output_text", "text": "Past answer"}]}]
+        messages = {
+            "u1": {"id": "u1", "role": "user", "content": "Past", "parentId": None},
+            "a1": {"id": "a1", "role": "assistant", "content": "Past answer", "parentId": "u1", "output": output},
+            "u2": {"id": "u2", "role": "user", "content": "Current question", "parentId": "a1"},
+            "a2": {"id": "a2", "role": "assistant", "content": "", "parentId": "u2", "done": False},
+        }
+        await Chats.insert_new_chat(cid, user.id, ChatForm(chat={"history": {"currentId": "a2", "messages": messages}}))
+        state = {"chat_id": cid, "message_id": "a2", "user_id": user.id, "router_id": "router"}
+        adapter = OWUIAdapter()
+        original = await adapter.shared_summary_source_version(state, user, 1)
+        self.assertIsInstance(original, str)
+        await Chats.upsert_message_to_chat_by_id_and_message_id(cid, "u1", {"content": "Edited"})
+        self.assertIs(await adapter.save_shared_summary(state, user, "summary", "old", "Stale",
+                                                        covered_turns=1, source_version=original), False)
+        edited = await adapter.shared_summary_source_version(state, user, 1)
+        self.assertNotEqual(original, edited)
+
+        async def update_chat_metadata():
+            async with Chats._chat_transaction(cid) as (_, row):
+                row.meta = {**(row.meta or {}), "other_feature": {"kept": True}}
+
+        await asyncio.gather(
+            update_chat_metadata(),
+            adapter.save_shared_summary(state, user, "summary", "new", "Current",
+                                        covered_turns=1, source_version=edited),
+        )
+        self.assertEqual(await adapter.shared_summary_cache(state, user, "summary"), {"new": "Current"})
+        self.assertEqual((await Chats.get_chat_by_id(cid)).meta["other_feature"], {"kept": True})
+        self.assertEqual((await Chats.get_messages_map_by_chat_id(cid))["a1"]["output"], output)
+        self.assertEqual(await adapter.save_shared_summary(state, user, "summary", "new", "Other wording",
+                                                          covered_turns=1, source_version=edited), "Current")

@@ -27,11 +27,18 @@ class Filter:
         @field_validator(
             "priority", "max_parallel_tasks", "parallel_timeout_seconds",
             "tool_result_history_limit", "router_summary_trigger_tokens", "agent_summary_trigger_tokens",
-            "shared_summary_context_percent",
+            "shared_summary_context_percent", "context_input_budget_tokens", "context_safety_margin_tokens",
             mode="before")
         @classmethod
         def reject_boolean_number(cls, value):
             if isinstance(value, bool):
+                raise ValueError("Boolean is not a numeric setting")
+            return value
+
+        @field_validator("context_model_input_budgets", mode="before")
+        @classmethod
+        def reject_boolean_budgets(cls, value):
+            if isinstance(value, dict) and any(isinstance(limit, bool) for limit in value.values()):
                 raise ValueError("Boolean is not a numeric setting")
             return value
 

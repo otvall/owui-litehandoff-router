@@ -16,8 +16,6 @@ def catalog_result(messages):
 
 def work_results(messages):
     ids = catalog_ids(messages)
-    ids.update(call["id"] for message in messages for call in message.get("tool_calls", ())
-               if call["function"]["name"] == "load_conversation_history")
     return [m for m in messages if m.get("role") == "tool" and m.get("tool_call_id") not in ids]
 
 

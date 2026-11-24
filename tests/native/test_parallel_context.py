@@ -260,10 +260,28 @@ class Tools:
         overflow = [p for p in self.seen if p["model"] == self.agent and "OVERFLOW_ASSIGNMENT" in str(p)]
         self.assertEqual(len(overflow), 1)
 
+    async def test_worker_budget_is_checked_before_dispatching_to_the_model(self):
+        from open_webui.utils import chat
+
+        self.preparation.valves.context_input_budget_tokens = 50000
+        self.preparation.valves.context_model_input_budgets = {self.agent: 3100}
+        self.assignments = [{"agent_id": self.agent, "task": "oversized " * 1000},
+                            {"agent_id": self.agent, "task": "Keep a short assignment"}]
+        body, metadata = await self.parent("PARENT_REQUEST: two assignments")
+        with patch.object(chat, "generate_openai_chat_completion", self.provider):
+            await self.run_loop(self.request, body, self.user, metadata)
+        results = self.request.scope["lite_handoff_router"]["parallel"]["results"]
+        self.assertEqual([result["status"] for result in results], ["failed", "completed"], results)
+        dispatched = [p for p in self.seen if p["model"] == self.agent]
+        self.assertNotIn("oversized oversized", str(dispatched))
+        self.assertIn("Keep a short assignment", str(dispatched))
+
     async def test_final_handoff_keeps_parent_dialogue_and_complete_results(self):
         from open_webui.utils import chat
 
         self.preparation.valves.tool_result_history_limit = 0
+        self.preparation.valves.context_input_budget_tokens = 30000
+        self.preparation.valves.context_model_input_budgets = {self.agent: 12000}
         self.final_handoff = True
         self.assignments = [{"agent_id": self.agent, "task": "FIRST_FORECAST: FTP-42"},
                             {"agent_id": self.agent, "task": "SECOND_FORECAST: FTP-99"}]

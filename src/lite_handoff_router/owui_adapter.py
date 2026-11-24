@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import deepcopy
+import hashlib
 import json
 import logging
 from uuid import UUID
@@ -755,22 +756,55 @@ class OWUIAdapter:
             logging.getLogger(__name__).warning("Shared summary cache unreadable (%s)", type(error).__name__)
             return {}
 
-    async def save_shared_summary(self, state, user, model_id, key, summary):
+    async def shared_summary_source_version(self, state, user, covered_turns, *, db=None):
+        from open_webui.models.chat_messages import ChatMessages
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+        from open_webui.utils.misc import get_message_list
+
+        if not is_saved_chat_id(state["chat_id"]) or state["user_id"] != user.id:
+            return None
+        if db is None:
+            mapping = await Chats.get_messages_map_by_chat_id(state["chat_id"])
+        else:
+            mapping = await ChatMessages.get_messages_map_by_chat_id(state["chat_id"], db=db)
+        if not mapping:
+            return None
+        branch = get_message_list(mapping, state["message_id"])
+        users = [i for i, message in enumerate(branch) if message.get("role") == "user"]
+        if len(users) <= covered_turns:
+            return None
+        prefix = [{key: message.get(key) for key in
+                   ("id", "parentId", "role", "content", "output", "files", "embeds")}
+                  for message in branch[:users[covered_turns]]]
+        return hashlib.sha256(json.dumps(prefix, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    async def save_shared_summary(self, state, user, model_id, key, summary, *, covered_turns=None, source_version=None):
         from open_webui.models.chats import Chats
         from open_webui.utils.chat_id import is_saved_chat_id
 
         if not is_saved_chat_id(state["chat_id"]):
             return
         try:
-            async with Chats._chat_transaction(state["chat_id"]) as (_, row):
+            async with Chats._chat_transaction(state["chat_id"]) as (db, row):
                 if row is None or row.user_id != user.id:
-                    return
+                    return False
+                if covered_turns is not None:
+                    if source_version is None:
+                        return None
+                    latest = await self.shared_summary_source_version(state, user, covered_turns, db=db)
+                    if latest != source_version:
+                        return False
                 entry = {"summary": summary, "key": key, "model": model_id, "router": state["router_id"]}
                 meta = dict(row.meta or {})
                 entries = meta.get("lite_shared_summaries") or []
-                meta["lite_shared_summaries"] = ([old for old in entries if any(
-                    old.get(field) != entry[field] for field in ("router", "model", "key"))] + [entry])[-8:]
+                for old in entries:
+                    if all(old.get(field) == entry[field] for field in ("router", "model", "key")):
+                        if isinstance(old.get("summary"), str) and old["summary"].strip():
+                            return old["summary"]
+                meta["lite_shared_summaries"] = (entries + [entry])[-8:]
                 row.meta = meta
+                return summary
         except Exception as error:
             logging.getLogger(__name__).warning("Shared summary cache write failed (%s)", type(error).__name__)
 

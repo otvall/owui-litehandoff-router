@@ -1,9 +1,8 @@
-"""Render an agent's already-filtered past turns as a preloaded Tool result."""
+"""Render an agent's already-filtered past turns as a separate reference message."""
 
 import json
-from uuid import uuid4
 
-from .history import CONVERSATION_HISTORY_TOOL, HISTORICAL_AGENT_TURN, analyze, historical_handoffs
+from .history import HISTORICAL_AGENT_TURN, analyze, historical_handoffs
 from .native_context import native_record
 from .protocol import completed_pairs, object_value, tool_image
 from .tool_history import result_placeholder, result_status
@@ -109,16 +108,7 @@ def pack_agent_history(messages, state, current_question, *, covered_turns=0, pa
             events.append({"type": "tool_calls", "calls": calls})
 
     text = AGENT_HISTORY_HEADING + "\n" + json.dumps(history, ensure_ascii=False, separators=(",", ":"))
-    if "agent_history_call_id" not in state:
-        state["agent_history_call_id"] = "lhr_history_" + uuid4().hex[:24]
-    call_id = state["agent_history_call_id"]
-    block = [
-        {"role": "assistant", "content": "", "tool_calls": [{
-            "id": call_id, "type": "function",
-            "function": {"name": CONVERSATION_HISTORY_TOOL, "arguments": "{}"},
-        }]},
-        {"role": "tool", "tool_call_id": call_id, "content": text},
-    ]
+    block = []
     if media or attachments:
         media_label = "[Conversation history media] Media are numbered in the order they appear here."
         media_message = {"role": "user",
@@ -127,4 +117,4 @@ def pack_agent_history(messages, state, current_question, *, covered_turns=0, pa
             media_message["files"] = attachments
         block.append(media_message)
     retained = [m for m in messages[first:current] if m == packet]
-    messages[first:current] = [*block, *retained]
+    messages[first:current] = [*block, *retained, {"role": "user", "content": text}]

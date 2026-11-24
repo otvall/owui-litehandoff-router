@@ -284,7 +284,8 @@ def group_calls(state):
 
 # Source: context_policy
 """Administrative context policy; no client metadata participates in resolution."""
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Annotated
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class ContextPolicy(BaseModel):
     model_config = ConfigDict(validate_assignment=True, strict=True)
@@ -293,6 +294,18 @@ class ContextPolicy(BaseModel):
     shared_summary_context_percent: int = Field(default=60, ge=1, le=100, description='Percentage of estimated tokens in eligible unsummarized history to summarize in one update')
     router_summary_trigger_tokens: int = Field(default=40000, gt=0)
     agent_summary_trigger_tokens: int = Field(default=40000, gt=0)
+    context_input_budget_tokens: int | None = Field(default=None, gt=0)
+    context_model_input_budgets: dict[str, Annotated[int, Field(gt=0)]] = Field(default_factory=dict)
+    context_safety_margin_tokens: int = Field(default=1024, ge=0)
+
+    @model_validator(mode='after')
+    def validate_input_budgets(self):
+        limits = list(self.context_model_input_budgets.values())
+        if self.context_input_budget_tokens is not None:
+            limits.append(self.context_input_budget_tokens)
+        if any((limit <= self.context_safety_margin_tokens for limit in limits)):
+            raise ValueError('Context input budgets must be greater than the safety margin')
+        return self
 
 # Source: runtime
 """Trusted lifecycle state shared by independent uploads through the ASGI scope.
@@ -786,6 +799,8 @@ class ToolResultWindow:
         self.entries = []
         self.native_keys = []
         self.packets = {}
+        self.protected_messages = []
+        self.hidden_count = 0
 
     def capture(self, messages, native_origins, nested_origins=None):
         """Origins are trusted projection positions, never provider fields."""
@@ -817,6 +832,7 @@ class ToolResultWindow:
             packets[ordinal] = deepcopy(found)
         ordered = sorted(self.entries)
         hidden = ordered[:-self.limit] if self.limit else ordered
+        self.hidden_count = len(hidden)
         hidden_batches = set()
         for _, ordinal, child in hidden:
             if child >= 0:
@@ -831,6 +847,8 @@ class ToolResultWindow:
         for ordinal, packet in packets.items():
             r = pairs[ordinal][2]
             messages[r] = {'role': 'tool', 'tool_call_id': messages[r]['tool_call_id'], 'content': json.dumps(packet, ensure_ascii=False)}
+        protected_ordinals = {ordinal for _, ordinal, _ in ordered[-self.limit:]} if self.limit else set()
+        self.protected_messages = [messages[pairs[ordinal][2]] for ordinal in protected_ordinals]
         previous = None
         remove = []
         for index, message in enumerate(messages):
@@ -1245,6 +1263,7 @@ import traceback
 from pathlib import PurePath
 SUMMARY_INPUT_LIMIT = 60000
 OVERFLOW_MESSAGES = re.compile('context.length.exceeded|(?:context|input|prompt) (?:window|length)(?: limit)? (?:is |was )?(?:exceeded|too (?:long|large))|maximum context length|(?:exceeds|exceeded) (?:the )?(?:maximum |max(?:imum)? supported )?(?:model )?context length|(?:input|prompt) (?:is )?too long|input length \\(\\d+\\) is longer than|(?:input|prompt)(?: length)?\\s+\\([^)]*tokens?[^)]*\\) (?:is longer than|exceeds the maximum allowed length)', re.IGNORECASE)
+EXACT_REFERENCE = re.compile('(?<![\\w-])(?:[A-ZА-ЯЁ]{2,12}-\\d{2,16}|\\d{4}-\\d{2}-\\d{2}|\\d{2}\\.\\d{2}\\.\\d{4})(?![\\w-])')
 
 class ProviderContextOverflow(RuntimeError):
     pass
@@ -1297,6 +1316,12 @@ def propagate_provider_error(detail):
 def actual_user(message):
     return message.get('role') == 'user' and (not tool_image(message))
 
+def summary_projection_turns(messages, packet):
+    """Completed turns as received before/after destination inlets."""
+    starts = [i for i, message in enumerate(messages) if actual_user(message) and message != packet]
+    sequence = [messages[start:end] for start, end in zip(starts, starts[1:])]
+    return [[message for message in turn if message.get('role') != 'system' and message != packet] for turn in sequence]
+
 def shared_turns(state):
     messages = state['source']
     boundary = state['user_boundary']
@@ -1309,22 +1334,37 @@ def shared_turns(state):
         original = messages[start:end]
         visible = [m for m in original if m.get('role') in ('user', 'assistant') and (not tool_image(m))]
         if any((m.get('files') or m.get('embeds') or (not isinstance(m.get('content') or '', str)) or ('@@@VIZ-START' in (m.get('content') or '')) for m in visible)):
-            break
+            return (turns, f'Ход №{len(turns) + 1} содержит вложение, медиа или Inline Visualizer.')
         if any((m.get('role') == 'tool' and (m.get('files') or m.get('embeds')) or tool_image(m) for m in original)):
-            break
-        dialogue = []
+            return (turns, f'Ход №{len(turns) + 1} содержит медиа или вложение в результате инструмента.')
+        dialogue, visible_dialogue = ([], [])
         for i in range(start, end):
             message = messages[i]
             if actual_user(message):
-                dialogue.append({'role': 'user', 'content': message.get('content') or ''})
+                line = {'role': 'user', 'content': message.get('content') or ''}
+                dialogue.append(line)
+                visible_dialogue.append(line)
             for item in packets.get(i, ()):
                 if item['role'] == 'tool':
                     dialogue.append({'role': 'assistant', 'content': item['content']})
             if message['role'] == 'assistant' and (text := content.get(i, message.get('content'))):
-                dialogue.append({'role': 'assistant', 'content': text})
+                line = {'role': 'assistant', 'content': text}
+                dialogue.append(line)
+                visible_dialogue.append(line)
         digest.update(json.dumps([messages[start].get('id'), dialogue], ensure_ascii=False).encode())
-        turns.append({'key': digest.hexdigest(), 'messages': dialogue, 'next_user': messages[end]})
-    return turns
+        turns.append({'key': digest.hexdigest(), 'messages': dialogue, 'visible_dialogue': visible_dialogue, 'next_user': messages[end]})
+    return (turns, None)
+
+def shared_summary_reference(text, covered):
+    """Keep exact values from visible text beside the model-written recap."""
+    groups = []
+    for number, turn in enumerate(covered, 1):
+        references = dict.fromkeys((match.group() for message in turn['visible_dialogue'] for match in EXACT_REFERENCE.finditer(message['content'])))
+        if references:
+            groups.append(f'Turn {number}: ' + ', '.join(list(references)[:12]))
+    if not groups:
+        return text
+    return '[Exact references from the original dialogue]\n' + '\n'.join(groups[-12:]) + '\n\n' + text
 
 class SharedSummary:
 
@@ -1334,7 +1374,7 @@ class SharedSummary:
         policy = state['context_policy']
         self.model_id = policy['shared_summary_model_id'].strip()
         self.context_percent = policy['shared_summary_context_percent']
-        self.turns = shared_turns(state) if self.model_id and (not state.get('worker')) else []
+        self.turns, self.blocked_turn = shared_turns(state) if self.model_id and (not state.get('worker')) else ([], None)
         self.checkpoint = None
         self.applied_turns = 0
 
@@ -1346,23 +1386,29 @@ class SharedSummary:
                 logging.getLogger(__name__).debug('Shared summary status unavailable (%s)', type(failure).__name__)
 
     def eligible(self, draft, packet):
-        users = [m for m in draft['messages'] if actual_user(m) and m != packet]
+        messages = draft['messages']
+        users = [i for i, m in enumerate(messages) if actual_user(m) and m != packet]
+        guard = self.state.get('shared_summary_unchanged_turns')
+        protected = self.state.get('shared_summary_protected', ())
         eligible = set()
         for count, turn in enumerate(self.turns, 1):
-            if len(users) <= count or (users[count - 1].get('content') or '') != turn['messages'][0]['content']:
+            if len(users) <= count or (guard is not None and count > guard) or (messages[users[count - 1]].get('content') or '') != turn['messages'][0]['content']:
                 break
-            if users[count].get('content') == turn['next_user'].get('content'):
+            if any((message in protected for message in messages[users[count - 1]:users[count]])):
+                break
+            if messages[users[count]].get('content') == turn['next_user'].get('content'):
                 eligible.add(turn['key'])
         return eligible
 
-    async def load(self):
+    async def load(self, draft=None, packet=None):
         if not self.turns:
             return
         cache = self.state.get('shared_summary_cache')
         if cache is None:
             cache = await self.adapter.shared_summary_cache(self.state, self.user, self.model_id)
             self.state['shared_summary_cache'] = cache
-        self.checkpoint = next((turn for turn in reversed(self.turns) if cache.get(turn['key'])), None)
+        eligible = self.eligible(draft, packet) if draft is not None else {turn['key'] for turn in self.turns}
+        self.checkpoint = next((turn for turn in reversed(self.turns) if turn['key'] in eligible and cache.get(turn['key'])), None)
 
     def applied_summary_key(self):
         if not self.applied_turns:
@@ -1380,7 +1426,7 @@ class SharedSummary:
         end = users[count]
         start = users[0]
         kept = [message for message in messages[start:end] if message == packet]
-        summary = self.state['shared_summary_cache'][self.checkpoint['key']]
+        summary = shared_summary_reference(self.state['shared_summary_cache'][self.checkpoint['key']], self.turns[:count])
         messages[start:end] = [{'role': 'user', 'content': '[Shared conversation summary]\n' + summary}, *kept]
         self.applied_turns = count
         return True
@@ -1392,6 +1438,17 @@ class SharedSummary:
         candidates = self.turns[start:]
         while candidates and candidates[-1]['key'] not in eligible:
             candidates.pop()
+        if not candidates:
+            if start < len(self.turns):
+                reason = 'История в запросе к модели отличается от исходной. Безопасная граница сжатия не найдена.'
+            elif self.blocked_turn:
+                reason = f'{self.blocked_turn} Сжатие останавливается перед этим ходом.'
+            elif start:
+                reason = 'Все доступные старые ходы уже входят в сводку.'
+            else:
+                reason = 'В истории ещё нет старых ходов. Текущий ход защищён.'
+            await self.status(f'Сжатие пропущено ({trigger}). {reason}', done=True)
+            return False
         turn_tokens = [sum((4 + (max(1, len(text) // 4) if text else 0) for text in (message['content'] for message in turn['messages']))) for turn in candidates]
         total_tokens = sum(turn_tokens)
         target_tokens = total_tokens * self.context_percent // 100
@@ -1404,15 +1461,20 @@ class SharedSummary:
             selected_tokens += tokens
             length += size
         if not added:
-            await self.status(f'Сжатие пропущено ({trigger}). Нет доступных целых ходов в пределах лимита входа.', done=True)
+            await self.status(f'Сжатие пропущено ({trigger}). Первый непересказанный ход содержит {size} символов при лимите {SUMMARY_INPUT_LIMIT}.', done=True)
             return False
         cache = self.state['shared_summary_cache']
         previous = cache[self.checkpoint['key']] if self.checkpoint else None
+        covered_turns = start + len(added)
         description = 'Не удалось сократить контекст'
         failed = True
         try:
             await self.status(f'Сжимаю контекст… {trigger}. Модель {self.model_id}. Ходов {len(added)}, символов {length}. Токенов по оценке Open WebUI {selected_tokens} из {total_tokens}. Целевой объём {target_tokens}.', done=False)
             try:
+                save_options = {}
+                if hasattr(self.adapter, 'shared_summary_source_version'):
+                    source_version = await self.adapter.shared_summary_source_version(self.state, self.user, covered_turns)
+                    save_options = {'covered_turns': covered_turns, 'source_version': source_version}
                 summary = await self.adapter.generate_shared_summary(self.request, self.user, self.model_id, [message for turn in added for message in turn['messages']], previous)
             except Exception as error:
                 logging.getLogger(__name__).warning('Shared summary unavailable (%s)', type(error).__name__)
@@ -1433,10 +1495,14 @@ class SharedSummary:
             if not summary:
                 description += '. Модель вернула пустую сводку.'
                 return False
-            self.checkpoint = added[-1]
-            key = self.checkpoint['key']
-            cache[key] = summary
-            await self.adapter.save_shared_summary(self.state, self.user, self.model_id, key, summary)
+            checkpoint = added[-1]
+            key = checkpoint['key']
+            saved = await self.adapter.save_shared_summary(self.state, self.user, self.model_id, key, summary, **save_options)
+            if saved is False:
+                description += '. Исходная история изменилась во время суммаризации.'
+                return False
+            self.checkpoint = checkpoint
+            cache[key] = saved if isinstance(saved, str) else summary
             draft['messages'][:] = deepcopy(full_messages)
             applied = self.apply(draft, packet)
             if applied:
@@ -1531,6 +1597,7 @@ async def check_initial_stream(response):
 """All imports of Open WebUI internal APIs live behind this boundary."""
 import asyncio
 from copy import deepcopy
+import hashlib
 import json
 import logging
 from uuid import UUID
@@ -2169,20 +2236,51 @@ class OWUIAdapter:
             logging.getLogger(__name__).warning('Shared summary cache unreadable (%s)', type(error).__name__)
             return {}
 
-    async def save_shared_summary(self, state, user, model_id, key, summary):
+    async def shared_summary_source_version(self, state, user, covered_turns, *, db=None):
+        from open_webui.models.chat_messages import ChatMessages
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+        from open_webui.utils.misc import get_message_list
+        if not is_saved_chat_id(state['chat_id']) or state['user_id'] != user.id:
+            return None
+        if db is None:
+            mapping = await Chats.get_messages_map_by_chat_id(state['chat_id'])
+        else:
+            mapping = await ChatMessages.get_messages_map_by_chat_id(state['chat_id'], db=db)
+        if not mapping:
+            return None
+        branch = get_message_list(mapping, state['message_id'])
+        users = [i for i, message in enumerate(branch) if message.get('role') == 'user']
+        if len(users) <= covered_turns:
+            return None
+        prefix = [{key: message.get(key) for key in ('id', 'parentId', 'role', 'content', 'output', 'files', 'embeds')} for message in branch[:users[covered_turns]]]
+        return hashlib.sha256(json.dumps(prefix, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    async def save_shared_summary(self, state, user, model_id, key, summary, *, covered_turns=None, source_version=None):
         from open_webui.models.chats import Chats
         from open_webui.utils.chat_id import is_saved_chat_id
         if not is_saved_chat_id(state['chat_id']):
             return
         try:
-            async with Chats._chat_transaction(state['chat_id']) as (_, row):
+            async with Chats._chat_transaction(state['chat_id']) as (db, row):
                 if row is None or row.user_id != user.id:
-                    return
+                    return False
+                if covered_turns is not None:
+                    if source_version is None:
+                        return None
+                    latest = await self.shared_summary_source_version(state, user, covered_turns, db=db)
+                    if latest != source_version:
+                        return False
                 entry = {'summary': summary, 'key': key, 'model': model_id, 'router': state['router_id']}
                 meta = dict(row.meta or {})
                 entries = meta.get('lite_shared_summaries') or []
-                meta['lite_shared_summaries'] = ([old for old in entries if any((old.get(field) != entry[field] for field in ('router', 'model', 'key')))] + [entry])[-8:]
+                for old in entries:
+                    if all((old.get(field) == entry[field] for field in ('router', 'model', 'key'))):
+                        if isinstance(old.get('summary'), str) and old['summary'].strip():
+                            return old['summary']
+                meta['lite_shared_summaries'] = (entries + [entry])[-8:]
                 row.meta = meta
+                return summary
         except Exception as error:
             logging.getLogger(__name__).warning('Shared summary cache write failed (%s)', type(error).__name__)
 
@@ -2631,10 +2729,17 @@ class Filter:
         max_parallel_tasks: int = Field(default=4, ge=0, description='Maximum parallel tasks; 0 disables delegate_task and keeps ordinary handoff.')
         parallel_timeout_seconds: int = Field(default=300, gt=0)
 
-        @field_validator('priority', 'max_parallel_tasks', 'parallel_timeout_seconds', 'tool_result_history_limit', 'router_summary_trigger_tokens', 'agent_summary_trigger_tokens', 'shared_summary_context_percent', mode='before')
+        @field_validator('priority', 'max_parallel_tasks', 'parallel_timeout_seconds', 'tool_result_history_limit', 'router_summary_trigger_tokens', 'agent_summary_trigger_tokens', 'shared_summary_context_percent', 'context_input_budget_tokens', 'context_safety_margin_tokens', mode='before')
         @classmethod
         def reject_boolean_number(cls, value):
             if isinstance(value, bool):
+                raise ValueError('Boolean is not a numeric setting')
+            return value
+
+        @field_validator('context_model_input_budgets', mode='before')
+        @classmethod
+        def reject_boolean_budgets(cls, value):
+            if isinstance(value, dict) and any((isinstance(limit, bool) for limit in value.values())):
                 raise ValueError('Boolean is not a numeric setting')
             return value
 

@@ -45,6 +45,7 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
                 "base_tool_ids", "base_skill_ids", "tool_result_history_limit",
                 "shared_summary_model_id", "shared_summary_context_percent",
                 "router_summary_trigger_tokens", "agent_summary_trigger_tokens",
+                "context_input_budget_tokens", "context_model_input_budgets", "context_safety_margin_tokens",
             })
             self.assertEqual(spec["properties"]["shared_summary_context_percent"]["default"], 60)
             for bad in (True, "0.5", -1):
@@ -67,6 +68,21 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(previous.tool_result_history_limit, 5)
             self.assertEqual(previous.max_parallel_tasks, 0)
             self.assertNotIn("context_summary_enabled", previous.model_dump())
+            self.assertEqual(previous.context_input_budget_tokens, 12000)
+            self.assertEqual(previous.context_model_input_budgets, {"agent": 6000})
+            values = {"context_input_budget_tokens": "20000", "context_safety_margin_tokens": "800",
+                      "context_model_input_budgets": {"agent": "9000"}}
+            result = await client.post(url + "/update", json=values)
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertEqual((await client.get(url)).json(), {
+                "context_input_budget_tokens": 20000, "context_safety_margin_tokens": 800,
+                "context_model_input_budgets": {"agent": 9000},
+            })
+            for bad in ({"context_input_budget_tokens": 800, "context_safety_margin_tokens": 800},
+                        {"context_model_input_budgets": {"agent": True}},
+                        {"context_model_input_budgets": {"agent": 0}}):
+                result = await client.post(url + "/update", json=bad)
+                self.assertEqual(result.status_code, 400, result.text)
 
             result = await client.post(url + "/update", json={**text_values, "shared_summary_model_id": "summary"})
             self.assertEqual(result.status_code, 200, result.text)

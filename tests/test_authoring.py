@@ -39,6 +39,7 @@ class AuthoringBuildTest(unittest.TestCase):
                 self.assertIn("routing-skill-authoring/SKILL.md", files)
                 self.assertIn("routing-skill-authoring/references/router-contract.md", files)
                 self.assertFalse(any("__pycache__" in name for name in files))
+                self.assertFalse(any(name.endswith("/.DS_Store") for name in files))
                 self.assertEqual(archive.read("routing-skill-authoring/scripts/render_routing_skill.py"),
                                  (ROOT / "docs/skills/routing-skill-authoring/scripts/render_routing_skill.py").read_bytes())
 

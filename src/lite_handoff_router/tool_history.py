@@ -28,6 +28,8 @@ class ToolResultWindow:
         self.entries = []
         self.native_keys = []
         self.packets = {}
+        self.protected_messages = []
+        self.hidden_count = 0
 
     def capture(self, messages, native_origins, nested_origins=None):
         """Origins are trusted projection positions, never provider fields."""
@@ -65,6 +67,7 @@ class ToolResultWindow:
             packets[ordinal] = deepcopy(found)
         ordered = sorted(self.entries)
         hidden = ordered[:-self.limit] if self.limit else ordered
+        self.hidden_count = len(hidden)
         hidden_batches = set()
         for _, ordinal, child in hidden:
             if child >= 0:
@@ -81,6 +84,8 @@ class ToolResultWindow:
             r = pairs[ordinal][2]
             messages[r] = {"role": "tool", "tool_call_id": messages[r]["tool_call_id"],
                            "content": json.dumps(packet, ensure_ascii=False)}
+        protected_ordinals = {ordinal for _, ordinal, _ in ordered[-self.limit:]} if self.limit else set()
+        self.protected_messages = [messages[pairs[ordinal][2]] for ordinal in protected_ordinals]
         # Synthetic images are grouped by OWUI; never remove user attachments.
         previous = None
         remove = []

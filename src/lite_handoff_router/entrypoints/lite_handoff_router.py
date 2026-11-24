@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from ..model_execution import prepare_model
 from ..agent_history_block import pack_agent_history
+from ..context_budget import check_context_budget, estimate_context_budget, input_budget
 from ..owui_adapter import OWUIAdapter
 from ..protocol import confirmed_target
 from ..runtime import require, metadata_draft, publish
@@ -40,7 +41,30 @@ class Pipe:
         target = confirmed_target(state, state["source"])
         policy = state["context_policy"]
         summary_enabled = bool(policy["shared_summary_model_id"].strip()) and not state.get("worker")
+        recipient = target or state["router_id"]
+        available = input_budget(policy, recipient)
         sessions_before = set(__request__.scope.get("lite_handoff_mcp", {}))
+
+        def pack():
+            if target and not state.get("worker"):
+                pack_agent_history(
+                    draft["messages"], state, state.get("agent_history_question"),
+                    covered_turns=summary.applied_turns if summary else 0,
+                    packet=packet,
+                )
+
+        async def fit_budget():
+            estimate = estimate_context_budget(draft)
+            initial = estimate.total
+            while summary and estimate.total > available and await summary.extend(
+                draft, packet, full_messages,
+                trigger=f"Бюджет запроса, оценка {estimate.total} токенов при лимите {available}",
+            ):
+                pack()
+                estimate = estimate_context_budget(draft)
+            check_context_budget(estimate, available, recipient=recipient, before=initial,
+                                 hidden_results=state.get("hidden_tool_result_count", 0))
+
         try:
             if target and summary_enabled and state.get("historical_handoff_statuses") is None:
                 state["historical_handoff_statuses"] = await adapter.historical_handoff_statuses(
@@ -56,47 +80,47 @@ class Pipe:
                 info = (draft["metadata"].get("model") or {}).get("info") or {}
                 model = info.get("base_model_id") or model
             summary = None
+            packet = state.get("shared_summary_packet")
             if summary_enabled:
                 summary = SharedSummary(adapter, __request__, user, state, emitter=__event_emitter__)
-                packet = state.get("shared_summary_packet")
                 full_messages = deepcopy(draft["messages"])
-                await summary.load()
+                await summary.load(draft, packet)
                 summary.apply(draft, packet)
-                previous_tokens = last_prompt_tokens(
-                    state, model, agent_id=target, summary_key=summary.applied_summary_key())
-                threshold = policy["agent_summary_trigger_tokens" if target else "router_summary_trigger_tokens"]
-                if previous_tokens is not None and previous_tokens > threshold:
-                    executor_name = "Агент" if target else "Роутер"
-                    await summary.extend(draft, packet, full_messages,
-                                         trigger=f"{executor_name}, предыдущий вход {previous_tokens} токенов, порог {threshold}")
+                if available is None:
+                    previous_tokens = last_prompt_tokens(
+                        state, model, agent_id=target, summary_key=summary.applied_summary_key())
+                    threshold = policy["agent_summary_trigger_tokens" if target else "router_summary_trigger_tokens"]
+                    if previous_tokens is not None and previous_tokens > threshold:
+                        executor_name = "Агент" if target else "Роутер"
+                        await summary.extend(draft, packet, full_messages,
+                                             trigger=f"{executor_name}, предыдущий вход {previous_tokens} токенов, порог {threshold}")
             if draft.get("stream"):
                 options = draft.get("stream_options")
                 draft["stream_options"] = {
                     **(options if isinstance(options, dict) else {}), "include_usage": True,
                 }
+            pack()
+            if available is not None:
+                await fit_budget()
         except BaseException:
             sessions = __request__.scope.get("lite_handoff_mcp", {})
             await close_mcp_sessions(sessions.pop(key) for key in list(sessions) if key not in sessions_before)
             raise
+
         publish(__request__, __metadata__, draft["metadata"], tools)
         if target:
             was_active = state["active_agent"]
             state["active_agent"] = target
             state["phase"] = "agent"
             if not was_active and __event_emitter__:
-                agent = state["registry"][target]
                 await __event_emitter__({"type": "status", "data": {
-                    "action": "handoff", "description": "Передача: " + agent.get("agent_name", target), "done": True,
+                    "action": "handoff", "description": "Передача: " + state["registry"][target].get("agent_name", target),
+                    "done": True,
                 }})
+
         async def complete_prepared():
-            if target and not state.get("worker"):
-                pack_agent_history(
-                    draft["messages"], state, state.get("agent_history_question"),
-                    covered_turns=summary.applied_turns if summary else 0,
-                    packet=state.get("shared_summary_packet"),
-                )
-            response = await adapter.complete(__request__, draft, user)
-            return await check_initial_stream(response) if summary_enabled else response
+            result = await adapter.complete(__request__, draft, user)
+            return await check_initial_stream(result) if summary_enabled else result
 
         try:
             response = await complete_prepared()
@@ -105,6 +129,9 @@ class Pipe:
                 draft, packet, full_messages, trigger="Переполнение контекста основного запроса",
             ):
                 raise
+            pack()
+            if available is not None:
+                await fit_budget()
             response = await complete_prepared()
         executor = {"kind": "agent", "agent_id": target} if target else {"kind": "router"}
         on_usage = None

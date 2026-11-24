@@ -68,6 +68,8 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         assert "ROUTER_PROMPT" not in str(__messages__)
         assert sum(message["role"] == "system" for message in __messages__) == 1
         __metadata__["files"].append({{"id": "tool-file-update"}})
+        if "budget continuation" in query:
+            return "FRESH_RESULT " * 6000
         return {PNG!r}
     async def profile_finish(self, __user__: dict, __messages__: list, __files__: list) -> str:
         assert "INLET_A" in str(__messages__)
@@ -89,7 +91,8 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         assert "AGENT_PROMPT" in str(body["messages"])
         assert "ROUTER_PROMPT" not in str(body["messages"])
         assert "profile_lookup" in __metadata__["tools"]
-        body["messages"] = body["messages"] + [{"role": "system", "content": "INLET_A"}]
+        extra = " FILTER_PROMPT" * 5000 if "budget filter" in str(body["messages"]) else ""
+        body["messages"] = body["messages"] + [{"role": "system", "content": "INLET_A" + extra}]
         return body
 '''
         inlet, kind, _, inlet_source = await load_function_module_by_id(inlet_id, inlet_content)
@@ -119,6 +122,8 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         preparation, _, _, prep_source = await load_function_module_by_id("prep_" + suffix, (ROOT / "dist/router_preparation.py").read_text())
         prep_source.AGENTS = {agent_id: skill_id}
         preparation.valves.tool_result_history_limit = 1
+        preparation.valves.context_input_budget_tokens = 50000
+        preparation.valves.context_model_input_budgets = {agent_id: 12000}
         self.assertEqual(preparation.valves.base_tool_ids, [])
         metadata = {"chat_id": "local:" + suffix, "message_id": "answer-" + suffix, "session_id": "test-session-" + suffix,
                     "params": {"function_calling": "native", "tool_approval_mode": "full"}, "files": [{"id": "user-file"}],
@@ -256,11 +261,11 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         assert "B_PROMPT" in str(__messages__)
         assert "AGENT_PROMPT" not in str(__messages__)
         assert "ROUTER_PROMPT" not in str(__messages__)
-        assert __messages__[1]["tool_calls"][0]["function"]["name"] == "load_conversation_history"
-        assert __messages__[2]["role"] == "tool"
-        assert __messages__[2]["tool_call_id"] == __messages__[1]["tool_calls"][0]["id"]
-        assert __messages__[2]["content"].startswith("[Conversation history]")
-        assert all(m["role"] != "tool" for m in __messages__[3:])
+        history_index, = [i for i, m in enumerate(__messages__)
+                          if isinstance(m.get("content"), str) and m["content"].startswith("[Conversation history]")]
+        assert __messages__[history_index]["role"] == "user"
+        assert __messages__[history_index + 1]["content"] == "profile b question"
+        assert all(m["role"] != "tool" for m in __messages__)
         assert "[Tool result withheld from other agents]" in str(__messages__)
         return "B_PRIVATE_RESULT_42"
 '''
@@ -318,8 +323,12 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p["temperature"] for p in b_seen], [0.8, 0.8, 0.4, 0.4])
         self.assertEqual(b_request.scope["lite_handoff_router"]["active_agent"], b_id)
         for payload in b_seen[2:]:
-            self.assertEqual(payload["messages"][1]["tool_calls"][0]["function"]["name"], "load_conversation_history")
-            self.assertTrue(payload["messages"][2]["content"].startswith("[Conversation history]"))
+            messages = payload["messages"]
+            history_index, = [i for i, message in enumerate(messages)
+                              if isinstance(message.get("content"), str)
+                              and message["content"].startswith("[Conversation history]\n")]
+            self.assertEqual(messages[history_index]["role"], "user")
+            self.assertEqual(messages[history_index + 1]["content"], "profile b question")
             self.assertFalse(any(call["function"]["name"] == "historical_agent_turn"
                                  for message in payload["messages"] for call in message.get("tool_calls", ())))
             self.assertNotIn("historical_agent_turn", str(payload["tools"]))
@@ -363,6 +372,21 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         failed_calls = [item["name"] for item in failed_ctx["assistant_message"]["output"] if item.get("type") == "function_call"]
         self.assertEqual(failed_calls.count("profile_lookup"), 1)
         self.assertNotIn("profile_finish", failed_calls)
+
+        preparation.valves.context_model_input_budgets[b_id] = 10000
+        request_budget, _, filter_seen, filter_events = await next_turn("profile a budget filter")
+        self.assertEqual([p["model"] for p in filter_seen], ["router-llm", "router-llm"])
+        self.assertIsNone(request_budget.scope["lite_handoff_router"]["active_agent"])
+        self.assertIn("Входной контекст превышает бюджет", str(filter_events))
+        self.assertNotIn("FILTER_PROMPT", str(filter_events))
+
+        _, budget_ctx, budget_seen, budget_events = await next_turn("profile a budget continuation")
+        self.assertEqual([p["model"] for p in budget_seen], ["router-llm", "router-llm", agent_id], budget_events)
+        self.assertIn("Входной контекст превышает бюджет", str(budget_events))
+        budget_calls = [item["name"] for item in budget_ctx["assistant_message"]["output"]
+                        if item.get("type") == "function_call"]
+        self.assertEqual(budget_calls.count("profile_lookup"), 1)
+        self.assertNotIn("profile_finish", budget_calls)
 
         saved_tools = preparation.valves.base_tool_ids
         try:

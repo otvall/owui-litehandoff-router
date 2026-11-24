@@ -87,7 +87,32 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         self.assertEqual(receiver.applied_summary_key(), summary.applied_summary_key())
         self.assertFalse(await receiver.extend(new_view, packet, original, trigger="Порог"))
         self.assertEqual(emitter.await_count, 3)
-        self.assertIn("Сжатие пропущено", emitter.await_args.args[0]["data"]["description"])
+        self.assertIn("Все доступные старые ходы уже входят в сводку", emitter.await_args.args[0]["data"]["description"])
+
+    async def test_skip_status_explains_why_no_turn_is_eligible(self):
+        current = {"role": "user", "content": "Current"}
+        past = {"role": "user", "content": "Past"}
+        for old, projected, expected in (
+            ([], [current], "ещё нет старых ходов"),
+            ([{**past, "files": [{"id": "fixture"}]}], [past, current], "Ход №1 содержит вложение"),
+            ([past], [{**past, "content": "Rewritten"}, current], "отличается от исходной"),
+            ([{**past, "content": "x" * 60001}], None, "60001 символов при лимите 60000"),
+        ):
+            with self.subTest(expected=expected):
+                source = [*old, current]
+                state = {"source": source, "user_boundary": len(old), "audit": [],
+                         "context_policy": ContextPolicy(shared_summary_model_id="summary").model_dump()}
+                adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
+                                          generate_shared_summary=AsyncMock())
+                emitter = AsyncMock()
+                summary = SharedSummary(adapter, None, None, state, emitter=emitter)
+                await summary.load()
+                messages = source if projected is None else projected
+                view = {"messages": deepcopy(messages)}
+                self.assertFalse(await summary.extend(view, None, messages, trigger="Порог"))
+                self.assertEqual(view["messages"], messages)
+                self.assertIn(expected, emitter.await_args.args[0]["data"]["description"])
+                adapter.generate_shared_summary.assert_not_awaited()
 
     async def test_summary_share_uses_estimated_tokens_and_whole_turns(self):
         first = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b" * 12}]
@@ -174,3 +199,95 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
             await check_initial_stream(SimpleNamespace(body_iterator=stream(role, overflow)))
         response = await check_initial_stream(SimpleNamespace(body_iterator=stream(role, content, overflow)))
         self.assertEqual([chunk async for chunk in response.body_iterator], [role, content, overflow])
+
+    async def test_shared_input_excludes_private_results_skills_native_context_and_group_packet(self):
+        first = turn("a", "PRIVATE_A")
+        second = turn("b", "PRIVATE_B")
+        second.extend([
+            {"role": "assistant", "tool_calls": [
+                {"id": "s", "type": "function", "function": {"name": "view_skill", "arguments": "{}"}},
+                {"id": "n", "type": "function", "function": {"name": "recall_memories", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "s", "content": "WORK_SKILL_LIMITED"},
+            {"role": "tool", "tool_call_id": "n", "content": "NATIVE_PRIVATE"},
+        ])
+        past = first + second
+        question = {"role": "user", "content": "Current question"}
+        packet = {"role": "user", "content": "Confirmed parallel task results. GROUP_PRIVATE"}
+        state = {"source": past + [question], "user_boundary": len(past), "audit": [],
+                 "context_policy": ContextPolicy(shared_summary_model_id="summary",
+                                                shared_summary_context_percent=100).model_dump()}
+        adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
+                                  save_shared_summary=AsyncMock(), generate_shared_summary=AsyncMock(return_value="Summary"))
+        view = {"messages": deepcopy(past) + [packet, question]}
+        original = deepcopy(view["messages"])
+        summary = SharedSummary(adapter, None, None, state)
+        await summary.load(view, packet)
+        self.assertTrue(await summary.extend(view, packet, original, trigger="Бюджет"))
+        prompt_history = str(adapter.generate_shared_summary.await_args.args[3])
+        for visible in ("Visible answer a", "Visible answer b", "agent_id"):
+            self.assertIn(visible, prompt_history)
+        for private in ("PRIVATE_A", "PRIVATE_B", "WORK_SKILL_LIMITED", "NATIVE_PRIVATE", "GROUP_PRIVATE"):
+            self.assertNotIn(private, prompt_history)
+        self.assertEqual(view["messages"][1:], [packet, question])
+
+    async def test_incompatible_prefix_uses_shorter_checkpoint_and_preserves_fresh_results(self):
+        first = turn("a", "FIRST")
+        second = turn("b", "PROTECTED_RESULT")
+        current = {"role": "user", "content": "Current"}
+        source = first + second + [current]
+        state = {"source": source, "user_boundary": len(source) - 1, "audit": [],
+                 "context_policy": ContextPolicy(shared_summary_model_id="summary").model_dump()}
+        adapter = SimpleNamespace(shared_summary_cache=AsyncMock(), generate_shared_summary=AsyncMock(),
+                                  save_shared_summary=AsyncMock())
+        summary = SharedSummary(adapter, None, None, state)
+        short, long = (turn["key"] for turn in summary.turns)
+        adapter.shared_summary_cache.return_value = {short: "One", long: "Two"}
+        state["shared_summary_protected"] = [m for m in second if m.get("content") == "PROTECTED_RESULT"]
+        state["shared_summary_unchanged_turns"] = 2
+        view = {"messages": deepcopy(source)}
+        await summary.load(view)
+        self.assertTrue(summary.apply(view, None))
+        self.assertIn("One", view["messages"][0]["content"])
+        self.assertFalse(await summary.extend(view, None, source, trigger="Бюджет"))
+        self.assertEqual(view["messages"][1:], second + [current])
+        state["shared_summary_unchanged_turns"] = 0
+        summary = SharedSummary(adapter, None, None, state)
+        filtered = {"messages": deepcopy(source)}
+        await summary.load(filtered)
+        self.assertFalse(summary.apply(filtered, None))
+        adapter.generate_shared_summary.assert_not_awaited()
+
+    async def test_summary_from_an_edited_prefix_is_not_published(self):
+        history = turn("a", "FIRST") + [{"role": "user", "content": "Current"}]
+        state = {"source": history, "user_boundary": len(history) - 1, "audit": [],
+                 "context_policy": ContextPolicy(shared_summary_model_id="summary").model_dump()}
+        adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
+                                  shared_summary_source_version=AsyncMock(return_value="original"),
+                                  save_shared_summary=AsyncMock(return_value=False),
+                                  generate_shared_summary=AsyncMock(return_value="Stale"))
+        view = {"messages": deepcopy(history)}
+        summary = SharedSummary(adapter, None, None, state)
+        await summary.load(view)
+        self.assertFalse(await summary.extend(view, None, history, trigger="Бюджет"))
+        self.assertEqual(view["messages"], history)
+        self.assertFalse(state["shared_summary_cache"])
+        self.assertIsNone(summary.applied_summary_key())
+
+    async def test_summary_contains_verbatim_visible_references_and_excludes_private_values(self):
+        history = turn("a", "SECRET-776655")
+        history[0]["content"] = "Склад WH-8031 на 18.11.2026"
+        history += [{"role": "user", "content": "Назови номер кейса"}]
+        state = {"source": history, "user_boundary": len(history) - 1, "audit": [],
+                 "context_policy": ContextPolicy(shared_summary_model_id="summary").model_dump()}
+        adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
+                                  save_shared_summary=AsyncMock(),
+                                  generate_shared_summary=AsyncMock(return_value="Складской отчёт"))
+        summary = SharedSummary(adapter, None, None, state)
+        view = {"messages": deepcopy(history)}
+        await summary.load(view)
+        self.assertTrue(await summary.extend(view, None, history, trigger="Бюджет"))
+        summary_text = view["messages"][0]["content"]
+        self.assertIn("Turn 1: WH-8031, 18.11.2026", summary_text)
+        self.assertIn("Складской отчёт", summary_text)
+        self.assertNotIn("SECRET-776655", summary_text)

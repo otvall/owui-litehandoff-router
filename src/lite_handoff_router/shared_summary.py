@@ -22,6 +22,10 @@ OVERFLOW_MESSAGES = re.compile(
     r"(?:is longer than|exceeds the maximum allowed length)", re.IGNORECASE,
 )
 
+EXACT_REFERENCE = re.compile(
+    r"(?<![\w-])(?:[A-ZА-ЯЁ]{2,12}-\d{2,16}|\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})(?![\w-])"
+)
+
 
 class ProviderContextOverflow(RuntimeError):
     pass
@@ -82,6 +86,14 @@ def actual_user(message):
     return message.get("role") == "user" and not tool_image(message)
 
 
+
+def summary_projection_turns(messages, packet):
+    """Completed turns as received before/after destination inlets."""
+    starts = [i for i, message in enumerate(messages) if actual_user(message) and message != packet]
+    sequence = [messages[start:end] for start, end in zip(starts, starts[1:])]
+    return [[message for message in turn if message.get("role") != "system" and message != packet]
+            for turn in sequence]
+
 def shared_turns(state):
     messages = state["source"]
     boundary = state["user_boundary"]
@@ -98,23 +110,43 @@ def shared_turns(state):
         if any(m.get("files") or m.get("embeds") or
                not isinstance(m.get("content") or "", str) or "@@@VIZ-START" in (m.get("content") or "")
                for m in visible):
-            break
+            return turns, f"Ход №{len(turns) + 1} содержит вложение, медиа или Inline Visualizer."
         if any(m.get("role") == "tool" and (m.get("files") or m.get("embeds")) or tool_image(m)
                for m in original):
-            break
-        dialogue = []
+            return turns, f"Ход №{len(turns) + 1} содержит медиа или вложение в результате инструмента."
+        dialogue, visible_dialogue = [], []
         for i in range(start, end):
             message = messages[i]
             if actual_user(message):
-                dialogue.append({"role": "user", "content": message.get("content") or ""})
+                line = {"role": "user", "content": message.get("content") or ""}
+                dialogue.append(line)
+                visible_dialogue.append(line)
             for item in packets.get(i, ()):
                 if item["role"] == "tool":
                     dialogue.append({"role": "assistant", "content": item["content"]})
             if message["role"] == "assistant" and (text := content.get(i, message.get("content"))):
-                dialogue.append({"role": "assistant", "content": text})
+                line = {"role": "assistant", "content": text}
+                dialogue.append(line)
+                visible_dialogue.append(line)
         digest.update(json.dumps([messages[start].get("id"), dialogue], ensure_ascii=False).encode())
-        turns.append({"key": digest.hexdigest(), "messages": dialogue, "next_user": messages[end]})
-    return turns
+        turns.append({"key": digest.hexdigest(), "messages": dialogue, "visible_dialogue": visible_dialogue,
+                      "next_user": messages[end]})
+    return turns, None
+
+
+def shared_summary_reference(text, covered):
+    """Keep exact values from visible text beside the model-written recap."""
+    groups = []
+    for number, turn in enumerate(covered, 1):
+        references = dict.fromkeys(
+            match.group() for message in turn["visible_dialogue"]
+            for match in EXACT_REFERENCE.finditer(message["content"])
+        )
+        if references:
+            groups.append(f"Turn {number}: " + ", ".join(list(references)[:12]))
+    if not groups:
+        return text
+    return "[Exact references from the original dialogue]\n" + "\n".join(groups[-12:]) + "\n\n" + text
 
 
 class SharedSummary:
@@ -124,7 +156,7 @@ class SharedSummary:
         policy = state["context_policy"]
         self.model_id = policy["shared_summary_model_id"].strip()
         self.context_percent = policy["shared_summary_context_percent"]
-        self.turns = shared_turns(state) if self.model_id and not state.get("worker") else []
+        self.turns, self.blocked_turn = shared_turns(state) if self.model_id and not state.get("worker") else ([], None)
         self.checkpoint = None
         self.applied_turns = 0
 
@@ -138,25 +170,33 @@ class SharedSummary:
                 logging.getLogger(__name__).debug("Shared summary status unavailable (%s)", type(failure).__name__)
 
     def eligible(self, draft, packet):
-        users = [m for m in draft["messages"] if actual_user(m) and m != packet]
+        messages = draft["messages"]
+        users = [i for i, m in enumerate(messages) if actual_user(m) and m != packet]
+        guard = self.state.get("shared_summary_unchanged_turns")
+        protected = self.state.get("shared_summary_protected", ())
         # A destination filter may rewrite user messages. Match the whole candidate
         # prefix before dropping any messages from that projection.
         eligible = set()
         for count, turn in enumerate(self.turns, 1):
-            if len(users) <= count or (users[count - 1].get("content") or "") != turn["messages"][0]["content"]:
+            if (len(users) <= count or (guard is not None and count > guard)
+                    or (messages[users[count - 1]].get("content") or "") != turn["messages"][0]["content"]):
                 break
-            if users[count].get("content") == turn["next_user"].get("content"):
+            if any(message in protected for message in messages[users[count - 1]:users[count]]):
+                break
+            if messages[users[count]].get("content") == turn["next_user"].get("content"):
                 eligible.add(turn["key"])
         return eligible
 
-    async def load(self):
+    async def load(self, draft=None, packet=None):
         if not self.turns:
             return
         cache = self.state.get("shared_summary_cache")
         if cache is None:
             cache = await self.adapter.shared_summary_cache(self.state, self.user, self.model_id)
             self.state["shared_summary_cache"] = cache
-        self.checkpoint = next((turn for turn in reversed(self.turns) if cache.get(turn["key"])), None)
+        eligible = self.eligible(draft, packet) if draft is not None else {turn["key"] for turn in self.turns}
+        self.checkpoint = next((turn for turn in reversed(self.turns)
+                                if turn["key"] in eligible and cache.get(turn["key"])), None)
 
     def applied_summary_key(self):
         if not self.applied_turns:
@@ -174,7 +214,8 @@ class SharedSummary:
         end = users[count]
         start = users[0]
         kept = [message for message in messages[start:end] if message == packet]
-        summary = self.state["shared_summary_cache"][self.checkpoint["key"]]
+        summary = shared_summary_reference(self.state["shared_summary_cache"][self.checkpoint["key"]],
+                                           self.turns[:count])
         messages[start:end] = [{"role": "user", "content": "[Shared conversation summary]\n" + summary}, *kept]
         self.applied_turns = count
         return True
@@ -186,6 +227,17 @@ class SharedSummary:
         candidates = self.turns[start:]
         while candidates and candidates[-1]["key"] not in eligible:
             candidates.pop()
+        if not candidates:
+            if start < len(self.turns):
+                reason = "История в запросе к модели отличается от исходной. Безопасная граница сжатия не найдена."
+            elif self.blocked_turn:
+                reason = f"{self.blocked_turn} Сжатие останавливается перед этим ходом."
+            elif start:
+                reason = "Все доступные старые ходы уже входят в сводку."
+            else:
+                reason = "В истории ещё нет старых ходов. Текущий ход защищён."
+            await self.status(f"Сжатие пропущено ({trigger}). {reason}", done=True)
+            return False
         # Open WebUI's estimate for text messages, applied to the summary projection.
         turn_tokens = [sum(4 + (max(1, len(text) // 4) if text else 0)
                            for text in (message["content"] for message in turn["messages"]))
@@ -202,11 +254,13 @@ class SharedSummary:
             selected_tokens += tokens
             length += size
         if not added:
-            await self.status(f"Сжатие пропущено ({trigger}). Нет доступных целых ходов в пределах лимита входа.",
+            await self.status(f"Сжатие пропущено ({trigger}). Первый непересказанный ход содержит "
+                              f"{size} символов при лимите {SUMMARY_INPUT_LIMIT}.",
                               done=True)
             return False
         cache = self.state["shared_summary_cache"]
         previous = cache[self.checkpoint["key"]] if self.checkpoint else None
+        covered_turns = start + len(added)
         description = "Не удалось сократить контекст"
         failed = True
         try:
@@ -215,6 +269,10 @@ class SharedSummary:
                               f"Токенов по оценке Open WebUI {selected_tokens} из {total_tokens}. "
                               f"Целевой объём {target_tokens}.", done=False)
             try:
+                save_options = {}
+                if hasattr(self.adapter, "shared_summary_source_version"):
+                    source_version = await self.adapter.shared_summary_source_version(self.state, self.user, covered_turns)
+                    save_options = {"covered_turns": covered_turns, "source_version": source_version}
                 summary = await self.adapter.generate_shared_summary(
                     self.request, self.user, self.model_id,
                     [message for turn in added for message in turn["messages"]], previous)
@@ -237,10 +295,15 @@ class SharedSummary:
             if not summary:
                 description += ". Модель вернула пустую сводку."
                 return False
-            self.checkpoint = added[-1]
-            key = self.checkpoint["key"]
-            cache[key] = summary
-            await self.adapter.save_shared_summary(self.state, self.user, self.model_id, key, summary)
+            checkpoint = added[-1]
+            key = checkpoint["key"]
+            saved = await self.adapter.save_shared_summary(
+                self.state, self.user, self.model_id, key, summary, **save_options)
+            if saved is False:
+                description += ". Исходная история изменилась во время суммаризации."
+                return False
+            self.checkpoint = checkpoint
+            cache[key] = saved if isinstance(saved, str) else summary
             draft["messages"][:] = deepcopy(full_messages)
             applied = self.apply(draft, packet)
             if applied:
