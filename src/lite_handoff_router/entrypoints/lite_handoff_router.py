@@ -14,7 +14,7 @@ from ..capabilities import close_mcp_sessions
 from ..observation import observe_response
 from ..native_context import capture_native_context
 from ..shared_summary import (ProviderContextOverflow, SharedSummary, check_initial_stream,
-                              last_agent_prompt_tokens, last_router_prompt_tokens, prompt_token_count)
+                              last_prompt_tokens, prompt_token_count)
 
 
 class Pipe:
@@ -55,22 +55,25 @@ class Pipe:
             if target:
                 info = (draft["metadata"].get("model") or {}).get("info") or {}
                 model = info.get("base_model_id") or model
+            summary = None
             if summary_enabled:
                 summary = SharedSummary(adapter, __request__, user, state, emitter=__event_emitter__)
                 packet = state.get("shared_summary_packet")
                 full_messages = deepcopy(draft["messages"])
                 await summary.load()
                 summary.apply(draft, packet)
-                if target:
-                    previous_tokens = last_agent_prompt_tokens(state, target, model)
-                    threshold = policy["agent_summary_trigger_tokens"]
-                else:
-                    previous_tokens = last_router_prompt_tokens(state, model)
-                    threshold = policy["router_summary_trigger_tokens"]
+                previous_tokens = last_prompt_tokens(
+                    state, model, agent_id=target, summary_key=summary.applied_summary_key())
+                threshold = policy["agent_summary_trigger_tokens" if target else "router_summary_trigger_tokens"]
                 if previous_tokens is not None and previous_tokens > threshold:
                     executor_name = "Агент" if target else "Роутер"
                     await summary.extend(draft, packet, full_messages,
                                          trigger=f"{executor_name}, предыдущий вход {previous_tokens} токенов, порог {threshold}")
+            if draft.get("stream"):
+                options = draft.get("stream_options")
+                draft["stream_options"] = {
+                    **(options if isinstance(options, dict) else {}), "include_usage": True,
+                }
         except BaseException:
             sessions = __request__.scope.get("lite_handoff_mcp", {})
             await close_mcp_sessions(sessions.pop(key) for key in list(sessions) if key not in sessions_before)
@@ -89,7 +92,7 @@ class Pipe:
             if target and not state.get("worker"):
                 pack_agent_history(
                     draft["messages"], state, state.get("agent_history_question"),
-                    covered_turns=summary.applied_turns if summary_enabled else 0,
+                    covered_turns=summary.applied_turns if summary else 0,
                     packet=state.get("shared_summary_packet"),
                 )
             response = await adapter.complete(__request__, draft, user)
@@ -107,19 +110,25 @@ class Pipe:
         on_usage = None
         if target or summary_enabled:
             generation = state.get("generation", 0) + 1
+            summary_key = summary.applied_summary_key() if summary else None
 
             async def record_usage(usage):
                 tokens = prompt_token_count(usage)
-                if tokens is None:
+                if tokens is None and summary is None:
                     return
+                sample = {"prompt_tokens": tokens, "summary_key": summary_key}
                 if target:
-                    state.setdefault("agent_prompt_tokens", {})[target, model] = tokens
+                    state.setdefault("agent_usage", {})[target, model] = sample
                 else:
-                    state.setdefault("router_usage", {})[model] = {"prompt_tokens": tokens}
-                await adapter.save_prompt_usage(state, user, model, tokens, agent_id=target, generation=generation)
+                    state.setdefault("router_usage", {})[model] = sample
+                await adapter.save_prompt_usage(
+                    state, user, model, tokens, summary_key=summary_key, agent_id=target, generation=generation)
+                if tokens is None and summary:
+                    await summary.status("Провайдер не вернул свежий замер входных токенов.", done=True,
+                                         action="lite_prompt_usage")
 
-            if isinstance(response, dict):
-                await record_usage(response.get("usage"))
-            else:
+            if hasattr(response, "body_iterator"):
                 on_usage = record_usage
+            else:
+                await record_usage(response.get("usage") if isinstance(response, dict) else None)
         return observe_response(response, state, executor, on_usage=on_usage)

@@ -89,7 +89,8 @@ def shared_turns(state):
     exchanges = analyze(messages, current_boundary=boundary, audit=state["audit"])
     # Keep visible dialogue while removing confirmed Router handoff chatter.
     content, packets = agent_dialogue(state, None, exchanges, boundary)
-    digest = hashlib.sha256(b"lite-shared-summary-v1")
+    # Older checkpoints may contain fallback excerpts or truncated generations.
+    digest = hashlib.sha256(b"lite-shared-summary-v2")
     turns = []
     for start, end in zip(starts, starts[1:] + [boundary]):
         original = messages[start:end]
@@ -127,11 +128,11 @@ class SharedSummary:
         self.checkpoint = None
         self.applied_turns = 0
 
-    async def status(self, description, *, done, error=False):
+    async def status(self, description, *, done, error=False, action="lite_shared_summary"):
         if self.emitter is not None:
             try:
                 await self.emitter({"type": "status", "data": {
-                    "action": "lite_shared_summary", "description": description, "done": done, "error": error,
+                    "action": action, "description": description, "done": done, "error": error,
                 }})
             except Exception as failure:
                 logging.getLogger(__name__).debug("Shared summary status unavailable (%s)", type(failure).__name__)
@@ -156,6 +157,13 @@ class SharedSummary:
             cache = await self.adapter.shared_summary_cache(self.state, self.user, self.model_id)
             self.state["shared_summary_cache"] = cache
         self.checkpoint = next((turn for turn in reversed(self.turns) if cache.get(turn["key"])), None)
+
+    def applied_summary_key(self):
+        if not self.applied_turns:
+            return None
+        key = self.turns[self.applied_turns - 1]["key"]
+        text = self.state["shared_summary_cache"][key]
+        return key + ":" + hashlib.sha256(text.encode()).hexdigest()
 
     def apply(self, draft, packet):
         if not self.checkpoint or self.checkpoint["key"] not in self.eligible(draft, packet):
@@ -258,15 +266,17 @@ def prompt_token_count(usage):
     return None
 
 
-def last_router_prompt_tokens(state, model_id):
-    current = prompt_token_count((state.get("router_usage") or {}).get(model_id))
-    return current or prompt_token_count((state.get("historical_router_usage") or {}).get(model_id))
-
-
-def last_agent_prompt_tokens(state, agent_id, model_id):
-    key = agent_id, model_id
-    return (state.get("agent_prompt_tokens", {}).get(key)
-            or state.get("historical_agent_prompt_tokens", {}).get(key))
+def last_prompt_tokens(state, model_id, *, agent_id, summary_key):
+    if agent_id:
+        key = agent_id, model_id
+        current, historical = "agent_usage", "historical_agent_usage"
+    else:
+        key = model_id
+        current, historical = "router_usage", "historical_router_usage"
+    sample = state.get(current, {}).get(key, state.get(historical, {}).get(key))
+    if sample and "summary_key" in sample and sample["summary_key"] == summary_key:
+        return prompt_token_count(sample)
+    return None
 
 
 async def check_initial_stream(response):

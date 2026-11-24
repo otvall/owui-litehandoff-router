@@ -7,37 +7,46 @@ from unittest.mock import AsyncMock
 from lite_handoff_router.context_policy import ContextPolicy
 from lite_handoff_router.observation import observe_response
 from lite_handoff_router.shared_summary import (ProviderContextOverflow, SharedSummary, check_initial_stream,
-                                                last_agent_prompt_tokens, last_router_prompt_tokens, prompt_token_count)
+                                                last_prompt_tokens, prompt_token_count)
 from tests.test_history import turn
 
 
 class SharedSummaryTest(IsolatedAsyncioTestCase):
     def test_agent_token_count_uses_the_latest_sample_for_the_same_agent_and_model(self):
         state = {
-            "historical_agent_prompt_tokens": {("a", "base"): 43000, ("b", "base"): 1200},
-            "agent_prompt_tokens": {("a", "base"): 2000},
+            "historical_agent_usage": {
+                ("a", "base"): {"prompt_tokens": 43000, "summary_key": None},
+                ("b", "base"): {"prompt_tokens": 1200, "summary_key": None},
+            },
+            "agent_usage": {("a", "base"): {"prompt_tokens": None, "summary_key": "new-summary"}},
         }
-        self.assertEqual(last_agent_prompt_tokens(state, "a", "base"), 2000)
-        self.assertEqual(last_agent_prompt_tokens(state, "b", "base"), 1200)
-        self.assertIsNone(last_agent_prompt_tokens(state, "a", "other-base"))
-        self.assertIsNone(last_agent_prompt_tokens(state, "c", "base"))
+        self.assertIsNone(last_prompt_tokens(state, "base", agent_id="a", summary_key="new-summary"))
+        self.assertIsNone(last_prompt_tokens(state, "base", agent_id="a", summary_key=None))
+        self.assertIsNone(last_prompt_tokens(state, "base", agent_id="b", summary_key="new-summary"))
+        self.assertEqual(last_prompt_tokens(state, "base", agent_id="b", summary_key=None), 1200)
+        self.assertIsNone(last_prompt_tokens(state, "other-base", agent_id="a", summary_key=None))
 
     async def test_router_uses_only_the_last_reported_input_usage(self):
-        async def stream():
+        async def stream(report_usage):
             yield b'data: {"choices":[{"finish_reason":"stop"}]}\n\n'
-            yield b'data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":300}}\n\n'
+            if report_usage:
+                yield b'data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":300}}\n\n'
             yield b'data: [DONE]\n\n'
 
-        state = {"historical_router_usage": {"llm": {"prompt_tokens": 1000, "estimated_input": 3000}}}
-        self.assertIsNone(last_router_prompt_tokens(state, "other"))
-        self.assertEqual(last_router_prompt_tokens(state, "llm"), 1000)
-        usage = AsyncMock()
-        response = observe_response(SimpleNamespace(body_iterator=stream()), state, {"kind": "router"}, on_usage=usage)
-        self.assertEqual(len([chunk async for chunk in response.body_iterator]), 3)
-        tokens = prompt_token_count(usage.await_args.args[0])
-        self.assertEqual(tokens, 900)
-        state["router_usage"] = {"llm": {"prompt_tokens": tokens}}
-        self.assertEqual(last_router_prompt_tokens(state, "llm"), 900)
+        state = {"historical_router_usage": {
+            "llm": {"prompt_tokens": 1000, "summary_key": None},
+            "legacy": {"prompt_tokens": 2000},
+        }}
+        self.assertEqual(last_prompt_tokens(state, "llm", agent_id=None, summary_key=None), 1000)
+        self.assertIsNone(last_prompt_tokens(state, "legacy", agent_id=None, summary_key=None))
+        for report_usage, expected in ((True, 900), (False, None)):
+            usage = AsyncMock()
+            response = observe_response(SimpleNamespace(body_iterator=stream(report_usage)),
+                                        state, {"kind": "router"}, on_usage=usage)
+            self.assertEqual(len([chunk async for chunk in response.body_iterator]), 3 if report_usage else 2)
+            tokens = prompt_token_count(usage.await_args.args[0])
+            state["router_usage"] = {"llm": {"prompt_tokens": tokens, "summary_key": None}}
+            self.assertEqual(last_prompt_tokens(state, "llm", agent_id=None, summary_key=None), expected)
 
     async def test_shared_checkpoint_preserves_current_tool_chain_and_parallel_packet(self):
         source = turn("a", "PRIVATE_RESULT")
@@ -74,6 +83,8 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         new_view = {"messages": deepcopy(original)}
         self.assertTrue(receiver.apply(new_view, packet))
         self.assertEqual(new_view["messages"], view["messages"])
+        self.assertTrue(summary.applied_summary_key())
+        self.assertEqual(receiver.applied_summary_key(), summary.applied_summary_key())
         self.assertFalse(await receiver.extend(new_view, packet, original, trigger="Порог"))
         self.assertEqual(emitter.await_count, 3)
         self.assertIn("Сжатие пропущено", emitter.await_args.args[0]["data"]["description"])

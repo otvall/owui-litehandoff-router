@@ -96,7 +96,7 @@ def observe_response(response, state, executor, *, on_usage=None):
             finish()
             if hasattr(original, "aclose"):
                 await original.aclose()
-            if on_usage and usage:
+            if on_usage:
                 await on_usage(usage)
     response.body_iterator = stream()
     return response

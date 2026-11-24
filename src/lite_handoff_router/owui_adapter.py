@@ -2,7 +2,6 @@
 
 import asyncio
 from copy import deepcopy
-from inspect import signature
 import json
 import logging
 from uuid import UUID
@@ -13,11 +12,69 @@ from .native_context import scoped_knowledge_result
 from .history import context_handoff_key, handoff_evidence
 from .protocol import completed_pairs
 from .registry import ids
-from .shared_summary import SummaryGenerationError, prompt_token_count, propagate_provider_error
+from .shared_summary import SummaryGenerationError, propagate_provider_error
 
 
 def as_dict(value):
     return value.model_dump() if hasattr(value, "model_dump") else dict(value or {})
+
+
+async def collect_summary_stream(stream):
+    """Consume an unexpected provider SSE response without streaming it into the chat."""
+    from open_webui.routers.openai import convert_responses_result
+
+    pending = b""
+    received = 0
+    parts = []
+    finish_reason = None
+    message = {}
+    try:
+        async for chunk in stream:
+            chunk = chunk.encode() if isinstance(chunk, str) else chunk
+            received += len(chunk)
+            if received > 4 * 1024 * 1024:
+                raise SummaryGenerationError("Поток сводки превысил предел в 4 МиБ.")
+            lines = (pending + chunk).split(b"\n")
+            pending = lines.pop()
+            for line in lines:
+                if not line.startswith(b"data:"):
+                    continue
+                data = line[5:].strip()
+                if data == b"[DONE]":
+                    break
+                if not data:
+                    continue
+                event = json.loads(data)
+                if not isinstance(event, dict):
+                    raise SummaryGenerationError("Некорректное событие в потоке сводки.")
+                if event.get("error"):
+                    propagate_provider_error(event["error"])
+                kind = event.get("type")
+                if kind == "response.incomplete":
+                    raise SummaryGenerationError("Провайдер не завершил генерацию сводки.")
+                if kind == "response.completed":
+                    return convert_responses_result(event["response"])
+                if kind in ("error", "response.failed"):
+                    propagate_provider_error((event.get("response") or {}).get("error") or event)
+                for choice in event.get("choices") or ():
+                    if choice.get("index", 0) != 0:
+                        continue
+                    delta = choice.get("delta") or {}
+                    if isinstance(delta.get("content"), str):
+                        parts.append(delta["content"])
+                    if delta.get("tool_calls") or delta.get("function_call"):
+                        message["tool_calls"] = True
+                    finish_reason = choice.get("finish_reason") or finish_reason
+            else:
+                continue
+            break
+    finally:
+        if hasattr(stream, "aclose"):
+            await stream.aclose()
+    if not finish_reason:
+        raise SummaryGenerationError("Поток сводки завершился без признака окончания.")
+    message["content"] = "".join(parts)
+    return {"choices": [{"message": message, "finish_reason": finish_reason}]}
 
 
 def register_model_tool(registry, name, tool, namespace):
@@ -97,11 +154,10 @@ class OWUIAdapter:
                     samples = meta.get("lite_agent_usage")
                     if isinstance(samples, list):
                         for sample in samples:
-                            tokens = prompt_token_count(sample)
-                            if tokens is not None and isinstance(sample.get("agent_id"), str) and isinstance(sample.get("model"), str):
-                                agent_usage[sample["agent_id"], sample["model"]] = tokens
+                            if isinstance(sample.get("agent_id"), str) and isinstance(sample.get("model"), str):
+                                agent_usage[sample["agent_id"], sample["model"]] = sample
                 state["historical_router_usage"] = router_usage
-                state["historical_agent_prompt_tokens"] = agent_usage
+                state["historical_agent_usage"] = agent_usage
             return saved_handoff_statuses(branch, convert_output_to_messages)
         except Exception as error:
             logging.getLogger(__name__).warning("Historical terminal evidence unavailable (%s)", type(error).__name__)
@@ -649,15 +705,16 @@ class OWUIAdapter:
         if await self.child(child_id, user):
             await stop_tasks_by_chat_id_endpoint(request, child_id, user=user)
 
-    async def save_prompt_usage(self, state, user, model_id, prompt_tokens, *, agent_id=None, generation=None):
+    async def save_prompt_usage(self, state, user, model_id, prompt_tokens, *, summary_key,
+                                agent_id=None, generation=None):
         from open_webui.models.chats import Chats
         from open_webui.utils.chat_id import is_saved_chat_id
 
         logger = logging.getLogger(__name__)
-        sample = {"model": model_id, "prompt_tokens": prompt_tokens}
+        sample = {"model": model_id, "prompt_tokens": prompt_tokens, "summary_key": summary_key}
         if agent_id:
             sample.update(agent_id=agent_id, generation=generation, request_id=state["request_id"])
-            logger.info("Agent input tokens: agent=%s model=%s request=%s generation=%s prompt_tokens=%d",
+            logger.info("Agent input tokens: agent=%s model=%s request=%s generation=%s prompt_tokens=%s",
                         agent_id, model_id, state["request_id"], generation, prompt_tokens)
         if not is_saved_chat_id(state["chat_id"]) or not state["message_id"]:
             return
@@ -719,9 +776,12 @@ class OWUIAdapter:
 
     async def generate_shared_summary(self, request, user, model_id, messages, previous):
         from open_webui.models.config import Config
-        from open_webui.utils.context_compaction import _generate_summary
+        from open_webui.utils.context_compaction import DEFAULT_CONTEXT_COMPACTION_PROMPT
         from open_webui.utils.models import check_model_access
+        from open_webui.utils.payload import apply_params_to_form_data
+        from open_webui.utils.task import prompt_template, replace_messages_variable
         from starlette.requests import Request
+        from starlette.responses import StreamingResponse
 
         model = request.app.state.MODELS.get(model_id)
         if not model or model.get("pipe") or model.get("pipeline") or model.get("owned_by") != "openai":
@@ -732,19 +792,43 @@ class OWUIAdapter:
             raise SummaryGenerationError("Open WebUI не подтвердил доступ к модели суммаризации.") from error
         isolated = Request({"type": "http", "method": "POST", "path": request.url.path,
                             "app": request.app, "headers": [], "state": {}})
-        template = await Config.get("chat.context_compaction.prompt_template") or ""
-        # Some OWUI releases inspect the first recent message for their replay path.
-        # Supply a boundary marker while keeping the current turn out of the request.
-        recent = [{"role": "user", "content": "End of historical dialogue."}]
-        options = {"form_data": None} if "form_data" in signature(_generate_summary).parameters else {}
+        config = await Config.get_many("chat.context_compaction.prompt_template", "task.model.params")
+        template = (config.get("chat.context_compaction.prompt_template") or "").strip()
+        prompt = await prompt_template(template or DEFAULT_CONTEXT_COMPACTION_PROMPT, user)
+        prompt = replace_messages_variable(prompt, [], "RECENT_MESSAGES")
+        prompt = replace_messages_variable(prompt, messages)
+        prompt = replace_messages_variable(prompt, messages, "COMPACTED_MESSAGES")
+        prompt = prompt.replace("{{PREVIOUS_SUMMARY}}", previous or "")
+        body = {"model": model_id, "messages": [{"role": "user", "content": prompt}], "stream": False,
+                "n": 1, "metadata": {"task": "context_compaction"}}
+        params = config.get("task.model.params")
+        if isinstance(params, dict):
+            body = apply_params_to_form_data(body, model, {key: value for key, value in params.items()
+                                                           if value not in (None, "")})
+        body.pop("stream_options", None)
         async with asyncio.timeout(45):
-            return await _generate_summary(
-                isolated, user=user, model_id=model_id, models={model_id: model},
-                compacted_messages=messages, recent_messages=recent, previous_summary=previous,
-                summary_prompt_template=template, **options,
-            )
+            response = await self.complete(isolated, body, user, bypass_system_prompt=False)
+            if isinstance(response, list) and len(response) == 1:
+                response = response[0]
+            if isinstance(response, StreamingResponse):
+                response = await collect_summary_stream(response.body_iterator)
+        if not isinstance(response, dict):
+            raise SummaryGenerationError("Провайдер вернул ответ сводки в неожиданном формате.")
+        if response.get("error"):
+            propagate_provider_error(response["error"])
+        choices = response.get("choices") or []
+        choice = choices[0] if choices else {}
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if choice.get("finish_reason") == "length":
+            raise SummaryGenerationError("Генерация сводки достигла лимита модели (finish_reason=length).")
+        if message.get("tool_calls") or message.get("function_call"):
+            raise SummaryGenerationError("Модель суммаризации вернула вызов инструмента.")
+        if choice.get("finish_reason") != "stop":
+            raise SummaryGenerationError("Провайдер прервал генерацию сводки.")
+        return content.strip() if isinstance(content, str) else ""
 
-    async def complete(self, request, body, user):
+    async def complete(self, request, body, user, *, bypass_system_prompt=True):
         from fastapi import HTTPException
         from starlette.responses import Response, StreamingResponse
         from open_webui.models.config import Config
@@ -759,7 +843,7 @@ class OWUIAdapter:
             # prompt_and_params already installed the chosen prompt. The outer
             # native continuation's bypass flag must not suppress that step.
             response = await generate_chat_completion(
-                request, body, user, bypass_system_prompt=True,
+                request, body, user, bypass_system_prompt=bypass_system_prompt,
             )
         except HTTPException as error:
             try:
@@ -769,7 +853,10 @@ class OWUIAdapter:
         if isinstance(response, Response) and response.status_code >= 400:
             raw = getattr(response, "body", b"")
             detail = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
-            propagate_provider_error(detail or f"Provider HTTP {response.status_code}")
+            try:
+                propagate_provider_error(detail or f"Provider HTTP {response.status_code}")
+            except RuntimeError as provider_error:
+                raise provider_error from HTTPException(status_code=response.status_code)
         if isinstance(response, StreamingResponse):
             return response
         if isinstance(response, Response):

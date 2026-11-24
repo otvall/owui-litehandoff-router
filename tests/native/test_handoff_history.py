@@ -42,29 +42,29 @@ class NativeHandoffHistoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await adapter.historical_handoff_statuses(None, {}, {**state, "user_id": other.id}, other), {})
         self.assertEqual(await adapter.historical_handoff_statuses(None, {}, {**state, "message_id": "missing"}, actor), {})
         self.assertEqual(await Chats.get_messages_map_by_chat_id(cid), before)
-        sample = {"prompt_tokens": 900}
+        sample = {"prompt_tokens": 900, "summary_key": None}
         saved_turn = {**state, "message_id": "a1", "request_id": suffix}
-        await adapter.save_prompt_usage(saved_turn, actor, "router-llm", sample["prompt_tokens"])
-        await adapter.save_prompt_usage(saved_turn, actor, "model-a", 2000, agent_id="agent-a", generation=3)
-        await adapter.save_prompt_usage(saved_turn, actor, "model-a", 2200, agent_id="agent-a", generation=4)
-        await adapter.save_prompt_usage(saved_turn, actor, "model-a", 2250, agent_id="agent-a", generation=4)
-        await adapter.save_prompt_usage(saved_turn, other, "model-a", 1, agent_id="agent-a", generation=5)
+        await adapter.save_prompt_usage(saved_turn, actor, "router-llm", sample["prompt_tokens"], summary_key=None)
+        await adapter.save_prompt_usage(saved_turn, actor, "model-a", 2000, summary_key="prefix", agent_id="agent-a", generation=3)
+        await adapter.save_prompt_usage(saved_turn, actor, "model-a", 2200, summary_key="prefix", agent_id="agent-a", generation=4)
+        await adapter.save_prompt_usage(saved_turn, actor, "model-a", None, summary_key="prefix", agent_id="agent-a", generation=4)
+        await adapter.save_prompt_usage(saved_turn, other, "model-a", 1, summary_key="prefix", agent_id="agent-a", generation=5)
         state["context_policy"] = {"shared_summary_model_id": "summary"}
         self.assertEqual(await adapter.historical_handoff_statuses(None, {}, state, actor), found)
         self.assertEqual(state["historical_router_usage"], {"router-llm": {"model": "router-llm", **sample}})
-        self.assertEqual(state["historical_agent_prompt_tokens"], {("agent-a", "model-a"): 2250})
+        self.assertIsNone(state["historical_agent_usage"]["agent-a", "model-a"]["prompt_tokens"])
         current = {**state, "message_id": "a1"}
         await adapter.historical_handoff_statuses(None, {}, current, actor)
-        self.assertEqual(current["historical_agent_prompt_tokens"], {})
+        self.assertEqual(current["historical_agent_usage"], {})
         resume = SimpleNamespace(state=SimpleNamespace(tool_approval_resume=(cid, "a1", "tools")))
         await adapter.historical_handoff_statuses(resume, {}, current, actor)
-        self.assertEqual(current["historical_agent_prompt_tokens"], {("agent-a", "model-a"): 2250})
+        self.assertEqual(current["historical_agent_usage"], state["historical_agent_usage"])
         self.assertEqual(current["historical_router_usage"], {})
         saved = await Chats.get_messages_map_by_chat_id(cid)
         self.assertEqual(saved["a1"]["meta"]["lite_agent_usage"], [
             {"model": "model-a", "agent_id": "agent-a", "request_id": suffix, "generation": generation,
-             "prompt_tokens": tokens}
-            for generation, tokens in ((3, 2000), (4, 2250))
+             "prompt_tokens": tokens, "summary_key": "prefix"}
+            for generation, tokens in ((3, 2000), (4, None))
         ])
         self.assertEqual(saved["a1"]["output"], output)
         self.assertEqual(saved["a1"]["error"], before["a1"]["error"])
