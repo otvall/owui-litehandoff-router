@@ -60,6 +60,11 @@ class ContextBudgetTest(TestCase):
         self.assertEqual(input_budget(policy, "router", {"options": {"num_predict": 3500}}), 11300)
         self.assertEqual(input_budget(policy, "agent", {"max_output_tokens": 4000}), 9800)
         self.assertEqual(input_budget(policy, "agent", {"max_output_tokens": 16000}), 0)
+        overrides = Filter.Valves(context_window_tokens=250000, context_model_window_tokens={"agent": "60000"})
+        self.assertEqual(input_budget(overrides.model_dump(), "agent", {"max_tokens": 10000}), 48976)
+        self.assertEqual(input_budget(overrides.model_dump(), "router", {"max_tokens": 10000}), 238976)
+        self.assertEqual(input_budget(Filter.Valves(context_model_window_tokens={"agent": 60000}).model_dump(),
+                                      "agent"), 57952)
         for settings in ({"context_window_tokens": True}, {"context_response_reserve_tokens": True},
                          {"context_window_tokens": 2048}):
             with self.subTest(settings=settings), self.assertRaises(ValidationError):

@@ -27,7 +27,7 @@ class ContextBudgetEstimate:
 
 def input_budget(policy, recipient, draft=None):
     configured = policy.get("context_model_input_budgets", {}).get(recipient, policy.get("context_input_budget_tokens"))
-    window = policy.get("context_window_tokens")
+    window = policy.get("context_model_window_tokens", {}).get(recipient, policy.get("context_window_tokens"))
     limits = [configured] if configured is not None else []
     if window is not None:
         draft = draft or {}

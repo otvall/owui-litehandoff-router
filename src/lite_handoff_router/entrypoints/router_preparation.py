@@ -36,7 +36,7 @@ class Filter:
                 raise ValueError("Boolean is not a numeric setting")
             return value
 
-        @field_validator("context_model_input_budgets", mode="before")
+        @field_validator("context_model_window_tokens", "context_model_input_budgets", mode="before")
         @classmethod
         def reject_boolean_budgets(cls, value):
             if isinstance(value, dict) and any(isinstance(limit, bool) for limit in value.values()):

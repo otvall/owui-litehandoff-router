@@ -43,12 +43,9 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(set(spec["properties"]), {
                 "priority", "max_parallel_tasks", "parallel_timeout_seconds",
                 "base_tool_ids", "base_skill_ids", "tool_result_history_limit",
-                "shared_summary_model_id", "shared_summary_context_percent",
-                "router_summary_trigger_tokens", "agent_summary_trigger_tokens",
-                "context_input_budget_tokens", "context_model_input_budgets", "context_safety_margin_tokens",
-                "context_window_tokens", "context_response_reserve_tokens",
+                "shared_summary_model_id", "context_window_tokens", "context_model_window_tokens",
             })
-            self.assertEqual(spec["properties"]["shared_summary_context_percent"]["default"], 60)
+            self.assertEqual(module.Valves().shared_summary_context_percent, 60)
             for bad in (True, "0.5", -1):
                 result = await client.post(url + "/update", json={"max_parallel_tasks": bad})
                 self.assertEqual(result.status_code, 400, (bad, result.text))
@@ -73,6 +70,7 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(previous.context_model_input_budgets, {"agent": 6000})
             values = {"context_input_budget_tokens": "20000", "context_safety_margin_tokens": "800",
                       "context_model_input_budgets": {"agent": "9000"}, "context_window_tokens": "25000",
+                      "context_model_window_tokens": {"agent": "15000"},
                       "context_response_reserve_tokens": "2000"}
             result = await client.post(url + "/update", json=values)
             self.assertEqual(result.status_code, 200, result.text)
@@ -80,10 +78,17 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
                 "context_input_budget_tokens": 20000, "context_safety_margin_tokens": 800,
                 "context_model_input_budgets": {"agent": 9000},
                 "context_window_tokens": 25000, "context_response_reserve_tokens": 2000,
+                "context_model_window_tokens": {"agent": 15000},
             })
+            edited = {**(await client.get(url)).json(), "context_window_tokens": "26000"}
+            result = await client.post(url + "/update", json=edited)
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertEqual(result.json(), {**edited, "context_window_tokens": 26000})
             for bad in ({"context_input_budget_tokens": 800, "context_safety_margin_tokens": 800},
                         {"context_model_input_budgets": {"agent": True}},
-                        {"context_model_input_budgets": {"agent": 0}}):
+                        {"context_model_input_budgets": {"agent": 0}},
+                        {"context_model_window_tokens": {"agent": True}},
+                        {"context_model_window_tokens": {"agent": 2048}}):
                 result = await client.post(url + "/update", json=bad)
                 self.assertEqual(result.status_code, 400, result.text)
 
