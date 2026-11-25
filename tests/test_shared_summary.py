@@ -178,6 +178,35 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
                 self.assertIn(expected, emitter.await_args.args[0]["data"]["description"])
                 adapter.generate_shared_summary.assert_not_awaited()
 
+    async def test_budget_skip_distinguishes_protected_results_from_rewritten_history(self):
+        history = turn("a", "PRIVATE_RESULT")
+        current = {"role": "user", "content": "Current"}
+        source = history + [current]
+        for policy_state, projected, expected in (
+            ({"shared_summary_protected": [history[4]]}, source, "Ход 1 содержит защищённый результат"),
+            ({"shared_summary_unchanged_turns": 0}, source, "Фильтр агента изменил историю с хода 1"),
+            ({}, history + [{**current, "content": "Rewritten"}], "Вопрос после хода 1 отличается"),
+            ({}, history, "В запросе нет пользовательского сообщения после хода 1"),
+        ):
+            with self.subTest(expected=expected):
+                state = {"source": source, "user_boundary": len(history), "audit": [],
+                         "context_policy": ContextPolicy(shared_summary_model_id="summary").model_dump(),
+                         **policy_state}
+                adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
+                                          generate_shared_summary=AsyncMock())
+                emitter = AsyncMock()
+                summary = SharedSummary(adapter, None, None, state, emitter=emitter)
+                view = {"messages": deepcopy(projected)}
+                await summary.load(view)
+                reason = "Бюджет запроса, оценка 266103 токенов при лимите 197952"
+                self.assertFalse(await summary.extend(view, None, projected, trigger=reason))
+                status = emitter.await_args.args[0]["data"]["description"]
+                self.assertIn(reason, status)
+                self.assertIn(expected, status)
+                self.assertNotIn("PRIVATE_RESULT", status)
+                self.assertEqual(view["messages"], projected)
+                adapter.generate_shared_summary.assert_not_awaited()
+
     async def test_first_turn_media_and_visualizer_compact_into_one_summary_for_router_and_agent(self):
         image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,OLD_IMAGE"}}
         old = turn("a", "PRIVATE_RAW_TOOL_RESULT")
@@ -351,6 +380,46 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         for private in ("PRIVATE_A", "PRIVATE_B", "WORK_SKILL_LIMITED", "NATIVE_PRIVATE", "GROUP_PRIVATE"):
             self.assertNotIn(private, prompt_history)
         self.assertEqual(view["messages"][1:], [packet, question])
+
+    async def test_summary_includes_completed_calls_and_uses_the_result_window(self):
+        history = turn("agent-a", "PRIVATE_AGENT_RESULT")
+        history[1:1] = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "lookup-r", "type": "function",
+                 "function": {"name": "common_lookup", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "lookup-r", "content": "ROUTER_FACT " + "a" * 2000 + " ROUTER_TAIL"},
+        ]
+        current = {"role": "user", "content": "Continue"}
+        source = [*history, current]
+        for limit in (None, 0, 1):
+            with self.subTest(limit=limit):
+                state = {"source": source, "user_boundary": len(history), "audit": [],
+                         "context_policy": ContextPolicy(shared_summary_model_id="summary",
+                                                         tool_result_history_limit=limit).model_dump()}
+                adapter = SimpleNamespace(shared_summary_cache=AsyncMock(return_value={}),
+                                          generate_shared_summary=AsyncMock(return_value="Summary"),
+                                          save_shared_summary=AsyncMock())
+                summary = SharedSummary(adapter, None, None, state)
+                view = {"messages": deepcopy(source)}
+                await summary.load(view)
+                self.assertTrue(await summary.extend(view, None, source, trigger="Бюджет"))
+                result = adapter.generate_shared_summary.await_args.args[3]
+                activity = [json.loads(message["content"].removeprefix("[Tool activity] "))
+                            for message in result if message["content"].startswith("[Tool activity] ")]
+                router_call, agent_call = activity
+                self.assertEqual((router_call["tool"], router_call["executor"], router_call["status"]),
+                                 ("common_lookup", "router", "completed"))
+                self.assertEqual((agent_call["tool"], agent_call["agent_id"]), ("lookup", "agent-a"))
+                self.assertNotIn("PRIVATE_AGENT_RESULT", str(result))
+                self.assertNotIn("ROUTER_TAIL", str(result))
+                if limit is None:
+                    self.assertIn("ROUTER_FACT", router_call["result"])
+                    self.assertTrue(router_call["result_truncated"])
+                else:
+                    self.assertIn("hidden by history limit", router_call["result"])
+                    self.assertNotIn("ROUTER_FACT", str(result))
+                self.assertEqual(state["source"], source)
+                self.assertEqual(view["messages"][-1], current)
 
     async def test_incompatible_prefix_uses_shorter_checkpoint_and_preserves_fresh_results(self):
         first = turn("a", "FIRST")

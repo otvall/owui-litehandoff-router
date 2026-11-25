@@ -474,7 +474,12 @@ def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
 
 
 def ordinary_origins(state, selected, positions):
-    messages = state["source"]
     return {positions[e.result_index]: (e.batch, e.call_index) for e in selected
-            if exchange_name(messages, e) not in READERS | {"lite_delegate"}
-            and not native_record(state, messages[e.batch]["tool_calls"][e.call_index], messages[e.result_index])}
+            if ordinary_exchange(state, e)}
+
+
+def ordinary_exchange(state, exchange):
+    messages = state["source"]
+    return (exchange_name(messages, exchange) not in READERS | {"lite_delegate"}
+            and not native_record(state, messages[exchange.batch]["tool_calls"][exchange.call_index],
+                                  messages[exchange.result_index]))

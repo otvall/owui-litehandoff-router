@@ -806,6 +806,10 @@ def result_status(content):
 def result_placeholder(content):
     return '[Tool result hidden by history limit; original retained in chat; status=' + result_status(content) + ']'
 
+def split_tool_result_window(entries, limit):
+    ordered = sorted(entries)
+    return (ordered[:-limit], ordered[-limit:]) if limit else (ordered, [])
+
 class ToolResultWindow:
 
     def __init__(self, limit):
@@ -844,8 +848,7 @@ class ToolResultWindow:
             if not isinstance(children, list) or len(children) != len(expected['tool_results']) or {k: v for k, v in found.items() if k != 'tool_results'} != {k: v for k, v in expected.items() if k != 'tool_results'} or any((not isinstance(child, dict) or set(child) != set(original) or {k: v for k, v in child.items() if k != 'result'} != {k: v for k, v in original.items() if k != 'result'} for child, original in zip(children, expected['tool_results']))):
                 raise ValueError('Destination inlet changed historical handoff packet under the result limit')
             packets[ordinal] = deepcopy(found)
-        ordered = sorted(self.entries)
-        hidden = ordered[:-self.limit] if self.limit else ordered
+        hidden, kept = split_tool_result_window(self.entries, self.limit)
         self.hidden_count = len(hidden)
         hidden_batches = set()
         for _, ordinal, child in hidden:
@@ -861,7 +864,7 @@ class ToolResultWindow:
         for ordinal, packet in packets.items():
             r = pairs[ordinal][2]
             messages[r] = {'role': 'tool', 'tool_call_id': messages[r]['tool_call_id'], 'content': json.dumps(packet, ensure_ascii=False)}
-        protected_ordinals = {ordinal for _, ordinal, _ in ordered[-self.limit:]} if self.limit else set()
+        protected_ordinals = {ordinal for _, ordinal, _ in kept}
         self.protected_messages = [messages[pairs[ordinal][2]] for ordinal in protected_ordinals]
         previous = None
         remove = []
@@ -1266,8 +1269,11 @@ def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
     return output
 
 def ordinary_origins(state, selected, positions):
+    return {positions[e.result_index]: (e.batch, e.call_index) for e in selected if ordinary_exchange(state, e)}
+
+def ordinary_exchange(state, exchange):
     messages = state['source']
-    return {positions[e.result_index]: (e.batch, e.call_index) for e in selected if exchange_name(messages, e) not in READERS | {'lite_delegate'} and (not native_record(state, messages[e.batch]['tool_calls'][e.call_index], messages[e.result_index]))}
+    return exchange_name(messages, exchange) not in READERS | {'lite_delegate'} and (not native_record(state, messages[exchange.batch]['tool_calls'][exchange.call_index], messages[exchange.result_index]))
 
 # Source: prompt_usage
 """Track the last prompt sample per executor and model on the active branch."""

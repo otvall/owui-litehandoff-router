@@ -806,6 +806,10 @@ def result_status(content):
 def result_placeholder(content):
     return '[Tool result hidden by history limit; original retained in chat; status=' + result_status(content) + ']'
 
+def split_tool_result_window(entries, limit):
+    ordered = sorted(entries)
+    return (ordered[:-limit], ordered[-limit:]) if limit else (ordered, [])
+
 class ToolResultWindow:
 
     def __init__(self, limit):
@@ -844,8 +848,7 @@ class ToolResultWindow:
             if not isinstance(children, list) or len(children) != len(expected['tool_results']) or {k: v for k, v in found.items() if k != 'tool_results'} != {k: v for k, v in expected.items() if k != 'tool_results'} or any((not isinstance(child, dict) or set(child) != set(original) or {k: v for k, v in child.items() if k != 'result'} != {k: v for k, v in original.items() if k != 'result'} for child, original in zip(children, expected['tool_results']))):
                 raise ValueError('Destination inlet changed historical handoff packet under the result limit')
             packets[ordinal] = deepcopy(found)
-        ordered = sorted(self.entries)
-        hidden = ordered[:-self.limit] if self.limit else ordered
+        hidden, kept = split_tool_result_window(self.entries, self.limit)
         self.hidden_count = len(hidden)
         hidden_batches = set()
         for _, ordinal, child in hidden:
@@ -861,7 +864,7 @@ class ToolResultWindow:
         for ordinal, packet in packets.items():
             r = pairs[ordinal][2]
             messages[r] = {'role': 'tool', 'tool_call_id': messages[r]['tool_call_id'], 'content': json.dumps(packet, ensure_ascii=False)}
-        protected_ordinals = {ordinal for _, ordinal, _ in ordered[-self.limit:]} if self.limit else set()
+        protected_ordinals = {ordinal for _, ordinal, _ in kept}
         self.protected_messages = [messages[pairs[ordinal][2]] for ordinal in protected_ordinals]
         previous = None
         remove = []
@@ -1266,8 +1269,11 @@ def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
     return output
 
 def ordinary_origins(state, selected, positions):
+    return {positions[e.result_index]: (e.batch, e.call_index) for e in selected if ordinary_exchange(state, e)}
+
+def ordinary_exchange(state, exchange):
     messages = state['source']
-    return {positions[e.result_index]: (e.batch, e.call_index) for e in selected if exchange_name(messages, e) not in READERS | {'lite_delegate'} and (not native_record(state, messages[e.batch]['tool_calls'][e.call_index], messages[e.result_index]))}
+    return exchange_name(messages, exchange) not in READERS | {'lite_delegate'} and (not native_record(state, messages[exchange.batch]['tool_calls'][exchange.call_index], messages[exchange.result_index]))
 
 # Source: parallel
 """One synchronous group of isolated native agent tasks; no second Tool loop."""
@@ -1940,7 +1946,12 @@ import re
 import traceback
 from pathlib import PurePath
 SUMMARY_INPUT_LIMIT = 60000
+SUMMARY_TOOL_RESULT_LIMIT = 2000
+SUMMARY_TURN_TOOL_LIMIT = 8000
+SUMMARY_TOOL_RECORD_LIMIT = 24
 SUMMARY_TEXT_PARTS = {'text', 'input_text', 'output_text'}
+SUMMARY_SYNTHETIC_TOOLS = {HISTORICAL_AGENT_TURN, CONVERSATION_HISTORY_TOOL, 'list_available_skills'}
+SUMMARY_RESTRICTED_TOOLS = NATIVE_CONTEXT_NAMES | {'delegate_task', 'lite_parallel'}
 SUMMARY_INLINE_MEDIA = re.compile('data:(?:image|audio|video)/[\\w.+-]+;base64,[A-Za-z0-9+/=_-]+', re.IGNORECASE)
 EXACT_REFERENCE = re.compile('(?<![\\w-])(?:[A-ZА-ЯЁ]{2,12}-\\d{2,16}|\\d{4}-\\d{2}-\\d{2}|\\d{2}\\.\\d{2}\\.\\d{4})(?![\\w-])')
 
@@ -1995,20 +2006,66 @@ def recap_agent_activity(content):
     packet = json.loads(content)
     if packet.get('reply'):
         packet['reply'] = describe_visualizations(recap_dialogue_text(packet['reply']), [])
+    packet['events'] = [event for event in packet['events'] if event['type'] != 'tool_calls']
     for event in packet['events']:
         if event['type'] == 'assistant':
             event['content'] = describe_visualizations(recap_dialogue_text(event['content']), [])
-    return json.dumps(packet, ensure_ascii=False)
+    return json.dumps(packet, ensure_ascii=False) if packet['events'] or packet.get('reply') else ''
+
+def shared_tool_activity(state, exchanges, boundary):
+    """Use the Router window and shared provenance for completed tool exchanges."""
+    messages = state['source']
+    ordinary = [exchange for exchange in exchanges if exchange_name(messages, exchange) not in SUMMARY_SYNTHETIC_TOOLS and ordinary_exchange(state, exchange)]
+    limit = state['context_policy'].get('tool_result_history_limit')
+    hidden = set()
+    if limit is not None:
+        older, _ = split_tool_result_window([(exchange.batch, exchange.call_index, exchange.result_index) for exchange in ordinary], limit)
+        hidden = {index for _, _, index in older}
+    records, counts, excerpts, omitted = ({}, {}, {}, {})
+    for exchange in ordinary:
+        index, turn = (exchange.result_index, exchange.turn)
+        name = exchange_name(messages, exchange)
+        if index >= boundary or name in SUMMARY_RESTRICTED_TOOLS:
+            continue
+        count = counts.get(turn, 0)
+        if count >= SUMMARY_TOOL_RECORD_LIMIT:
+            omitted[turn] = omitted.get(turn, 0) + 1
+            continue
+        counts[turn] = count + 1
+        value = messages[index].get('content')
+        status = result_status(value)
+        record = {'tool': name[:128], 'executor': exchange.executor.get('kind', 'unknown'), 'status': status}
+        if exchange.executor.get('kind') == 'agent':
+            record['agent_id'] = exchange.executor.get('agent_id')
+        if index in hidden:
+            record['result'] = result_placeholder(value)
+        elif exchange.executor.get('kind') == 'router':
+            remaining = SUMMARY_TURN_TOOL_LIMIT - excerpts.get(turn, 0)
+            text = describe_visualizations(recap_dialogue_text(value), [])
+            size = min(remaining, SUMMARY_TOOL_RESULT_LIMIT)
+            if text and size:
+                excerpt = text[:size]
+                record['result'] = excerpt
+                excerpts[turn] = excerpts.get(turn, 0) + len(excerpt)
+            if text and len(text) > size:
+                record['result_truncated'] = True
+            if not text:
+                record['result'] = '[Нет текстового результата в общей сводке.]'
+        else:
+            record['result'] = '[Результат доступен только в исходном контексте инструмента.]'
+        records[index] = json.dumps(record, ensure_ascii=False)
+    return (records, omitted)
 
 def shared_turns(state):
     messages = state['source']
     boundary = state['user_boundary']
     starts = [index for index, message in enumerate(messages[:boundary]) if actual_user(message)]
     exchanges = analyze(messages, current_boundary=boundary, audit=state['audit'])
+    tool_activity, omitted_calls = shared_tool_activity(state, exchanges, boundary)
     content, packets = agent_dialogue(state, None, exchanges, boundary)
     digest = hashlib.sha256(b'lite-shared-summary-v2')
     turns = []
-    for start, end in zip(starts, starts[1:] + [boundary]):
+    for turn, (start, end) in enumerate(zip(starts, starts[1:] + [boundary])):
         source_user = messages[start]
         dialogue, visible_dialogue = ([], [])
         for i in range(start, end):
@@ -2020,13 +2077,18 @@ def shared_turns(state):
                 visible_dialogue.append(line)
             for item in packets.get(i, ()):
                 if item['role'] == 'tool':
-                    dialogue.append({'role': 'assistant', 'content': recap_agent_activity(item['content'])})
+                    if (activity := recap_agent_activity(item['content'])):
+                        dialogue.append({'role': 'assistant', 'content': activity})
+            if i in tool_activity:
+                dialogue.append({'role': 'assistant', 'content': '[Tool activity] ' + tool_activity[i]})
             if message['role'] == 'assistant':
                 text = recap_dialogue_text(content.get(i, message.get('content')))
                 if text:
                     line = {'role': 'assistant', 'content': describe_visualizations(text, [])}
                     dialogue.append(line)
                     visible_dialogue.append(line)
+        if (count := omitted_calls.get(turn)):
+            dialogue.append({'role': 'assistant', 'content': f'[Tool activity] Скрыто дополнительных событий: {count}.'})
         if any((m.get('files') or m.get('embeds') or (isinstance(m.get('content'), list) and any((isinstance(part, dict) and part.get('type') not in SUMMARY_TEXT_PARTS for part in m['content']))) for m in messages[start:end] if m.get('role') in {'user', 'assistant', 'tool'})):
             dialogue.append({'role': 'assistant', 'content': '[В исходном ходе были медиа или вложения.]'})
         digest.update(json.dumps([source_user.get('id'), dialogue], ensure_ascii=False).encode())
@@ -2069,13 +2131,18 @@ class SharedSummary:
         protected = self.state.get('shared_summary_protected', ())
         boundaries = {}
         for count, turn in enumerate(self.turns, 1):
-            if len(users) <= count or (guard is not None and count > guard) or messages[users[count - 1]].get('content') != turn['source_user'].get('content'):
-                break
+            if len(users) <= count:
+                return (boundaries, f'В запросе нет пользовательского сообщения после хода {count}.')
+            if guard is not None and count > guard:
+                return (boundaries, f'Фильтр агента изменил историю с хода {count}.')
+            if messages[users[count - 1]].get('content') != turn['source_user'].get('content'):
+                return (boundaries, f'История в запросе к модели отличается от исходной в ходе {count}.')
             if any((message in protected for message in messages[users[count - 1]:users[count]])):
-                break
-            if messages[users[count]].get('content') == turn['next_user'].get('content'):
-                boundaries[count] = (users[0], users[count])
-        return boundaries
+                return (boundaries, f'Ход {count} содержит защищённый результат инструмента или штатный контекст Open WebUI.')
+            if messages[users[count]].get('content') != turn['next_user'].get('content'):
+                return (boundaries, f'Вопрос после хода {count} отличается от исходного.')
+            boundaries[count] = (users[0], users[count])
+        return (boundaries, None)
 
     async def load(self, draft=None, packet=None):
         if not self.turns:
@@ -2084,7 +2151,10 @@ class SharedSummary:
         if cache is None:
             cache = await self.adapter.shared_summary_cache(self.state, self.user, self.model_id)
             self.state['shared_summary_cache'] = cache
-        eligible = self.eligible_boundaries(draft['messages'], packet) if draft is not None else range(1, len(self.turns) + 1)
+        if draft is None:
+            eligible = range(1, len(self.turns) + 1)
+        else:
+            eligible, _ = self.eligible_boundaries(draft['messages'], packet)
         self.checkpoint_turns = next((count for count in reversed(eligible) if cache.get(self.turns[count - 1]['key'])), 0)
 
     def applied_summary_key(self):
@@ -2099,7 +2169,8 @@ class SharedSummary:
         if not count:
             return False
         messages = draft['messages']
-        bounds = self.eligible_boundaries(messages, packet).get(count)
+        eligible, _ = self.eligible_boundaries(messages, packet)
+        bounds = eligible.get(count)
         if bounds is None:
             return False
         start, end = bounds
@@ -2112,11 +2183,11 @@ class SharedSummary:
 
     async def extend(self, draft, packet, full_messages, *, trigger):
         start = self.checkpoint_turns
-        eligible = self.eligible_boundaries(full_messages, packet)
+        eligible, blocker = self.eligible_boundaries(full_messages, packet)
         candidates = self.turns[start:max(eligible, default=0)]
         if not candidates:
             if start < len(self.turns):
-                reason = 'История в запросе к модели отличается от исходной. Безопасная граница сжатия не найдена.'
+                reason = f'Безопасная граница сжатия не найдена. {blocker}'
             elif start:
                 reason = 'Все доступные старые ходы уже входят в сводку.'
             else:
