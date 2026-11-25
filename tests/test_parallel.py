@@ -265,6 +265,7 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_same_agent_workers_receive_only_their_assignment_and_selected_files(self):
         request, metadata, state, user = self.setup_request()
+        state["context_policy"]["tool_result_history_limit"] = 2
         state["source"].insert(1, {"role": "assistant", "content": "PARENT_VISIBLE_ANSWER"})
         state["source"][2]["content"] = "PARENT_REQUEST: сделай 2 параллельных вызова в этот агент"
         state["user_boundary"] = 2
@@ -281,6 +282,8 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r["task"] for r in report["results"]], [t["task"] for t in tasks])
         for index, scope in enumerate(adapter.scopes):
             worker = scope["lite_handoff_router"]
+            self.assertEqual(worker["context_policy"], state["context_policy"])
+            self.assertIsNot(worker["context_policy"], state["context_policy"])
             self.assertTrue(worker["worker"])
             self.assertEqual(worker["active_agent"], "a")
             self.assertEqual(worker["source"], worker["original_source"])
@@ -302,9 +305,10 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
         for _ in range(2):
             draft, tools = await prepare_model(adapter, request, body, user, metadata, state, "llm", {}, target="a")
             systems = [m["content"] for m in draft["messages"] if m["role"] == "system"]
-            self.assertEqual(systems.count(WORKER_PROMPT), 1)
-            self.assertIn("Router", systems)  # The fixture's own model system prompt.
-            self.assertNotIn("ASSIGNED_ONLY", str(systems))
+            self.assertEqual(len(systems), 1)
+            self.assertEqual(systems[0].count(WORKER_PROMPT), 1)
+            self.assertEqual(systems[0], "Router\n\n" + WORKER_PROMPT)
+            self.assertNotIn("ASSIGNED_ONLY", systems[0])
             self.assertEqual([m["content"] for m in draft["messages"] if m["role"] == "user"],
                              ["ASSIGNED_ONLY: forecast"])
             self.assertFalse({"lite_delegate", "lite_parallel", "delegate_task"} & set(tools))
@@ -543,6 +547,17 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ParallelPolicyTest(unittest.IsolatedAsyncioTestCase):
+    def test_owui_text_input_can_disable_parallel_tasks(self):
+        # OWUI's ordinary integer Valves input is type=text and posts strings.
+        valves = router_preparation.Filter.Valves.model_validate({
+            "max_parallel_tasks": "0", "parallel_timeout_seconds": "300"})
+        self.assertEqual(valves.max_parallel_tasks, 0)
+        self.assertIs(type(valves.max_parallel_tasks), int)
+        self.assertEqual(valves.parallel_timeout_seconds, 300)
+        for maximum in ("4", " 12 "):
+            self.assertEqual(router_preparation.Filter.Valves(max_parallel_tasks=maximum).max_parallel_tasks,
+                             int(maximum))
+
     async def test_admin_limits_reset_and_ignore_client_fields(self):
         request = SimpleNamespace(scope={}, state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(MODELS={
             "router": {"pipe": {}}, "a": {"id": "a"}})))
@@ -569,9 +584,9 @@ class ParallelPolicyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(empty["parallel"]["status"], "idle")
 
     def test_invalid_limits_are_rejected(self):
-        for maximum in (-1, 2.5, True, "4"):
+        for maximum in (-1, 2.5, True, "4.5", "1e2", "", "false", "-1", "０"):
             with self.subTest(maximum=maximum), self.assertRaises(ValidationError):
                 router_preparation.Filter.Valves(max_parallel_tasks=maximum)
-        for timeout in (0, -1, True, "300"):
+        for timeout in (0, -1, True, "0", "300.5", "", "false"):
             with self.subTest(timeout=timeout), self.assertRaises(ValidationError):
                 router_preparation.Filter.Valves(parallel_timeout_seconds=timeout)

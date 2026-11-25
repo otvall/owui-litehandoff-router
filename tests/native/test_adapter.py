@@ -1,5 +1,6 @@
 import copy
 import inspect
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -98,6 +99,102 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                 provider.assert_not_awaited()
         finally:
             await Config.upsert({"chat.context_compaction.enable": original})
+
+    async def test_summary_requests_json_and_accepts_only_completed_text(self):
+        from open_webui.models.config import Config
+        from open_webui.utils import chat, models
+        from starlette.responses import JSONResponse, StreamingResponse
+        from lite_handoff_router.summary_response import SummaryGenerationError
+
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/chat/completions"),
+            app=SimpleNamespace(state=SimpleNamespace(MODELS={"llm": {"id": "llm", "owned_by": "openai"}})),
+        )
+        messages = [{"role": "user", "content": "Old question"}]
+        template = "Custom {{PREVIOUS_SUMMARY}} / {{COMPACTED_MESSAGES}} / {{RECENT_MESSAGES}}"
+        for mode in ("json", "json_text", "json_bytes", "response_json", "stream", "stream_final_line", "interrupted", "stream_eof", "stream_non_sse",
+                     "stream_non_sse_incomplete", "stream_non_sse_truncated", "stream_response_json", "stream_html",
+                     "stream_length", "length", "http_error", "empty", "tool_call"):
+            with self.subTest(mode=mode):
+                choice = {"message": {"content": "Result"}, "finish_reason": "stop"}
+                response = {"choices": [choice]}
+                if mode == "json_text":
+                    response = json.dumps(response)
+                elif mode == "json_bytes":
+                    response = json.dumps(response).encode()
+                elif mode in ("stream", "stream_final_line", "interrupted", "stream_eof", "stream_length"):
+                    chunks = ['data: {"choices":[{"delta":{"content":"Result"}}]}\n\n']
+                    if mode == "stream":
+                        chunks.append('data: {"choices":[{"finish_reason":"stop"}]}\n\n')
+                    if mode in ("stream", "interrupted"):
+                        chunks.append('data: [DONE]\n\n')
+                    if mode == "stream_final_line":
+                        chunks.extend(('data: {"choices":[{"finish_', 'reason":"stop"}]}'))
+                    if mode == "stream_length":
+                        chunks.append('data: {"choices":[{"finish_reason":"length"}]}')
+                    response = StreamingResponse(iter(chunks), media_type="text/event-stream")
+                elif mode.startswith("stream_non_sse"):
+                    if mode == "stream_non_sse_incomplete":
+                        choice["finish_reason"] = None
+                    raw = json.dumps({"choices": [choice]}, indent=2)
+                    if mode == "stream_non_sse_truncated":
+                        raw = raw[:-1]
+                    response = StreamingResponse(iter((raw[:85], raw[85:])), media_type="text/event-stream")
+                elif mode in ("response_json", "stream_response_json"):
+                    document = {"object": "response", "status": "completed", "output": [
+                        {"type": "message", "content": [{"type": "output_text", "text": "Result"}]}
+                    ]}
+                    response = (StreamingResponse(iter([json.dumps(document)]), media_type="text/event-stream")
+                                if mode == "stream_response_json" else document)
+                elif mode == "stream_html":
+                    response = StreamingResponse(iter(["<html><title>502 Bad Gateway</title>Result</html>"]),
+                                                 media_type="text/event-stream")
+                elif mode == "length":
+                    choice["finish_reason"] = "length"
+                elif mode == "http_error":
+                    response = JSONResponse({"error": {"message": "Fixture unavailable"}}, status_code=503)
+                elif mode == "empty":
+                    choice["message"]["content"] = " "
+                elif mode == "tool_call":
+                    choice["message"]["tool_calls"] = [{"type": "function"}]
+                with (
+                    patch.object(chat, "generate_openai_chat_completion", AsyncMock(return_value=response)) as provider,
+                    patch.object(Config, "get_many", AsyncMock(return_value={
+                        "chat.context_compaction.prompt_template": template,
+                        "task.model.params": {"temperature": 0.2, "stream": True,
+                                              "stream_options": {"include_usage": True}},
+                    })),
+                    patch.object(Config, "get", AsyncMock(return_value=False)),
+                    patch.object(models, "check_model_access", AsyncMock()) as access,
+                ):
+                    operation = OWUIAdapter().generate_shared_summary(
+                        request, SimpleNamespace(id="u", role="admin"), "llm", messages, "Earlier")
+                    if mode in ("json", "json_text", "json_bytes", "response_json", "stream", "stream_final_line",
+                                "stream_non_sse", "stream_response_json", "empty"):
+                        self.assertEqual(await operation, "" if mode == "empty" else "Result")
+                    else:
+                        expected = {
+                            "interrupted": r"\[DONE\].*finish_reason.*SSE-кадров: 1.*фрагментов текста: 1",
+                            "stream_eof": r"без завершающего события.*SSE-кадров: 1.*фрагментов текста: 1",
+                            "stream_non_sse_incomplete": r"без завершающего события.*JSON-событий без SSE: 1",
+                            "stream_non_sse_truncated": r"без завершающего события.*SSE-кадров: 0",
+                            "stream_html": r"без завершающего события.*SSE-кадров: 0.*HTML/XML, код 502",
+                            "length": "finish_reason=length", "stream_length": "finish_reason=length",
+                            "http_error": "Fixture unavailable", "tool_call": "вызов инструмента",
+                        }
+                        with self.assertRaisesRegex(RuntimeError if mode == "http_error" else SummaryGenerationError,
+                                                    expected[mode]) as failure:
+                            await operation
+                        if mode in ("interrupted", "stream_eof", "stream_non_sse_truncated", "stream_html"):
+                            self.assertNotIn("Result", str(failure.exception))
+                access.assert_awaited_once()
+                body = provider.await_args.kwargs["form_data"]
+                self.assertIs(body["stream"], False)
+                self.assertNotIn("stream_options", body)
+                self.assertEqual(body["messages"][0]["content"],
+                                 "Custom Earlier / USER: Old question / ")
+                self.assertEqual(body["temperature"], 0.2)
+                self.assertEqual(body["metadata"]["task"], "context_compaction")
 
 
 if __name__ == "__main__":

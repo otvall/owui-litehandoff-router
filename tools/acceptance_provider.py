@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 import time
+import xml.etree.ElementTree as ET
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -70,10 +71,11 @@ async def completion(request: Request):
         working_skill = None
         for message in messages:
             content = message.get("content", "")
-            if isinstance(content, str) and content.startswith("Available skills"):
-                for entry in json.loads(content.split("\n", 1)[1]):
-                    if entry["skill_id"].startswith("work-"):
-                        working_skill = entry["skill_id"]
+            if message.get("role") == "tool" and isinstance(content, str) and content.startswith("<available_skills"):
+                for entry in ET.fromstring(content):
+                    identifier = entry.findtext("id") or ""
+                    if identifier.startswith("work-"):
+                        working_skill = identifier
         has_working_read = any(c.get("function", {}).get("name") == "view_skill"
                                for m in current for c in m.get("tool_calls", []))
         has_lookup = any(c.get("function", {}).get("name") == "profile_lookup"

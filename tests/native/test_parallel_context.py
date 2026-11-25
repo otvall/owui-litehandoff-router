@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
+from tests.context_helpers import work_results
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -148,7 +149,7 @@ class Tools:
         payload = copy.deepcopy({k: v for k, v in form_data.items() if k != "metadata"})
         self.seen.append({**payload, "chat_id": form_data["metadata"]["chat_id"]})
         messages = payload["messages"]
-        results = [m for m in messages if m.get("role") == "tool"]
+        results = work_results(messages)
         name, args, answer = None, {}, "PARENT_FINAL"
         if payload["model"] == "worker-router-llm":
             if not results:
@@ -188,6 +189,7 @@ class Tools:
         from open_webui.utils.tools import get_updated_tool_function
         from open_webui.models.chats import Chats
 
+        self.preparation.valves.tool_result_history_limit = 0
         task = "Покажи прогноз ФТП FTP-42 за 2026-11-01–2026-11-30. Верни краткую таблицу."
         self.assignments = [{"agent_id": self.agent, "task": task, "file_ids": [self.file_id]},
                             {"agent_id": self.agent, "task": task}]
@@ -206,21 +208,27 @@ class Tools:
         self.assertEqual(len(self.app.state.worker_contexts), 2)
         for child in self.children:
             worker = child.scope["lite_handoff_router"]
+            self.assertEqual(worker["chat_skill_ids"], [])
             seen = [p for p in self.seen if p["chat_id"] == worker["chat_id"]]
             self.assertEqual(len(seen), 3)
             for payload in seen:
                 self.assertNotIn("PARENT_", str(payload))
                 systems = [m["content"] for m in payload["messages"] if m["role"] == "system"]
-                self.assertIn("AGENT_OWN_SYSTEM", systems)
-                self.assertEqual(str(systems).count("Router already manages the group"), 1)
-                self.assertNotIn(task, str(systems))
+                self.assertEqual(len(systems), 1)
+                self.assertTrue(systems[0].startswith("AGENT_OWN_SYSTEM\n\n"))
+                self.assertNotIn("list_available_skills", systems[0])
+                self.assertEqual(systems[0].count("Router already manages the group"), 1)
+                self.assertNotIn("Conversation history may include replies from other agents.", systems[0])
+                self.assertNotIn(task, systems[0])
                 self.assertEqual([m["content"] for m in payload["messages"] if m["role"] == "user"],
                                  [worker["original_source"][0]["content"]])
                 self.assertIn(task, str(payload["messages"]))
                 names = {t["function"]["name"] for t in payload["tools"]}
                 self.assertFalse(names & {"lite_delegate", "lite_parallel", "delegate_task"})
             self.assertIn("WORKER_SKILL_INSTRUCTIONS", str(seen[1]["messages"]))
-            self.assertIn("WORKER_LOOKUP_RESULT", str(seen[2]["messages"]))
+            self.assertNotIn("WORKER_LOOKUP_RESULT", str(seen[2]["messages"]))
+            self.assertIn("hidden by history limit", str(seen[2]["messages"]))
+            self.assertIn("WORKER_LOOKUP_RESULT", str(worker["source"]))
             tool = child.scope["lite_handoff_metadata"]["tools"]["worker_lookup"]
             refreshed = await get_updated_tool_function(tool["callable"], {
                 "__messages__": [{"role": "user", "content": "PARENT_REFRESH"}],
@@ -230,6 +238,7 @@ class Tools:
             effective = self.app.state.worker_contexts[-1]
             self.assertNotIn("PARENT_", str(effective["messages"]))
             self.assertIn(task, str(effective["messages"]))
+            self.assertEqual(effective["messages"], seen[-1]["messages"])
             self.assertEqual(effective["files"], [{"id": "refreshed-file"}])
             saved = await Chats.get_chat_by_id(worker["chat_id"])
             self.assertTrue(saved.meta["internal"])
@@ -251,9 +260,28 @@ class Tools:
         overflow = [p for p in self.seen if p["model"] == self.agent and "OVERFLOW_ASSIGNMENT" in str(p)]
         self.assertEqual(len(overflow), 1)
 
+    async def test_worker_budget_is_checked_before_dispatching_to_the_model(self):
+        from open_webui.utils import chat
+
+        self.preparation.valves.context_input_budget_tokens = 50000
+        self.preparation.valves.context_model_input_budgets = {self.agent: 3100}
+        self.assignments = [{"agent_id": self.agent, "task": "oversized " * 1000},
+                            {"agent_id": self.agent, "task": "Keep a short assignment"}]
+        body, metadata = await self.parent("PARENT_REQUEST: two assignments")
+        with patch.object(chat, "generate_openai_chat_completion", self.provider):
+            await self.run_loop(self.request, body, self.user, metadata)
+        results = self.request.scope["lite_handoff_router"]["parallel"]["results"]
+        self.assertEqual([result["status"] for result in results], ["failed", "completed"], results)
+        dispatched = [p for p in self.seen if p["model"] == self.agent]
+        self.assertNotIn("oversized oversized", str(dispatched))
+        self.assertIn("Keep a short assignment", str(dispatched))
+
     async def test_final_handoff_keeps_parent_dialogue_and_complete_results(self):
         from open_webui.utils import chat
 
+        self.preparation.valves.tool_result_history_limit = 0
+        self.preparation.valves.context_input_budget_tokens = 30000
+        self.preparation.valves.context_model_input_budgets = {self.agent: 12000}
         self.final_handoff = True
         self.assignments = [{"agent_id": self.agent, "task": "FIRST_FORECAST: FTP-42"},
                             {"agent_id": self.agent, "task": "SECOND_FORECAST: FTP-99"}]
@@ -263,6 +291,8 @@ class Tools:
         state = self.request.scope["lite_handoff_router"]
         self.assertEqual(state["active_agent"], self.agent)
         self.assertEqual(state["parallel"]["status"], "completed")
+        self.assertEqual(len(state["pending"]), 1)
+        self.assertEqual(state["pending"][0]["agent_id"], self.agent)
         final = [p for p in self.seen if p["chat_id"] == metadata["chat_id"] and p["model"] == self.agent]
         self.assertEqual(len(final), 3)
         for payload in final:
@@ -349,6 +379,7 @@ class Tools:
         from fastapi.responses import StreamingResponse
         from open_webui.models.chats import Chats
         from open_webui.utils import chat
+        self.preparation.valves.tool_result_history_limit = 0
         self.assignments = [{"agent_id": self.agent, "task": "FIRST_FORECAST"}]
         body, metadata = await self.parent("PARENT_REQUEST: two independent forecasts")
         parent_count = 0

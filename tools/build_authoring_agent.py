@@ -50,7 +50,8 @@ developed_for_open_webui_version: 0.13.3
     (destination / "routing_skill_authoring.py").write_text(tool, encoding="utf-8")
     # The portable helper and template are generated copies of their canonical sources.
     files = {str(path.relative_to(SKILL)): path.read_bytes()
-             for path in SKILL.rglob("*") if path.is_file() and "__pycache__" not in path.parts}
+             for path in SKILL.rglob("*")
+             if path.is_file() and "__pycache__" not in path.parts and path.name != ".DS_Store"}
     files["scripts/render_routing_skill.py"] = renderer.encode()
     files["references/routing-skill-template.md"] = template.encode()
     skill_zip = authoring_archive({"routing-skill-authoring/" + name: content for name, content in files.items()})

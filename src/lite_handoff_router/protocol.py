@@ -7,6 +7,9 @@ from .runtime import require
 from .parallel_state import control_generation, handoff_barrier
 from .resources import routing_owner
 
+AGENT_HISTORY_HEADING = "[Conversation history]"
+SHARED_SUMMARY_PREFIX = "[Shared conversation summary]\n"
+
 
 def delegate_tool(adapter, request, user, metadata, state):
     """Build a request-local native Tool; no Workspace Tool upload is needed."""
@@ -47,9 +50,13 @@ def tool_image(message):
             and all(p.get("type") == "image_url" for p in content[1:]))
 
 
+def actual_user(message):
+    return message.get("role") == "user" and not tool_image(message)
+
+
 def last_user(messages):
     return next((i for i in range(len(messages) - 1, -1, -1)
-                 if messages[i].get("role") == "user" and not tool_image(messages[i])), -1)
+                 if actual_user(messages[i])), -1)
 
 
 def object_value(content):
@@ -77,7 +84,7 @@ def completed_pairs(messages):
 
     for index, message in enumerate(messages):
         role = message.get("role")
-        if role == "assistant" or (role == "user" and not tool_image(message)):
+        if role == "assistant" or actual_user(message):
             finish()
         if role == "assistant":
             for ordinal, call in enumerate(message.get("tool_calls") or []):

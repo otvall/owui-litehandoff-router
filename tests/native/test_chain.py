@@ -6,11 +6,13 @@ Tool execution, callable-refresh or completion-loop helper is mocked.
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
+from tests.context_helpers import catalog_result, last_question
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,7 +66,10 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
     async def profile_lookup(self, query: str, __user__: dict, __messages__: list, __metadata__: dict) -> str:
         assert "INLET_A" in str(__messages__)
         assert "ROUTER_PROMPT" not in str(__messages__)
+        assert sum(message["role"] == "system" for message in __messages__) == 1
         __metadata__["files"].append({{"id": "tool-file-update"}})
+        if "budget continuation" in query:
+            return "FRESH_RESULT " * 6000
         return {PNG!r}
     async def profile_finish(self, __user__: dict, __messages__: list, __files__: list) -> str:
         assert "INLET_A" in str(__messages__)
@@ -88,7 +93,8 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         assert "AGENT_PROMPT" in str(body["messages"])
         assert "ROUTER_PROMPT" not in str(body["messages"])
         assert "profile_lookup" in __metadata__["tools"]
-        body["messages"] = body["messages"] + [{"role": "system", "content": "INLET_A"}]
+        extra = " FILTER_PROMPT" * 5000 if "budget filter" in str(body["messages"]) else ""
+        body["messages"] = body["messages"] + [{"role": "system", "content": "INLET_A" + extra}]
         return body
 '''
         inlet, kind, _, inlet_source = await load_function_module_by_id(inlet_id, inlet_content)
@@ -99,6 +105,9 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
             id=skill_id, name="route-" + suffix, description="Profile A questions.",
             content="Call lite_delegate with exact agent_id " + agent_id, meta={},
         ))
+        chat_skill_id = "chat-guide-" + suffix
+        await Skills.insert_new_skill(user.id, SkillForm(
+            id=chat_skill_id, name="Chat guide", description="Ordinary chat skill.", content="Write clearly."))
         for identifier, base, params, meta in (
             (router_id, pipe_id, {"system": "ROUTER_PROMPT", "temperature": 0.8, "top_p": 0.9, "top_k": 17,
                                  "custom_params": {"seed": "123", "router_only": "true"}}, {"toolIds": [], "skillIds": []}),
@@ -115,12 +124,15 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
 
         preparation, _, _, prep_source = await load_function_module_by_id("prep_" + suffix, (ROOT / "dist/router_preparation.py").read_text())
         prep_source.AGENTS = {agent_id: skill_id}
+        preparation.valves.tool_result_history_limit = 1
+        preparation.valves.context_input_budget_tokens = 50000
+        preparation.valves.context_model_input_budgets = {agent_id: 12000}
         self.assertEqual(preparation.valves.base_tool_ids, [])
         metadata = {"chat_id": "local:" + suffix, "message_id": "answer-" + suffix, "session_id": "test-session-" + suffix,
                     "params": {"function_calling": "native", "tool_approval_mode": "full"}, "files": [{"id": "user-file"}],
                     "variables": {"{{ticket}}": "T42"}}
         request.state.metadata = metadata
-        body = {"model": router_id, "stream": True, "messages": [{"role": "user", "content": [
+        body = {"model": router_id, "stream": True, "skill_ids": [chat_skill_id], "messages": [{"role": "user", "content": [
             {"type": "text", "text": "profile a question"}, {"type": "image_url", "image_url": {"url": PNG}},
         ]}], "metadata": metadata}
         await preparation.inlet(body, request, user.model_dump(), metadata)
@@ -147,7 +159,25 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
 
             async def json_body():
                 return payload
-            return await provider.completion(SimpleNamespace(json=json_body))
+            response = await provider.completion(SimpleNamespace(json=json_body))
+            if hasattr(response, "body_iterator"):
+                original_stream = response.body_iterator
+
+                async def with_routing_prose_and_html():
+                    async for chunk in original_stream:
+                        if not chunk.startswith("data: {"):
+                            yield chunk
+                            continue
+                        data = json.loads(chunk[6:])
+                        delta = data["choices"][0]["delta"]
+                        if any(call["function"]["name"] == "lite_delegate" for call in delta.get("tool_calls", [])):
+                            delta["content"] = "ROUTING_PROSE: passing this question to a specialist."
+                        if delta.get("content") == "specialist-a final: TOOL_RESULT_42":
+                            delta["content"] += "\n@@@VIZ-START\n<div>SLIDE_SOURCE_42</div>\n@@@VIZ-END\n\n~~~html\n<div>ORDINARY_HTML_42</div>\n~~~"
+                        yield "data: " + json.dumps(data) + "\n\n"
+
+                response.body_iterator = with_routing_prose_and_html()
+            return response
 
         async def emit(event):
             events.append(copy.deepcopy(event))
@@ -166,15 +196,36 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p["top_k"] for p in seen], [17, 17, 3, 3, 3])
         self.assertEqual([p["seed"] for p in seen], [123, 123, 321, 321, 321])
         for payload in seen[2:]:
-            systems = "\n".join(str(m.get("content")) for m in payload["messages"] if m.get("role") == "system")
-            self.assertEqual(systems.count("AGENT_PROMPT"), 1)
-            self.assertNotIn("ROUTER_PROMPT", systems)
-            self.assertNotIn("Router already manages the group", systems)
-            self.assertIn("Native User", systems)
-            self.assertIn("T42", systems)
+            self.assertNotIn("ROUTING_PROSE", str(payload["messages"]))
+            systems = [m["content"] for m in payload["messages"] if m["role"] == "system"]
+            self.assertEqual(len(systems), 1)
+            system = systems[0]
+            self.assertTrue(system.startswith("AGENT_PROMPT"))
+            self.assertNotIn("list_available_skills", str(payload["messages"]))
+            self.assertNotIn("view_skill", str(payload["tools"]))
+            self.assertEqual(system.count(pipe_source.AGENT_HISTORY_PROMPT), 1)
+            self.assertEqual(system.count("AGENT_PROMPT"), 1)
+            self.assertTrue(system.endswith("\n\nINLET_A"))
+            self.assertNotIn("ROUTER_PROMPT", system)
+            self.assertNotIn("Router already manages the group", system)
+            self.assertIn("Native User", system)
+            self.assertIn("T42", system)
             self.assertNotIn("router_only", payload)
             self.assertTrue(payload["agent_only"])
         self.assertIn("AGENT_PROMPT_UPDATED", str(seen[-1]["messages"]))
+        self.assertNotIn("Image file read successfully", str(seen[-1]["messages"]))
+        self.assertIn("hidden by history limit", str(seen[-1]["messages"]))
+        self.assertIn("TOOL_RESULT_42:" + user.id, str(seen[-1]["messages"]))
+        for payload in seen[:2]:
+            self.assertEqual(sum(m["role"] == "system" for m in payload["messages"]), 1)
+            self.assertNotIn(pipe_source.AGENT_HISTORY_PROMPT, payload["messages"][0]["content"])
+            self.assertNotIn("<routing_skills", payload["messages"][0]["content"])
+            catalog = catalog_result(payload["messages"])
+            self.assertIn("<routing_skills>", catalog)
+            self.assertIn("<id>" + skill_id + "</id>", catalog)
+            self.assertIn("<available_skills>", catalog)
+            self.assertIn("<id>" + chat_skill_id + "</id>", catalog)
+        self.assertTrue(all(chat_skill_id not in str(p["messages"]) for p in seen[2:]))
         self.assertEqual(app.state.MODELS[agent_id]["info"]["params"]["temperature"], 0.2)
         finals = [event["data"] for event in events if event.get("type") == "chat:completion" and event.get("data", {}).get("done")]
         self.assertTrue(finals, events)
@@ -183,7 +234,8 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([item for item in output if item.get("status") in {"failed", "incomplete", "rejected"}], output)
         self.assertTrue(any("TOOL_RESULT_42:" + user.id in str(item.get("output"))
                             for item in output if item.get("type") == "function_call_output"), output)
-        import json
+        self.assertIn("ROUTING_PROSE", str(output))
+        self.assertIn("SLIDE_SOURCE_42", str(output))
         delegate_call = next(item for item in output if item.get("type") == "function_call" and item["name"] == "lite_delegate")
         self.assertEqual(delegate_call["status"], "completed")
         delegate_result = next(item for item in output if item.get("type") == "function_call_output" and item.get("call_id") == delegate_call["call_id"])
@@ -212,7 +264,12 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         assert "B_PROMPT" in str(__messages__)
         assert "AGENT_PROMPT" not in str(__messages__)
         assert "ROUTER_PROMPT" not in str(__messages__)
-        assert not any(m.get("role") == "tool" for m in __messages__)
+        history_index, = [i for i, m in enumerate(__messages__)
+                          if isinstance(m.get("content"), str) and m["content"].startswith("[Conversation history]")]
+        assert __messages__[history_index]["role"] == "user"
+        assert __messages__[history_index + 1]["content"] == "profile b question"
+        assert all(m["role"] != "tool" for m in __messages__)
+        assert "[Tool result withheld from other agents]" in str(__messages__)
         return "B_PRIVATE_RESULT_42"
 '''
         b_module, _, b_source = await load_tool_module_by_id(b_tool, b_content)
@@ -268,6 +325,21 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p["model"] for p in b_seen], ["router-llm", "router-llm", b_id, b_id], b_events)
         self.assertEqual([p["temperature"] for p in b_seen], [0.8, 0.8, 0.4, 0.4])
         self.assertEqual(b_request.scope["lite_handoff_router"]["active_agent"], b_id)
+        for payload in b_seen[2:]:
+            messages = payload["messages"]
+            history_index, = [i for i, message in enumerate(messages)
+                              if isinstance(message.get("content"), str)
+                              and message["content"].startswith("[Conversation history]\n")]
+            self.assertEqual(messages[history_index]["role"], "user")
+            self.assertEqual(messages[history_index + 1]["content"], "profile b question")
+            self.assertFalse(any(call["function"]["name"] == "historical_agent_turn"
+                                 for message in payload["messages"] for call in message.get("tool_calls", ())))
+            self.assertNotIn("historical_agent_turn", str(payload["tools"]))
+            self.assertNotIn("load_conversation_history", str(payload["tools"]))
+            self.assertNotIn("ROUTING_PROSE", str(payload["messages"]))
+            self.assertNotIn("SLIDE_SOURCE_42", str(payload["messages"]))
+            self.assertIn("[Визуализация доступна в исходном чате.]", str(payload["messages"]))
+            self.assertIn("ORDINARY_HTML_42", str(payload["messages"]))
         self.assertIn("B_PRIVATE_RESULT_42", str(b_ctx["assistant_message"]["output"]))
         self.assertIn("Specialist B", str(b_events))
         history += [{"role": "user", "content": "profile b question"}]
@@ -278,6 +350,14 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(general_request.scope["lite_handoff_router"]["active_agent"])
         self.assertIn("General answer", str(general_ctx["assistant_message"]["output"]))
         self.assertIn("B_PRIVATE_RESULT_42", str(general_seen[0]["messages"]))
+        self.assertEqual(sum(m["role"] == "system" for m in general_seen[0]["messages"]), 1)
+        self.assertEqual(last_question(general_seen[0]["messages"]), {"role": "user", "content": "general question"})
+        from lite_handoff_router.protocol import object_value
+        historical = [object_value(m.get("content")) for m in general_seen[0]["messages"] if m["role"] == "tool"]
+        historical = [item for item in historical if "tool_results" in item]
+        self.assertEqual([item["agent_id"] for item in historical], [agent_id, b_id])
+        self.assertNotIn("TOOL_RESULT_42:" + user.id, str(historical))
+        self.assertIn("B_PRIVATE_RESULT_42", str(historical))
         self.assertNotIn("profile_lookup", [t["function"]["name"] for t in general_seen[0]["tools"]])
 
         for question, detail in (("provider error", "Test provider failure"), ("overflow", "Context length exceeded")):
@@ -295,6 +375,21 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         failed_calls = [item["name"] for item in failed_ctx["assistant_message"]["output"] if item.get("type") == "function_call"]
         self.assertEqual(failed_calls.count("profile_lookup"), 1)
         self.assertNotIn("profile_finish", failed_calls)
+
+        preparation.valves.context_model_input_budgets[b_id] = 10000
+        request_budget, _, filter_seen, filter_events = await next_turn("profile a budget filter")
+        self.assertEqual([p["model"] for p in filter_seen], ["router-llm", "router-llm"])
+        self.assertIsNone(request_budget.scope["lite_handoff_router"]["active_agent"])
+        self.assertIn("Входной контекст превышает бюджет", str(filter_events))
+        self.assertNotIn("FILTER_PROMPT", str(filter_events))
+
+        _, budget_ctx, budget_seen, budget_events = await next_turn("profile a budget continuation")
+        self.assertEqual([p["model"] for p in budget_seen], ["router-llm", "router-llm", agent_id], budget_events)
+        self.assertIn("Входной контекст превышает бюджет", str(budget_events))
+        budget_calls = [item["name"] for item in budget_ctx["assistant_message"]["output"]
+                        if item.get("type") == "function_call"]
+        self.assertEqual(budget_calls.count("profile_lookup"), 1)
+        self.assertNotIn("profile_finish", budget_calls)
 
         saved_tools = preparation.valves.base_tool_ids
         try:

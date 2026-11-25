@@ -2,13 +2,21 @@
 
 import asyncio
 from copy import deepcopy
+import hashlib
 import json
 import logging
 from uuid import UUID
 
 from .binding import bind_tool_context
+from .context_policy import summary_model_id
 from .capabilities import MCP_CLOSE_TIMEOUT, bounded_tool_name
 from .native_context import scoped_knowledge_result
+from .history import context_handoff_key, handoff_evidence
+from .protocol import completed_pairs
+from .prompt_usage import restore_prompt_usage
+from .registry import ids
+from .provider_errors import provider_error
+from .summary_response import SummaryGenerationError, summary_response_text
 
 
 def as_dict(value):
@@ -23,7 +31,64 @@ def register_model_tool(registry, name, tool, namespace):
     registry[alias] = {**tool, "spec": {**deepcopy(tool["spec"]), "name": alias}}
 
 
+def saved_handoff_statuses(branch, convert):
+    statuses = {}
+    for message in branch:
+        if message.get("role") != "assistant" or not isinstance(message.get("output"), list):
+            continue
+        converted = convert(deepcopy(message["output"]), raw=True)
+        markers = [handoff_evidence(converted[i]["tool_calls"][n], converted[r])
+                   for i, n, r in completed_pairs(converted)]
+        markers = [marker for marker in markers if marker]
+        if len(markers) != 1:
+            continue
+        status = message.get("status")
+        if status not in ("failed", "cancelled", "timed_out"):
+            failed = any(item.get("type") == "message" and item.get("status") in ("failed", "rejected")
+                         for item in message["output"] if isinstance(item, dict))
+            pending = any(item.get("status") in ("pending", "in_progress", "incomplete", "requires_action")
+                          for item in message["output"] if isinstance(item, dict))
+            status = ("failed" if message.get("error") or failed else
+                      "completed" if message.get("done") is True and not pending else "unknown")
+        key = context_handoff_key(markers[0])
+        statuses[key] = status if key not in statuses or statuses[key] == status else "unknown"
+    return statuses
+
+
 class OWUIAdapter:
+    async def chat_skill_ids(self, body):
+        from open_webui.utils.skills import extract_skill_ids_from_messages
+
+        current = next((m for m in reversed(body.get("messages") or []) if m.get("role") == "user"), None)
+        selected = ids(body.get("skill_ids") or [])
+        mentioned = sorted(extract_skill_ids_from_messages([current] if current else []))
+        # Terminal Skills retain their native terminal scope and reader contract.
+        return [sid for sid in ids(selected + mentioned) if not sid.startswith("terminal:")]
+
+    async def historical_handoff_statuses(self, request, metadata, state, user):
+        """Read terminal evidence from this saved branch, never from client metadata."""
+        if not state.get("chat_id") or user.id != state.get("user_id"):
+            return {}
+        from open_webui.models.chats import Chats
+        from open_webui.utils.misc import get_message_list, convert_output_to_messages
+
+        try:
+            chat = await Chats.get_accessible_chat_by_id(state["chat_id"], user)
+            if chat is None:
+                return {}
+            messages = await Chats.get_messages_map_by_chat_id(chat.id)
+            current = state.get("message_id")
+            if current not in (messages or {}):
+                current = metadata.get("user_message_id")
+            branch = get_message_list(messages or {}, current)
+            if summary_model_id(state):
+                resume = getattr(getattr(request, "state", None), "tool_approval_resume", None)
+                restore_prompt_usage(state, branch, resume=resume)
+            return saved_handoff_statuses(branch, convert_output_to_messages)
+        except Exception as error:
+            logging.getLogger(__name__).warning("Historical terminal evidence unavailable (%s)", type(error).__name__)
+            return {}
+
     async def native_memory_allowed(self, metadata, model, user):
         from open_webui.models.config import Config
         from open_webui.utils.access_control import has_permission
@@ -568,7 +633,145 @@ class OWUIAdapter:
         if await self.child(child_id, user):
             await stop_tasks_by_chat_id_endpoint(request, child_id, user=user)
 
-    async def complete(self, request, body, user):
+    async def save_prompt_usage(self, state, user, model_id, prompt_tokens, *, summary_key,
+                                agent_id=None, generation=None):
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+
+        logger = logging.getLogger(__name__)
+        sample = {"model": model_id, "prompt_tokens": prompt_tokens, "summary_key": summary_key}
+        if agent_id:
+            sample.update(agent_id=agent_id, generation=generation, request_id=state["request_id"])
+            logger.info("Agent input tokens: agent=%s model=%s request=%s generation=%s prompt_tokens=%s",
+                        agent_id, model_id, state["request_id"], generation, prompt_tokens)
+        if not is_saved_chat_id(state["chat_id"]) or not state["message_id"]:
+            return
+        try:
+            chat = await Chats.get_accessible_chat_by_id(state["chat_id"], user)
+            if chat is None or chat.user_id != user.id:
+                return
+            async with Chats.edit_message_output(chat.id, state["message_id"]) as message:
+                if message is not None and message.get("role") == "assistant":
+                    meta = {**(message.get("meta") or {})}
+                    if agent_id:
+                        previous = meta.get("lite_agent_usage")
+                        entries = previous if isinstance(previous, list) else []
+                        updated = [entry for entry in entries if not isinstance(entry, dict) or
+                                   (entry.get("request_id"), entry.get("generation")) != (state["request_id"], generation)]
+                        meta["lite_agent_usage"] = [*updated, sample]
+                    else:
+                        meta["lite_router_usage"] = sample
+                    message["meta"] = meta
+        except Exception as error:
+            logger.warning("Prompt token usage could not be saved (%s)", type(error).__name__)
+
+    async def shared_summary_cache(self, state, user, model_id):
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+
+        if not is_saved_chat_id(state["chat_id"]):
+            return {}
+        try:
+            chat = await Chats.get_accessible_chat_by_id(state["chat_id"], user)
+            if chat is None or chat.user_id != user.id:
+                return {}
+            entries = (chat.meta or {}).get("lite_shared_summaries", ())
+            return {entry["key"]: entry["summary"] for entry in entries
+                    if entry.get("router") == state["router_id"] and entry.get("model") == model_id
+                    and isinstance(entry.get("summary"), str) and entry["summary"].strip()}
+        except Exception as error:
+            logging.getLogger(__name__).warning("Shared summary cache unreadable (%s)", type(error).__name__)
+            return {}
+
+    async def shared_summary_source_version(self, state, user, covered_turns, *, db=None):
+        from open_webui.models.chat_messages import ChatMessages
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+        from open_webui.utils.misc import get_message_list
+
+        if not is_saved_chat_id(state["chat_id"]) or state["user_id"] != user.id:
+            return None
+        if db is None:
+            mapping = await Chats.get_messages_map_by_chat_id(state["chat_id"])
+        else:
+            mapping = await ChatMessages.get_messages_map_by_chat_id(state["chat_id"], db=db)
+        if not mapping:
+            return None
+        branch = get_message_list(mapping, state["message_id"])
+        users = [i for i, message in enumerate(branch) if message.get("role") == "user"]
+        if len(users) <= covered_turns:
+            return None
+        prefix = [{key: message.get(key) for key in
+                   ("id", "parentId", "role", "content", "output", "files", "embeds")}
+                  for message in branch[:users[covered_turns]]]
+        return hashlib.sha256(json.dumps(prefix, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    async def save_shared_summary(self, state, user, model_id, key, summary, *, covered_turns=None, source_version=None):
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+
+        if not is_saved_chat_id(state["chat_id"]):
+            return
+        try:
+            async with Chats._chat_transaction(state["chat_id"]) as (db, row):
+                if row is None or row.user_id != user.id:
+                    return False
+                if covered_turns is not None:
+                    if source_version is None:
+                        return None
+                    latest = await self.shared_summary_source_version(state, user, covered_turns, db=db)
+                    if latest != source_version:
+                        return False
+                entry = {"summary": summary, "key": key, "model": model_id, "router": state["router_id"]}
+                meta = dict(row.meta or {})
+                entries = meta.get("lite_shared_summaries") or []
+                for old in entries:
+                    if all(old.get(field) == entry[field] for field in ("router", "model", "key")):
+                        if isinstance(old.get("summary"), str) and old["summary"].strip():
+                            return old["summary"]
+                meta["lite_shared_summaries"] = (entries + [entry])[-8:]
+                row.meta = meta
+                return summary
+        except Exception as error:
+            logging.getLogger(__name__).warning("Shared summary cache write failed (%s)", type(error).__name__)
+
+    async def generate_shared_summary(self, request, user, model_id, messages, previous):
+        from open_webui.models.config import Config
+        from open_webui.routers.openai import convert_responses_result
+        from open_webui.utils.context_compaction import DEFAULT_CONTEXT_COMPACTION_PROMPT
+        from open_webui.utils.models import check_model_access
+        from open_webui.utils.payload import apply_params_to_form_data
+        from open_webui.utils.task import prompt_template, replace_messages_variable
+        from starlette.requests import Request
+
+        model = request.app.state.MODELS.get(model_id)
+        if not model or model.get("pipe") or model.get("pipeline") or model.get("owned_by") != "openai":
+            raise SummaryGenerationError("Модель суммаризации не найдена или несовместима с OpenAI API.")
+        try:
+            await check_model_access(user, model)
+        except Exception as error:
+            raise SummaryGenerationError("Open WebUI не подтвердил доступ к модели суммаризации.") from error
+        isolated = Request({"type": "http", "method": "POST", "path": request.url.path,
+                            "app": request.app, "headers": [], "state": {}})
+        config = await Config.get_many("chat.context_compaction.prompt_template", "task.model.params")
+        template = (config.get("chat.context_compaction.prompt_template") or "").strip()
+        prompt = await prompt_template(template or DEFAULT_CONTEXT_COMPACTION_PROMPT, user)
+        prompt = replace_messages_variable(prompt, [], "RECENT_MESSAGES")
+        prompt = replace_messages_variable(prompt, messages)
+        prompt = replace_messages_variable(prompt, messages, "COMPACTED_MESSAGES")
+        prompt = prompt.replace("{{PREVIOUS_SUMMARY}}", previous or "")
+        body = {"model": model_id, "messages": [{"role": "user", "content": prompt}], "stream": False,
+                "n": 1, "metadata": {"task": "context_compaction"}}
+        params = config.get("task.model.params")
+        if isinstance(params, dict):
+            body = apply_params_to_form_data(body, model, {key: value for key, value in params.items()
+                                                           if value not in (None, "")})
+        body.pop("stream_options", None)
+        async with asyncio.timeout(45):
+            response = await self.complete(isolated, body, user, bypass_system_prompt=False)
+            return await summary_response_text(response, convert_responses=convert_responses_result)
+
+    async def complete(self, request, body, user, *, bypass_system_prompt=True):
         from fastapi import HTTPException
         from starlette.responses import Response, StreamingResponse
         from open_webui.models.config import Config
@@ -583,18 +786,19 @@ class OWUIAdapter:
             # prompt_and_params already installed the chosen prompt. The outer
             # native continuation's bypass flag must not suppress that step.
             response = await generate_chat_completion(
-                request, body, user, bypass_system_prompt=True,
+                request, body, user, bypass_system_prompt=bypass_system_prompt,
             )
         except HTTPException as error:
-            raise RuntimeError(str(error.detail)) from error
+            raise provider_error(error.detail) from error
         if isinstance(response, Response) and response.status_code >= 400:
             raw = getattr(response, "body", b"")
             detail = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
-            raise RuntimeError(detail or f"Provider HTTP {response.status_code}")
+            raise provider_error(detail or f"Provider HTTP {response.status_code}") from HTTPException(
+                status_code=response.status_code)
         if isinstance(response, StreamingResponse):
             return response
         if isinstance(response, Response):
             response = json.loads(response.body)
         if response is None or (isinstance(response, dict) and response.get("error")):
-            raise RuntimeError(str(response or "Provider returned no response"))
+            raise provider_error(response or "Provider returned no response")
         return response

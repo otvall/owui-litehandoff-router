@@ -1,0 +1,48 @@
+{
+  "open_webui": "0.13.3",
+  "provider": "capture only; no live GLM request",
+  "router": "demo-router",
+  "base_prompt": "docs/templates/router-system-prompt.md",
+  "agents": [
+    {
+      "agent_id": "forecast-agent",
+      "agent_name": "Агент прогнозирования",
+      "skill_id": "route-forecast"
+    },
+    {
+      "agent_id": "research-agent",
+      "agent_name": "Агент исследований",
+      "skill_id": "route-research"
+    },
+    {
+      "agent_id": "html-agent",
+      "agent_name": "Агент HTML-отчётов",
+      "skill_id": "route-html"
+    }
+  ],
+  "ordinary_skills": [
+    {
+      "id": "report-style",
+      "source": "valves"
+    },
+    {
+      "id": "fact-check",
+      "source": "model"
+    },
+    {
+      "id": "concise-answer",
+      "source": "chat"
+    }
+  ],
+  "max_parallel_tasks": 0,
+  "system_messages": 1,
+  "tool_names": [
+    "lite_delegate",
+    "view_skill",
+    "grep_skill_files",
+    "read_skill_file"
+  ],
+  "system_characters": 7379,
+  "catalog_characters": 1503,
+  "catalog_delivery": "server-only list_available_skills tool result"
+}
