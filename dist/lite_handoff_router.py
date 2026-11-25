@@ -417,6 +417,11 @@ def group_calls(state):
 from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+def summary_model_id(state):
+    if state.get('worker'):
+        return ''
+    return ((state.get('context_policy') or {}).get('shared_summary_model_id') or '').strip()
+
 class ContextPolicy(BaseModel):
     model_config = ConfigDict(validate_assignment=True, strict=True)
     tool_result_history_limit: int | None = Field(default=None, ge=0)
@@ -426,6 +431,8 @@ class ContextPolicy(BaseModel):
     agent_summary_trigger_tokens: int = Field(default=40000, gt=0)
     context_input_budget_tokens: int | None = Field(default=None, gt=0)
     context_model_input_budgets: dict[str, Annotated[int, Field(gt=0)]] = Field(default_factory=dict)
+    context_window_tokens: int | None = Field(default=None, gt=0, description='Total model context window, including output')
+    context_response_reserve_tokens: int = Field(default=1024, gt=0, description='Minimum output reserve for the total window')
     context_safety_margin_tokens: int = Field(default=1024, ge=0)
 
     @model_validator(mode='after')
@@ -435,6 +442,8 @@ class ContextPolicy(BaseModel):
             limits.append(self.context_input_budget_tokens)
         if any((limit <= self.context_safety_margin_tokens for limit in limits)):
             raise ValueError('Context input budgets must be greater than the safety margin')
+        if self.context_window_tokens is not None and self.context_window_tokens <= self.context_response_reserve_tokens + self.context_safety_margin_tokens:
+            raise ValueError('Context window must be greater than the response reserve and safety margin')
         return self
 
 # Source: runtime
@@ -591,6 +600,8 @@ class ResourceScope:
 """Handoff is a completed, server-witnessed Tool exchange, not text parsing."""
 import json
 from uuid import uuid4
+AGENT_HISTORY_HEADING = '[Conversation history]'
+SHARED_SUMMARY_PREFIX = '[Shared conversation summary]\n'
 
 def delegate_tool(adapter, request, user, metadata, state):
     """Build a request-local native Tool; no Workspace Tool upload is needed."""
@@ -608,8 +619,11 @@ def tool_image(message):
     content = message.get('content')
     return message.get('role') == 'user' and isinstance(content, list) and (len(content) > 1) and (content[0] == {'type': 'text', 'text': 'Here are the images from the tool results above. Please analyze them.'}) and all((p.get('type') == 'image_url' for p in content[1:]))
 
+def actual_user(message):
+    return message.get('role') == 'user' and (not tool_image(message))
+
 def last_user(messages):
-    return next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get('role') == 'user' and (not tool_image(messages[i]))), -1)
+    return next((i for i in range(len(messages) - 1, -1, -1) if actual_user(messages[i])), -1)
 
 def object_value(content):
     if isinstance(content, dict):
@@ -634,7 +648,7 @@ def completed_pairs(messages):
         results.clear()
     for index, message in enumerate(messages):
         role = message.get('role')
-        if role == 'assistant' or (role == 'user' and (not tool_image(message))):
+        if role == 'assistant' or actual_user(message):
             finish()
         if role == 'assistant':
             for ordinal, call in enumerate(message.get('tool_calls') or []):
@@ -730,12 +744,26 @@ def capture_native_context(request, metadata, state, converted):
     state['native_context'] = {'identity': identity, 'records': records}
 
 def native_record(state, call, result):
-    key = context_pair_key(call, result)
     context = state.get('native_context') or {}
+    records = context.get('records')
+    if not records:
+        return None
     identity = tuple((state.get(k) for k in ('request_id', 'user_id', 'chat_id', 'message_id')))
     if context.get('identity') != identity:
         return None
-    return next((record for record in context.get('records', []) if record['key'] == key or key in record.get('projections', [])), None)
+    key = context_pair_key(call, result)
+    return next((record for record in records if record['key'] == key or key in record.get('projections', [])), None)
+
+def native_pairs(messages, state):
+    if not (state.get('native_context') or {}).get('records'):
+        return
+    for i, n, r in completed_pairs(messages):
+        call, result = (messages[i]['tool_calls'][n], messages[r])
+        if native_record(state, call, result):
+            yield (call, result)
+
+def native_view_keys(messages, state):
+    return sorted((context_pair_key(call, result) for call, result in native_pairs(messages, state)))
 
 async def scoped_knowledge_result(record, eligible, check):
     """Filter structured native catalogs, without treating their text as authority."""
@@ -877,7 +905,7 @@ def fingerprint(call):
         return None
     if not isinstance(arguments, dict):
         return None
-    return (call.get('id'), function.get('name'), json.dumps(arguments, sort_keys=True, ensure_ascii=False))
+    return json.dumps([call.get('id'), function.get('name'), arguments], sort_keys=True, ensure_ascii=False)
 
 def audit_fingerprint(record):
     return fingerprint({'id': record.get('id'), 'function': {'name': record.get('name'), 'arguments': record.get('arguments')}})
@@ -907,10 +935,12 @@ def analyze(messages, *, current_boundary=None, audit=()):
     """
     turns, turn = ([], -1)
     for i, message in enumerate(messages):
-        if message.get('role') == 'user' and (i == current_boundary or not tool_image(message)):
+        if i == current_boundary and message.get('role') == 'user' or actual_user(message):
             turn += 1
         turns.append(turn)
     pairs = completed_pairs(messages)
+    paired = {(i, n) for i, n, _ in pairs}
+    incomplete_handoffs = {turns[i] for i, message in enumerate(messages) for n, call in enumerate(message.get('tool_calls') or []) if (i, n) not in paired and call.get('function', {}).get('name') == 'lite_delegate'}
     by_turn = {}
     for pair in pairs:
         by_turn.setdefault(turns[pair[0]], []).append(pair)
@@ -923,15 +953,17 @@ def analyze(messages, *, current_boundary=None, audit=()):
                 evidence.append((r, marker))
         marker = evidence[0][1] if len(evidence) == 1 else None
         transition = evidence[0][0] if marker else None
-        paired = {(i, n) for i, n, _ in group}
-        ambiguous_handoff = any((turns[i] == turn and (i, n) not in paired and (call.get('function', {}).get('name') == 'lite_delegate') for i, message in enumerate(messages) for n, call in enumerate(message.get('tool_calls') or []))) or len(evidence) > 1
+        ambiguous_handoff = turn in incomplete_handoffs or len(evidence) > 1
         records = list(marker.get('router_calls') or []) if marker else []
         if current_boundary is not None and any((i > current_boundary for i, _, _ in group)):
             records += list(audit)
+        by_fingerprint = {}
+        for record in records:
+            if isinstance(record, dict) and (key := audit_fingerprint(record)) is not None:
+                by_fingerprint.setdefault(key, []).append(record)
         for i, n, r in group:
             call = messages[i]['tool_calls'][n]
-            key = fingerprint(call)
-            matching = [record for record in records if isinstance(record, dict) and key is not None and (audit_fingerprint(record) == key)]
+            matching = by_fingerprint.get(fingerprint(call), ())
             unique = {json.dumps(record, sort_keys=True): record for record in matching}
             owner, generation = ({'kind': 'unknown'}, None)
             if len(unique) == 1:
@@ -1138,7 +1170,7 @@ def agent_dialogue(state, agent_id, exchanges, boundary):
         batches.setdefault(exchange.batch, []).append(exchange)
     overrides = {}
     historical_turns = {}
-    starts = [i for i, m in enumerate(messages) if m.get('role') == 'user' and (i == boundary or not tool_image(m))]
+    starts = [i for i, m in enumerate(messages) if i == boundary and m.get('role') == 'user' or actual_user(m)]
     for start, end in zip(starts, starts[1:] + [len(messages)]):
         calls = [(i, n) for i in range(start + 1, end) for n, call in enumerate(messages[i].get('tool_calls') or []) if call.get('function', {}).get('name') == 'lite_delegate']
         if len(calls) != 1:
@@ -1623,9 +1655,19 @@ class ContextBudgetEstimate:
     def total(self):
         return self.exact_total if self.exact_total is not None else sum(self.breakdown.values())
 
-def input_budget(policy, recipient):
+def input_budget(policy, recipient, draft=None):
     configured = policy.get('context_model_input_budgets', {}).get(recipient, policy.get('context_input_budget_tokens'))
-    return configured - policy['context_safety_margin_tokens'] if configured is not None else None
+    window = policy.get('context_window_tokens')
+    limits = [configured] if configured is not None else []
+    if window is not None:
+        draft = draft or {}
+        options = draft.get('options')
+        ollama_limit = options.get('num_predict') if isinstance(options, dict) else None
+        output_limits = [draft.get(key) for key in ('max_tokens', 'max_completion_tokens', 'max_output_tokens')]
+        output_limits.extend((ollama_limit, policy['context_response_reserve_tokens']))
+        reserve = max((value for value in output_limits if type(value) is int and value > 0))
+        limits.append(window - reserve)
+    return max(0, min(limits) - policy['context_safety_margin_tokens']) if limits else None
 
 def estimate_context_budget(draft, *, count_serialized_request=None):
     messages = draft['messages']
@@ -1651,9 +1693,9 @@ def estimate_context_budget(draft, *, count_serialized_request=None):
                     breakdown['media'] += 256 if detail == 'low' else 2048
                 else:
                     breakdown[category] += count(part)
-        elif isinstance(content, str) and content.startswith('[Shared conversation summary]\n'):
+        elif isinstance(content, str) and content.startswith(SHARED_SUMMARY_PREFIX):
             breakdown['summary'] += count(content)
-        elif isinstance(content, str) and content.startswith('[Conversation history]\n'):
+        elif isinstance(content, str) and content.startswith(AGENT_HISTORY_HEADING + '\n'):
             _, _, data = content.partition('\n')
             history = object_value(data)
             summary = count(history.get('summary'))
@@ -1676,6 +1718,233 @@ def check_context_budget(estimate, available, *, recipient, before, hidden_resul
         mode = 'оценка' if estimate.mode == 'estimated' else 'точный подсчёт'
         raise ContextBudgetExceeded(f'Входной контекст превышает бюджет. {mode}: {estimate.total} токенов при лимите {available}. До сжатия {before}. Скрыто результатов: {hidden_results}. {components}.')
 
+# Source: provider_errors
+"""Classify errors shared by ordinary model calls and summary generation."""
+import re
+OVERFLOW_MESSAGES = re.compile('context.length.exceeded|(?:context|input|prompt) (?:window|length)(?: limit)? (?:is |was )?(?:exceeded|too (?:long|large))|maximum context length|(?:exceeds|exceeded) (?:the )?(?:maximum |max(?:imum)? supported )?(?:model )?context length|(?:input|prompt) (?:is )?too long|input length \\(\\d+\\) is longer than|(?:input|prompt)(?: length)?\\s+\\([^)]*tokens?[^)]*\\) (?:is longer than|exceeds the maximum allowed length)', re.IGNORECASE)
+
+class ProviderContextOverflow(RuntimeError):
+    pass
+
+def provider_error(detail):
+    text = str(detail)
+    return ProviderContextOverflow(text) if OVERFLOW_MESSAGES.search(text) else RuntimeError(text)
+
+def provider_event_error(event):
+    error = event.get('error')
+    if error:
+        return error
+    if event.get('type') in {'error', 'response.failed'}:
+        response = event.get('response')
+        if isinstance(response, dict) and response.get('error'):
+            return response['error']
+        return event
+    return None
+
+# Source: stream_lines
+"""Frame provider chunks without decoding incomplete UTF-8 characters."""
+
+class StreamLines:
+
+    def __init__(self):
+        self.pending = b''
+        self.received = 0
+
+    def feed(self, chunk):
+        data = chunk.encode() if isinstance(chunk, str) else chunk
+        self.received += len(data)
+        lines = (self.pending + data).split(b'\n')
+        self.pending = lines.pop()
+        return lines
+
+    def finish(self):
+        tail, self.pending = (self.pending, b'')
+        return (tail,) if tail else ()
+
+# Source: summary_response
+"""Normalize provider summary responses across Chat Completions and Responses."""
+from dataclasses import dataclass
+import json
+import re
+SUMMARY_STREAM_LIMIT = 4 * 1024 * 1024
+
+class SummaryGenerationError(RuntimeError):
+    """A diagnostic that is safe to display in the chat."""
+
+@dataclass
+class SummaryStreamStats:
+    frames: int = 0
+    line_bytes: int = 0
+    json_events: int = 0
+    text_fragments: int = 0
+    done: bool = False
+    body_format: str = ''
+
+    def missing_finish(self):
+        reason = 'Поток сводки прислал [DONE] без finish_reason или response.completed.' if self.done else 'Поток сводки закрылся без завершающего события.'
+        body_format = f' Формат тела: {self.body_format}.' if self.body_format else ''
+        return SummaryGenerationError(f'{reason} SSE-кадров: {self.frames}, фрагментов текста: {self.text_fragments}, байт в строках: {self.line_bytes}, JSON-событий без SSE: {self.json_events}.' + body_format)
+
+async def summary_stream_lines(stream):
+    if isinstance(stream, (str, bytes)):
+
+        async def buffered_chunks():
+            yield stream
+        chunks = buffered_chunks()
+    else:
+        chunks = stream
+    framer = StreamLines()
+    async for chunk in chunks:
+        chunk = chunk.encode() if isinstance(chunk, str) else chunk
+        if framer.received + len(chunk) > SUMMARY_STREAM_LIMIT:
+            raise SummaryGenerationError('Поток сводки превысил предел в 4 МиБ.')
+        for line in framer.feed(chunk):
+            yield line
+    for line in framer.finish():
+        yield line
+
+def summary_unframed_events(body):
+    if not body.strip():
+        return ([], '')
+    if body.lstrip().startswith(b'<'):
+        status = re.search(b'(?i)<title>\\s*([45][0-9]{2})\\b', body[:512])
+        return ([], f'HTML/XML, код {status[1].decode()}' if status else 'HTML/XML')
+    try:
+        decoded = body.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return ([], 'некорректный UTF-8')
+    try:
+        payload = json.loads(decoded)
+        events = payload if isinstance(payload, list) else [payload]
+    except ValueError:
+        try:
+            events = [json.loads(line) for line in decoded.split('\n') if line.strip()]
+        except ValueError:
+            return ([], 'нераспознанное тело')
+    if events and all((isinstance(event, dict) for event in events)):
+        return (events, '')
+    return ([], 'неожиданная структура JSON')
+
+async def summary_stream_events(stream, stats):
+    if isinstance(stream, list):
+        if not all((isinstance(event, dict) for event in stream)):
+            raise SummaryGenerationError('Некорректный список событий в ответе сводки.')
+        stats.json_events = len(stream)
+        for event in stream:
+            yield event
+        return
+    unframed = bytearray()
+    async for line in summary_stream_lines(stream):
+        stats.line_bytes += len(line)
+        if not line.startswith(b'data:'):
+            if not stats.frames:
+                unframed.extend(line + b'\n')
+            continue
+        data = line[5:].strip()
+        if data == b'[DONE]':
+            stats.done = True
+            return
+        if not data:
+            continue
+        try:
+            event = json.loads(data)
+        except ValueError as error:
+            raise SummaryGenerationError('Некорректное событие в потоке сводки.') from error
+        if not isinstance(event, dict):
+            raise SummaryGenerationError('Некорректное событие в потоке сводки.')
+        stats.frames += 1
+        unframed.clear()
+        yield event
+    if not stats.frames:
+        events, stats.body_format = summary_unframed_events(unframed)
+        stats.json_events = len(events)
+        for event in events:
+            yield event
+
+def summary_response_document(event, convert_responses):
+    if (error := provider_event_error(event)):
+        raise provider_error(error)
+    kind = event.get('type')
+    status = event.get('status') if event.get('object') == 'response' else None
+    if kind == 'response.incomplete' or status in ('incomplete', 'failed'):
+        raise SummaryGenerationError('Провайдер не завершил генерацию сводки.')
+    if kind == 'response.completed' or status == 'completed':
+        document = event.get('response') if kind == 'response.completed' else event
+        if not isinstance(document, dict):
+            raise SummaryGenerationError('Некорректное событие в потоке сводки.')
+        return convert_responses(document)
+    return None
+
+def summary_choices(document):
+    choices = document.get('choices') or []
+    if not isinstance(choices, list):
+        raise SummaryGenerationError('Некорректное поле choices в ответе сводки.')
+    return choices
+
+def summary_message(value):
+    message = value or {}
+    if not isinstance(message, dict):
+        raise SummaryGenerationError('Некорректное сообщение в ответе сводки.')
+    return message
+
+def summary_tool_call(message):
+    return bool(message.get('tool_calls') or message.get('function_call'))
+
+def completed_summary(content, finish_reason, tool_called):
+    if finish_reason == 'length':
+        raise SummaryGenerationError('Генерация сводки достигла лимита модели (finish_reason=length).')
+    if tool_called:
+        raise SummaryGenerationError('Модель суммаризации вернула вызов инструмента.')
+    if finish_reason != 'stop':
+        raise SummaryGenerationError('Провайдер прервал генерацию сводки.')
+    return content.strip() if isinstance(content, str) else ''
+
+def summary_document_text(document):
+    choices = summary_choices(document)
+    choice = summary_message(choices[0] if choices else None)
+    message = summary_message(choice.get('message'))
+    return completed_summary(message.get('content'), choice.get('finish_reason'), summary_tool_call(message))
+
+async def collect_summary_stream(stream, convert_responses):
+    stats = SummaryStreamStats()
+    parts = []
+    snapshot = finish_reason = None
+    tool_called = False
+    try:
+        async for event in summary_stream_events(stream, stats):
+            document = summary_response_document(event, convert_responses)
+            if document is not None:
+                return summary_document_text(document)
+            for choice in summary_choices(event):
+                if not isinstance(choice, dict) or choice.get('index', 0) != 0:
+                    continue
+                delta = summary_message(choice.get('delta'))
+                full = summary_message(choice.get('message'))
+                if isinstance(delta.get('content'), str):
+                    parts.append(delta['content'])
+                    stats.text_fragments += 1
+                if isinstance(full.get('content'), str):
+                    snapshot = full['content']
+                    stats.text_fragments += 1
+                tool_called = tool_called or summary_tool_call(delta) or summary_tool_call(full)
+                finish_reason = choice.get('finish_reason') or finish_reason
+    finally:
+        if hasattr(stream, 'aclose'):
+            await stream.aclose()
+    if not finish_reason:
+        raise stats.missing_finish()
+    content = snapshot if snapshot is not None else ''.join(parts)
+    return completed_summary(content, finish_reason, tool_called)
+
+async def summary_response_text(response, *, convert_responses):
+    if isinstance(response, dict):
+        document = summary_response_document(response, convert_responses)
+        return summary_document_text(response if document is None else document)
+    stream = getattr(response, 'body_iterator', response)
+    if not isinstance(stream, (str, bytes, list)) and (not hasattr(stream, '__aiter__')):
+        raise SummaryGenerationError('Провайдер вернул ответ сводки в неожиданном формате.')
+    return await collect_summary_stream(stream, convert_responses)
+
 # Source: shared_summary
 """One summary of the shared dialogue, reused by Router and its agents."""
 from asyncio import CancelledError
@@ -1689,14 +1958,7 @@ from pathlib import PurePath
 SUMMARY_INPUT_LIMIT = 60000
 SUMMARY_TEXT_PARTS = {'text', 'input_text', 'output_text'}
 SUMMARY_INLINE_MEDIA = re.compile('data:(?:image|audio|video)/[\\w.+-]+;base64,[A-Za-z0-9+/=_-]+', re.IGNORECASE)
-OVERFLOW_MESSAGES = re.compile('context.length.exceeded|(?:context|input|prompt) (?:window|length)(?: limit)? (?:is |was )?(?:exceeded|too (?:long|large))|maximum context length|(?:exceeds|exceeded) (?:the )?(?:maximum |max(?:imum)? supported )?(?:model )?context length|(?:input|prompt) (?:is )?too long|input length \\(\\d+\\) is longer than|(?:input|prompt)(?: length)?\\s+\\([^)]*tokens?[^)]*\\) (?:is longer than|exceeds the maximum allowed length)', re.IGNORECASE)
 EXACT_REFERENCE = re.compile('(?<![\\w-])(?:[A-ZА-ЯЁ]{2,12}-\\d{2,16}|\\d{4}-\\d{2}-\\d{2}|\\d{2}\\.\\d{2}\\.\\d{4})(?![\\w-])')
-
-class ProviderContextOverflow(RuntimeError):
-    pass
-
-class SummaryGenerationError(RuntimeError):
-    """A diagnostic that is safe to display in the chat."""
 
 def summary_error_details(error):
     details = []
@@ -1733,15 +1995,6 @@ def summary_error_details(error):
         if message or location or http_status:
             details.append(f'{type(failure).__name__}{http_status}{location}' + (f' — {message}' if message else ''))
     return ' | '.join(details)
-
-def propagate_provider_error(detail):
-    text = str(detail)
-    if OVERFLOW_MESSAGES.search(text):
-        raise ProviderContextOverflow(text)
-    raise RuntimeError(text)
-
-def actual_user(message):
-    return message.get('role') == 'user' and (not tool_image(message))
 
 def summary_projection_turns(messages, packet):
     """Completed turns as received before/after destination inlets."""
@@ -1813,10 +2066,10 @@ class SharedSummary:
         self.adapter, self.request, self.user, self.state = (adapter, request, user, state)
         self.emitter = emitter
         policy = state['context_policy']
-        self.model_id = policy['shared_summary_model_id'].strip()
+        self.model_id = summary_model_id(state)
         self.context_percent = policy['shared_summary_context_percent']
-        self.turns = shared_turns(state) if self.model_id and (not state.get('worker')) else []
-        self.checkpoint = None
+        self.turns = shared_turns(state) if self.model_id else []
+        self.checkpoint_turns = 0
         self.applied_turns = 0
 
     async def status(self, description, *, done, error=False, action='lite_shared_summary'):
@@ -1826,20 +2079,19 @@ class SharedSummary:
             except Exception as failure:
                 logging.getLogger(__name__).debug('Shared summary status unavailable (%s)', type(failure).__name__)
 
-    def eligible(self, draft, packet):
-        messages = draft['messages']
+    def eligible_boundaries(self, messages, packet):
         users = [i for i, m in enumerate(messages) if actual_user(m) and m != packet]
         guard = self.state.get('shared_summary_unchanged_turns')
         protected = self.state.get('shared_summary_protected', ())
-        eligible = set()
+        boundaries = {}
         for count, turn in enumerate(self.turns, 1):
             if len(users) <= count or (guard is not None and count > guard) or messages[users[count - 1]].get('content') != turn['source_user'].get('content'):
                 break
             if any((message in protected for message in messages[users[count - 1]:users[count]])):
                 break
             if messages[users[count]].get('content') == turn['next_user'].get('content'):
-                eligible.add(turn['key'])
-        return eligible
+                boundaries[count] = (users[0], users[count])
+        return boundaries
 
     async def load(self, draft=None, packet=None):
         if not self.turns:
@@ -1848,8 +2100,8 @@ class SharedSummary:
         if cache is None:
             cache = await self.adapter.shared_summary_cache(self.state, self.user, self.model_id)
             self.state['shared_summary_cache'] = cache
-        eligible = self.eligible(draft, packet) if draft is not None else {turn['key'] for turn in self.turns}
-        self.checkpoint = next((turn for turn in reversed(self.turns) if turn['key'] in eligible and cache.get(turn['key'])), None)
+        eligible = self.eligible_boundaries(draft['messages'], packet) if draft is not None else range(1, len(self.turns) + 1)
+        self.checkpoint_turns = next((count for count in reversed(eligible) if cache.get(self.turns[count - 1]['key'])), 0)
 
     def applied_summary_key(self):
         if not self.applied_turns:
@@ -1859,26 +2111,25 @@ class SharedSummary:
         return key + ':' + hashlib.sha256(text.encode()).hexdigest()
 
     def apply(self, draft, packet):
-        if not self.checkpoint or self.checkpoint['key'] not in self.eligible(draft, packet):
+        count = self.checkpoint_turns
+        if not count:
             return False
         messages = draft['messages']
-        count = self.turns.index(self.checkpoint) + 1
-        users = [i for i, m in enumerate(messages) if actual_user(m) and m != packet]
-        end = users[count]
-        start = users[0]
+        bounds = self.eligible_boundaries(messages, packet).get(count)
+        if bounds is None:
+            return False
+        start, end = bounds
         kept = [message for message in messages[start:end] if message == packet]
-        summary = shared_summary_reference(self.state['shared_summary_cache'][self.checkpoint['key']], self.turns[:count])
-        messages[start:end] = [{'role': 'user', 'content': '[Shared conversation summary]\n' + summary}, *kept]
+        key = self.turns[count - 1]['key']
+        summary = shared_summary_reference(self.state['shared_summary_cache'][key], self.turns[:count])
+        messages[start:end] = [{'role': 'user', 'content': SHARED_SUMMARY_PREFIX + summary}, *kept]
         self.applied_turns = count
         return True
 
     async def extend(self, draft, packet, full_messages, *, trigger):
-        candidate = {**draft, 'messages': full_messages}
-        eligible = self.eligible(candidate, packet)
-        start = self.turns.index(self.checkpoint) + 1 if self.checkpoint else 0
-        candidates = self.turns[start:]
-        while candidates and candidates[-1]['key'] not in eligible:
-            candidates.pop()
+        start = self.checkpoint_turns
+        eligible = self.eligible_boundaries(full_messages, packet)
+        candidates = self.turns[start:max(eligible, default=0)]
         if not candidates:
             if start < len(self.turns):
                 reason = 'История в запросе к модели отличается от исходной. Безопасная граница сжатия не найдена.'
@@ -1888,12 +2139,15 @@ class SharedSummary:
                 reason = 'В истории ещё нет старых ходов. Текущий ход защищён.'
             await self.status(f'Сжатие пропущено ({trigger}). {reason}', done=True)
             return False
-        turn_tokens = [sum((4 + (max(1, len(text) // 4) if text else 0) for text in (message['content'] for message in turn['messages']))) for turn in candidates]
-        total_tokens = sum(turn_tokens)
+        turn_sizes = []
+        for turn in candidates:
+            lengths = [len(message['content']) for message in turn['messages']]
+            tokens = sum((4 + (max(1, length // 4) if length else 0) for length in lengths))
+            turn_sizes.append((sum(lengths), tokens))
+        total_tokens = sum((tokens for _, tokens in turn_sizes))
         target_tokens = total_tokens * self.context_percent // 100
         added, selected_tokens, length = ([], 0, 0)
-        for turn, tokens in zip(candidates, turn_tokens):
-            size = sum((len(message['content']) for message in turn['messages']))
+        for turn, (size, tokens) in zip(candidates, turn_sizes):
             if length + size > SUMMARY_INPUT_LIMIT or (added and selected_tokens + tokens > target_tokens):
                 break
             added.append(turn)
@@ -1903,7 +2157,7 @@ class SharedSummary:
             await self.status(f'Сжатие пропущено ({trigger}). Первый непересказанный ход содержит {size} символов при лимите {SUMMARY_INPUT_LIMIT}.', done=True)
             return False
         cache = self.state['shared_summary_cache']
-        previous = cache[self.checkpoint['key']] if self.checkpoint else None
+        previous = cache[self.turns[start - 1]['key']] if start else None
         covered_turns = start + len(added)
         description = 'Не удалось сократить контекст'
         failed = True
@@ -1934,13 +2188,12 @@ class SharedSummary:
             if not summary:
                 description += '. Модель вернула пустую сводку.'
                 return False
-            checkpoint = added[-1]
-            key = checkpoint['key']
+            key = added[-1]['key']
             saved = await self.adapter.save_shared_summary(self.state, self.user, self.model_id, key, summary, **save_options)
             if saved is False:
                 description += '. Исходная история изменилась во время суммаризации.'
                 return False
-            self.checkpoint = checkpoint
+            self.checkpoint_turns = covered_turns
             cache[key] = saved if isinstance(saved, str) else summary
             draft['messages'][:] = deepcopy(full_messages)
             applied = self.apply(draft, packet)
@@ -1956,81 +2209,6 @@ class SharedSummary:
             raise
         finally:
             await self.status(description, done=True, error=failed)
-
-def prompt_token_count(usage):
-    if isinstance(usage, dict):
-        for key in ('prompt_tokens', 'input_tokens', 'prompt_eval_count'):
-            value = usage.get(key)
-            if type(value) is int and value > 0:
-                return value
-    return None
-
-def last_prompt_tokens(state, model_id, *, agent_id, summary_key):
-    if agent_id:
-        key = (agent_id, model_id)
-        current, historical = ('agent_usage', 'historical_agent_usage')
-    else:
-        key = model_id
-        current, historical = ('router_usage', 'historical_router_usage')
-    sample = state.get(current, {}).get(key, state.get(historical, {}).get(key))
-    if sample and 'summary_key' in sample and (sample['summary_key'] == summary_key):
-        return prompt_token_count(sample)
-    return None
-
-async def check_initial_stream(response):
-    if not hasattr(response, 'body_iterator'):
-        return response
-    stream = aiter(response.body_iterator)
-    prefix, pending, size = ([], b'', 0)
-    try:
-        async for chunk in stream:
-            prefix.append(chunk)
-            data = chunk if isinstance(chunk, bytes) else chunk.encode()
-            pending += data
-            size += len(data)
-            if size > 65536:
-                break
-            complete = False
-            while b'\n' in pending:
-                line, pending = pending.split(b'\n', 1)
-                if not line.startswith(b'data:'):
-                    continue
-                try:
-                    event = json.loads(line[5:])
-                except ValueError:
-                    complete = True
-                    break
-                if not isinstance(event, dict):
-                    complete = True
-                    break
-                error = event.get('error')
-                if not error and event.get('type') == 'response.failed':
-                    error = (event.get('response') or {}).get('error')
-                if error and OVERFLOW_MESSAGES.search(str(error)):
-                    raise ProviderContextOverflow(str(error))
-                choices = event.get('choices') or ()
-                kind = event.get('type')
-                if error or (kind and kind not in {'response.created', 'response.in_progress'}) or any((choice.get('finish_reason') or any((value for key, value in (choice.get('delta') or {}).items() if key != 'role')) for choice in choices)):
-                    complete = True
-                    break
-            if complete:
-                break
-    except BaseException:
-        if hasattr(stream, 'aclose'):
-            await stream.aclose()
-        raise
-
-    async def replay():
-        try:
-            for chunk in prefix:
-                yield chunk
-            async for chunk in stream:
-                yield chunk
-        finally:
-            if hasattr(stream, 'aclose'):
-                await stream.aclose()
-    response.body_iterator = replay()
-    return response
 
 # Source: model_execution
 """Prepare one model's payload and executable capabilities before publication."""
@@ -2135,8 +2313,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         tools.update(terminal_tools)
         if terminal_prompt and (not target):
             draft['messages'].insert(0, {'role': 'system', 'content': terminal_prompt})
-    if (READERS | {SKILL_CATALOG}).intersection(tools):
-        raise ValueError('Reserved Skill Tool collision: ' + ', '.join(sorted((READERS | {SKILL_CATALOG}).intersection(tools))))
+    collisions = (READERS | {SKILL_CATALOG}).intersection(tools)
+    if collisions:
+        raise ValueError('Reserved Skill Tool collision: ' + ', '.join(sorted(collisions)))
     native_delegate = tools.get('delegate_task')
     if native_delegate and native_delegate.get('tool_id') == 'builtin:delegate_task' and (native_delegate.get('type') == 'builtin'):
         tools.pop('delegate_task')
@@ -2204,12 +2383,12 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     native_snapshot = deepcopy(state.get('native_context'))
     native_allowed_snapshot = deepcopy(state.get('native_context_allowed'))
     native_output_snapshot = deepcopy(metadata.get('initial_output'))
-    native_view_keys = sorted((context_pair_key(draft['messages'][i]['tool_calls'][n], draft['messages'][r]) for i, n, r in completed_pairs(draft['messages']) if native_record(state, draft['messages'][i]['tool_calls'][n], draft['messages'][r])))
+    native_keys = native_view_keys(draft['messages'], state)
     state.pop('shared_summary_unchanged_turns', None)
     state.pop('shared_summary_protected', None)
     state.pop('hidden_tool_result_count', None)
     before_inlet = None
-    if target and (not state.get('worker')) and (state.get('context_policy', {}).get('shared_summary_model_id') or '').strip():
+    if target and summary_model_id(state):
         before_inlet = deepcopy(summary_projection_turns(draft['messages'], packet))
     if target:
         previous_metadata = getattr(request.state, 'metadata', None)
@@ -2227,8 +2406,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         raise ValueError('Destination inlet added reserved conversation history')
     if state.get('native_context') != native_snapshot or state.get('native_context_allowed') != native_allowed_snapshot:
         raise ValueError('Destination inlet changed protected native context')
-    final_native_keys = sorted((context_pair_key(draft['messages'][i]['tool_calls'][n], draft['messages'][r]) for i, n, r in completed_pairs(draft['messages']) if native_record(state, draft['messages'][i]['tool_calls'][n], draft['messages'][r])))
-    if final_native_keys != native_view_keys:
+    if native_view_keys(draft['messages'], state) != native_keys:
         raise ValueError('Destination inlet changed protected native messages')
     final_metadata = draft.get('metadata')
     if not isinstance(final_metadata, dict) or any((final_metadata.get(key) != value for key, value in identity.items())):
@@ -2263,12 +2441,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if window is not None:
         window.apply(draft['messages'])
         state['hidden_tool_result_count'] = window.hidden_count
-    if input_budget(state.get('context_policy', {}), target or state['router_id']) is not None:
+    if input_budget(state.get('context_policy', {}), target or state['router_id'], draft) is not None:
         protected = list(window.protected_messages) if window is not None else []
-        for i, n, r in completed_pairs(draft['messages']):
-            call, result = (draft['messages'][i]['tool_calls'][n], draft['messages'][r])
-            if native_record(state, call, result):
-                protected.append(result)
+        protected.extend((result for _, result in native_pairs(draft['messages'], state)))
         state['shared_summary_protected'] = protected
     compose_system(draft['messages'], primary_systems)
     for name, tool in list(tools.items()):
@@ -2292,7 +2467,6 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
 # Source: agent_history_block
 """Render an agent's already-filtered past turns as a separate reference message."""
 import json
-AGENT_HISTORY_HEADING = '[Conversation history]'
 HIDDEN_ERROR = result_placeholder('Error:')
 
 def history_content(content, media):
@@ -2321,12 +2495,13 @@ def pack_agent_history(messages, state, current_question, *, covered_turns=0, pa
     if current is None:
         return
     first = 1 if messages[0].get('role') == 'system' else 0
-    past = [m for m in messages[first:current] if m != packet]
+    section = messages[first:current]
+    past = [m for m in section if m != packet]
     if not past:
         return
     source = state['source']
     boundary = state['user_boundary']
-    source_questions = [m for m in source[:boundary] if m.get('role') == 'user' and (not tool_image(m))]
+    source_questions = [m for m in source[:boundary] if actual_user(m)]
     if not source_questions:
         return
     pairs = completed_pairs(past)
@@ -2334,25 +2509,26 @@ def pack_agent_history(messages, state, current_question, *, covered_turns=0, pa
         return
     exchanges = analyze(source[:boundary], current_boundary=boundary, audit=state.get('audit', ()))
     authors = {exchange.turn: marker['agent_id'] for exchange, marker in historical_handoffs(source, exchanges, boundary)}
-    historical_users = [m for m in past if m.get('role') == 'user' and (not tool_image(m))]
-    projected_questions = historical_users[bool(covered_turns):]
+    historical_users = [m for m in past if actual_user(m)]
+    summary = historical_users[0] if covered_turns and historical_users else None
+    projected_questions = historical_users[1:] if summary is not None else historical_users
     aligned = [m.get('content') for m in projected_questions] == [m.get('content') for m in source_questions[covered_turns:]]
     results = {(i, ordinal): past[r] for i, ordinal, r in pairs}
     media, turns, attachments = ([], [], [])
     history = {'turns': turns}
-    if covered_turns and historical_users:
-        history['summary'] = historical_users[0]['content'].removeprefix('[Shared conversation summary]\n')
+    if summary is not None:
+        history['summary'] = summary['content'].removeprefix(SHARED_SUMMARY_PREFIX)
     turn = None
     turn_number = covered_turns - 1
     for index, message in enumerate(past):
         role = message.get('role')
         if role not in {'user', 'assistant'}:
             continue
-        if covered_turns and historical_users and (message is historical_users[0]):
+        if message is summary:
             continue
         content = history_content(message.get('content'), media)
         attachments.extend(message.get('files') or ())
-        if role == 'user' and (not tool_image(message)):
+        if actual_user(message):
             turn_number += 1
             turn = {'question': content, 'events': []}
             if aligned and turn_number in authors:
@@ -2388,8 +2564,302 @@ def pack_agent_history(messages, state, current_question, *, covered_turns=0, pa
         if attachments:
             media_message['files'] = attachments
         block.append(media_message)
-    retained = [m for m in messages[first:current] if m == packet]
+    retained = [m for m in section if m == packet]
     messages[first:current] = [*block, *retained, {'role': 'user', 'content': text}]
+
+# Source: observation
+"""Inspect model streams and preserve tool and usage evidence as they pass through."""
+from copy import deepcopy
+import json
+INITIAL_STREAM_LIMIT = 65536
+
+def initial_completion_event(line):
+    if not line.startswith(b'data:'):
+        return False
+    try:
+        event = json.loads(line[5:])
+    except ValueError:
+        return True
+    if not isinstance(event, dict):
+        return True
+    if (error := provider_event_error(event)):
+        failure = provider_error(error)
+        if isinstance(failure, ProviderContextOverflow):
+            raise failure
+        return True
+    kind = event.get('type')
+    if kind and kind not in {'response.created', 'response.in_progress'}:
+        return True
+    return any((choice.get('finish_reason') or any((value for key, value in (choice.get('delta') or {}).items() if key != 'role')) for choice in event.get('choices') or ()))
+
+async def check_initial_stream(response):
+    """Catch context overflow before exposing any model output to Open WebUI."""
+    if not hasattr(response, 'body_iterator'):
+        return response
+    stream = aiter(response.body_iterator)
+    prefix = []
+    framer = StreamLines()
+    try:
+        async for chunk in stream:
+            prefix.append(chunk)
+            chunk_bytes = chunk.encode() if isinstance(chunk, str) else chunk
+            if framer.received + len(chunk_bytes) > INITIAL_STREAM_LIMIT:
+                break
+            if any((initial_completion_event(line) for line in framer.feed(chunk_bytes))):
+                break
+        else:
+            for line in framer.finish():
+                initial_completion_event(line)
+    except BaseException:
+        if hasattr(stream, 'aclose'):
+            await stream.aclose()
+        raise
+
+    async def replay():
+        try:
+            for chunk in prefix:
+                yield chunk
+            async for chunk in stream:
+                yield chunk
+        finally:
+            if hasattr(stream, 'aclose'):
+                await stream.aclose()
+    response.body_iterator = replay()
+    return response
+
+def observe_response(response, state, executor, *, on_usage=None):
+    state['generation'] = state.get('generation', 0) + 1
+    generation = state['generation']
+    calls = {}
+    finished = False
+    usage = None
+
+    def event(data):
+        nonlocal usage
+        if on_usage:
+            reported = data.get('usage')
+            if not reported and data.get('type') == 'response.completed':
+                reported = (data.get('response') or {}).get('usage')
+            if isinstance(reported, dict) and reported:
+                usage = reported
+        if finished:
+            return
+        for choice in data.get('choices', []):
+            for ordinal, call in enumerate((choice.get('delta') or choice.get('message') or {}).get('tool_calls') or []):
+                key = ('chat', choice.get('index', 0), call.get('index', ordinal))
+                entry = calls.setdefault(key, {'id': '', 'name': '', 'arguments': ''})
+                if call.get('id'):
+                    entry['id'] = call['id']
+                function = call.get('function') or {}
+                entry['name'] += function.get('name') or ''
+                arguments = function.get('arguments') or ''
+                entry['arguments'] += json.dumps(arguments) if isinstance(arguments, dict) else arguments
+        item = data.get('item') or {}
+        if item.get('type') == 'function_call':
+            key = ('responses', data.get('output_index', item.get('id')))
+            entry = calls.setdefault(key, {'id': '', 'name': '', 'arguments': ''})
+            entry.update(id=item.get('call_id') or item.get('id') or entry['id'], name=item.get('name') or entry['name'])
+            if item.get('arguments'):
+                entry['arguments'] = item['arguments']
+        elif data.get('type') == 'response.function_call_arguments.delta':
+            key = ('responses', data.get('output_index'))
+            entry = calls.setdefault(key, {'id': '', 'name': '', 'arguments': ''})
+            entry['arguments'] += data.get('delta', '')
+        if any((choice.get('finish_reason') for choice in data.get('choices', []))) or data.get('type') in {'response.completed', 'response.failed', 'response.incomplete'}:
+            finish()
+
+    def finish():
+        nonlocal finished
+        if finished:
+            return
+        finished = True
+        for call in calls.values():
+            try:
+                arguments = json.loads(call['arguments'])
+            except (TypeError, ValueError):
+                arguments = None
+            state.setdefault('audit', []).append({**call, 'arguments': arguments, 'generation': generation, 'executor': deepcopy(executor)})
+    if isinstance(response, dict):
+        event(response)
+        for ordinal, item in enumerate(response.get('output') or []):
+            event({'output_index': ordinal, 'item': item})
+        finish()
+        return response
+    if not hasattr(response, 'body_iterator'):
+        return response
+    original = response.body_iterator
+
+    def consume(line):
+        line = line.strip()
+        if line.startswith(b'data:'):
+            line = line[5:].strip()
+        if line == b'[DONE]':
+            finish()
+        elif line:
+            try:
+                data = json.loads(line)
+            except ValueError:
+                return
+            if isinstance(data, dict):
+                event(data)
+
+    async def stream():
+        framer = StreamLines()
+        try:
+            async for chunk in original:
+                for line in framer.feed(chunk):
+                    consume(line)
+                yield chunk
+            for line in framer.finish():
+                consume(line)
+        finally:
+            finish()
+            if hasattr(original, 'aclose'):
+                await original.aclose()
+            if on_usage:
+                await on_usage(usage)
+    response.body_iterator = stream()
+    return response
+
+# Source: prompt_usage
+"""Track the last prompt sample per executor and model on the active branch."""
+
+def prompt_token_count(usage):
+    if isinstance(usage, dict):
+        for key in ('prompt_tokens', 'input_tokens', 'prompt_eval_count'):
+            value = usage.get(key)
+            if type(value) is int and value > 0:
+                return value
+    return None
+
+def usage_slot(model_id, agent_id):
+    return ('agent_usage', (agent_id, model_id)) if agent_id else ('router_usage', model_id)
+
+def last_prompt_tokens(state, model_id, *, agent_id, summary_key):
+    bucket, key = usage_slot(model_id, agent_id)
+    sample = state.get(bucket, {}).get(key, state.get('historical_' + bucket, {}).get(key))
+    if sample and 'summary_key' in sample and (sample['summary_key'] == summary_key):
+        return prompt_token_count(sample)
+    return None
+
+def remember_prompt_usage(state, model_id, tokens, *, agent_id, summary_key):
+    bucket, key = usage_slot(model_id, agent_id)
+    state.setdefault(bucket, {})[key] = {'prompt_tokens': tokens, 'summary_key': summary_key}
+
+def restore_prompt_usage(state, branch, *, resume):
+    router_usage, agent_usage = ({}, {})
+    resumed_current = isinstance(resume, (tuple, list)) and tuple(resume[:2]) == (state['chat_id'], state['message_id'])
+    for message in branch:
+        if message.get('role') != 'assistant' or not isinstance(message.get('meta'), dict):
+            continue
+        meta = message['meta']
+        is_current = message.get('id') == state['message_id']
+        if not is_current:
+            sample = meta.get('lite_router_usage')
+            if isinstance(sample, dict) and isinstance(sample.get('model'), str):
+                router_usage[sample['model']] = sample
+        if is_current and (not resumed_current):
+            continue
+        samples = meta.get('lite_agent_usage')
+        if isinstance(samples, list):
+            for sample in samples:
+                if isinstance(sample, dict) and isinstance(sample.get('agent_id'), str) and isinstance(sample.get('model'), str):
+                    agent_usage[sample['agent_id'], sample['model']] = sample
+    state['historical_router_usage'] = router_usage
+    state['historical_agent_usage'] = agent_usage
+
+# Source: completion_context
+"""Prepare, compact, and observe the context for one Router or agent completion."""
+from copy import deepcopy
+
+class CompletionContext:
+
+    def __init__(self, adapter, request, user, state, draft, target, *, emitter=None):
+        self.adapter, self.request, self.user = (adapter, request, user)
+        self.state, self.draft, self.target = (state, draft, target)
+        self.recipient = target or state['router_id']
+        self.available = input_budget(state['context_policy'], self.recipient, draft)
+        self.model_id = draft['model']
+        if target:
+            info = (draft['metadata'].get('model') or {}).get('info') or {}
+            self.model_id = info.get('base_model_id') or self.model_id
+        self.packet = state.get('shared_summary_packet')
+        self.summary = SharedSummary(adapter, request, user, state, emitter=emitter) if summary_model_id(state) else None
+        self.full_messages = deepcopy(draft['messages']) if self.summary else None
+
+    async def prepare(self):
+        if self.summary:
+            await self.summary.load(self.draft, self.packet)
+            self.summary.apply(self.draft, self.packet)
+        if self.draft.get('stream'):
+            options = self.draft.get('stream_options')
+            self.draft['stream_options'] = {**(options if isinstance(options, dict) else {}), 'include_usage': True}
+        await self.pack_and_fit_budget(proactive=True)
+
+    def proactive_trigger(self, estimate):
+        previous = last_prompt_tokens(self.state, self.model_id, agent_id=self.target, summary_key=self.summary.applied_summary_key())
+        executor = 'agent' if self.target else 'router'
+        threshold = self.state['context_policy'][f'{executor}_summary_trigger_tokens']
+        name = 'Агент' if self.target else 'Роутер'
+        if previous is not None and previous > threshold:
+            return f'{name}, предыдущий вход {previous} токенов, порог {threshold}'
+        if self.available is None and estimate.total > threshold:
+            return f'{name}, оценка текущего входа {estimate.total} токенов, порог {threshold}'
+        return None
+
+    async def compact(self, trigger):
+        return self.summary is not None and await self.summary.extend(self.draft, self.packet, self.full_messages, trigger=trigger)
+
+    def pack(self):
+        if self.target and (not self.state.get('worker')):
+            pack_agent_history(self.draft['messages'], self.state, self.state.get('agent_history_question'), covered_turns=self.summary.applied_turns if self.summary else 0, packet=self.packet)
+
+    async def pack_and_fit_budget(self, *, proactive=False):
+        self.pack()
+        estimate = estimate_context_budget(self.draft)
+        initial = estimate.total
+        if proactive and self.summary and (self.available is None or estimate.total <= self.available):
+            trigger = self.proactive_trigger(estimate)
+            if trigger and await self.compact(trigger):
+                self.pack()
+                estimate = estimate_context_budget(self.draft)
+        if self.available is None:
+            return
+        while 0 < self.available < estimate.total and await self.compact(f'Бюджет запроса, оценка {estimate.total} токенов при лимите {self.available}'):
+            self.pack()
+            estimate = estimate_context_budget(self.draft)
+        check_context_budget(estimate, self.available, recipient=self.recipient, before=initial, hidden_results=self.state.get('hidden_tool_result_count', 0))
+
+    async def send(self):
+        response = await self.adapter.complete(self.request, self.draft, self.user)
+        return await check_initial_stream(response) if self.summary else response
+
+    async def complete(self):
+        try:
+            response = await self.send()
+        except ProviderContextOverflow:
+            if not await self.compact('Переполнение контекста основного запроса'):
+                raise
+            await self.pack_and_fit_budget()
+            response = await self.send()
+        executor = {'kind': 'agent', 'agent_id': self.target} if self.target else {'kind': 'router'}
+        if not (self.target or self.summary):
+            return observe_response(response, self.state, executor)
+        generation = self.state.get('generation', 0) + 1
+        summary_key = self.summary.applied_summary_key() if self.summary else None
+
+        async def record_usage(usage):
+            tokens = prompt_token_count(usage)
+            if tokens is None and self.summary is None:
+                return
+            remember_prompt_usage(self.state, self.model_id, tokens, agent_id=self.target, summary_key=summary_key)
+            await self.adapter.save_prompt_usage(self.state, self.user, self.model_id, tokens, summary_key=summary_key, agent_id=self.target, generation=generation)
+            if tokens is None and self.summary:
+                await self.summary.status('Провайдер не вернул свежий замер входных токенов.', done=True, action='lite_prompt_usage')
+        if hasattr(response, 'body_iterator'):
+            return observe_response(response, self.state, executor, on_usage=record_usage)
+        await record_usage(response.get('usage') if isinstance(response, dict) else None)
+        return observe_response(response, self.state, executor)
 
 # Source: owui_adapter
 """All imports of Open WebUI internal APIs live behind this boundary."""
@@ -2398,143 +2868,10 @@ from copy import deepcopy
 import hashlib
 import json
 import logging
-import re
 from uuid import UUID
 
 def as_dict(value):
     return value.model_dump() if hasattr(value, 'model_dump') else dict(value or {})
-
-async def summary_stream_lines(stream):
-    if isinstance(stream, (str, bytes)):
-
-        async def buffered_chunks():
-            yield stream
-        chunks = buffered_chunks()
-    else:
-        chunks = stream
-    pending = b''
-    received = 0
-    async for chunk in chunks:
-        chunk = chunk.encode() if isinstance(chunk, str) else chunk
-        received += len(chunk)
-        if received > 4 * 1024 * 1024:
-            raise SummaryGenerationError('Поток сводки превысил предел в 4 МиБ.')
-        lines = (pending + chunk).split(b'\n')
-        pending = lines.pop()
-        for line in lines:
-            yield line
-    if pending:
-        yield pending
-
-def summary_unframed_events(body):
-    if not body.strip():
-        return ([], '')
-    if body.lstrip().startswith(b'<'):
-        status = re.search(b'(?i)<title>\\s*([45][0-9]{2})\\b', body[:512])
-        return ([], f'HTML/XML, код {status[1].decode()}' if status else 'HTML/XML')
-    try:
-        decoded = body.decode('utf-8-sig')
-    except UnicodeDecodeError:
-        return ([], 'некорректный UTF-8')
-    try:
-        parsed = json.loads(decoded)
-        events = parsed if isinstance(parsed, list) else [parsed]
-    except ValueError:
-        try:
-            events = [json.loads(line) for line in decoded.split('\n') if line.strip()]
-        except ValueError:
-            return ([], 'нераспознанное тело')
-    if events and all((isinstance(event, dict) for event in events)):
-        return (events, '')
-    return ([], 'неожиданная структура JSON')
-
-async def summary_stream_events(stream, stats):
-    if isinstance(stream, list):
-        if not all((isinstance(event, dict) for event in stream)):
-            raise SummaryGenerationError('Некорректный список событий в ответе сводки.')
-        stats['json_events'] = len(stream)
-        for event in stream:
-            yield event
-        return
-    unframed = bytearray()
-    async for line in summary_stream_lines(stream):
-        stats['bytes'] += len(line)
-        if not line.startswith(b'data:'):
-            if not stats['frames']:
-                unframed.extend(line + b'\n')
-            continue
-        data = line[5:].strip()
-        if data == b'[DONE]':
-            stats['done'] = True
-            return
-        if not data:
-            continue
-        try:
-            event = json.loads(data)
-        except ValueError as error:
-            raise SummaryGenerationError('Некорректное событие в потоке сводки.') from error
-        if not isinstance(event, dict):
-            raise SummaryGenerationError('Некорректное событие в потоке сводки.')
-        stats['frames'] += 1
-        unframed.clear()
-        yield event
-    if not stats['frames']:
-        events, stats['format'] = summary_unframed_events(unframed)
-        stats['json_events'] = len(events)
-        for event in events:
-            yield event
-
-async def collect_summary_stream(stream):
-    """Read Chat Completions or Responses events from the body, regardless of transport."""
-    parts = []
-    snapshot = None
-    finish_reason = None
-    stats = {'frames': 0, 'bytes': 0, 'done': False, 'format': '', 'json_events': 0}
-    text_fragments = 0
-    message = {}
-    try:
-        async for event in summary_stream_events(stream, stats):
-            if event.get('error'):
-                propagate_provider_error(event['error'])
-            kind = event.get('type')
-            status = event.get('status') if event.get('object') == 'response' else None
-            if kind == 'response.incomplete' or status == 'incomplete':
-                raise SummaryGenerationError('Провайдер не завершил генерацию сводки.')
-            if kind == 'response.completed' or status == 'completed':
-                from open_webui.routers.openai import convert_responses_result
-                return convert_responses_result(event['response'] if kind == 'response.completed' else event)
-            if kind in ('error', 'response.failed'):
-                propagate_provider_error((event.get('response') or {}).get('error') or event)
-            if status == 'failed':
-                raise SummaryGenerationError('Провайдер не завершил генерацию сводки.')
-            choices = event.get('choices') or []
-            if not isinstance(choices, list):
-                raise SummaryGenerationError('Некорректное поле choices в ответе сводки.')
-            for choice in choices:
-                if not isinstance(choice, dict) or choice.get('index', 0) != 0:
-                    continue
-                delta = choice.get('delta') or {}
-                full = choice.get('message') or {}
-                if not isinstance(delta, dict) or not isinstance(full, dict):
-                    raise SummaryGenerationError('Некорректное сообщение в ответе сводки.')
-                if isinstance(delta.get('content'), str):
-                    parts.append(delta['content'])
-                    text_fragments += 1
-                if isinstance(full.get('content'), str):
-                    snapshot = full['content']
-                    text_fragments += 1
-                if delta.get('tool_calls') or delta.get('function_call') or full.get('tool_calls') or full.get('function_call'):
-                    message['tool_calls'] = True
-                finish_reason = choice.get('finish_reason') or finish_reason
-    finally:
-        if hasattr(stream, 'aclose'):
-            await stream.aclose()
-    if not finish_reason:
-        reason = 'Поток сводки прислал [DONE] без finish_reason или response.completed.' if stats['done'] else 'Поток сводки закрылся без завершающего события.'
-        body_format = f" Формат тела: {stats['format']}." if stats['format'] else ''
-        raise SummaryGenerationError(f"{reason} SSE-кадров: {stats['frames']}, фрагментов текста: {text_fragments}, байт в строках: {stats['bytes']}, JSON-событий без SSE: {stats['json_events']}." + body_format)
-    message['content'] = snapshot if snapshot is not None else ''.join(parts)
-    return {'choices': [{'message': message, 'finish_reason': finish_reason}]}
 
 def register_model_tool(registry, name, tool, namespace):
     alias = bounded_tool_name(name)
@@ -2586,28 +2923,9 @@ class OWUIAdapter:
             if current not in (messages or {}):
                 current = metadata.get('user_message_id')
             branch = get_message_list(messages or {}, current)
-            if (state.get('context_policy') or {}).get('shared_summary_model_id'):
-                router_usage, agent_usage = ({}, {})
+            if summary_model_id(state):
                 resume = getattr(getattr(request, 'state', None), 'tool_approval_resume', None)
-                resumed_current = isinstance(resume, (tuple, list)) and tuple(resume[:2]) == (state['chat_id'], state['message_id'])
-                for message in branch:
-                    if message.get('role') != 'assistant':
-                        continue
-                    meta = message.get('meta') or {}
-                    is_current = message.get('id') == state['message_id']
-                    if not is_current:
-                        sample = meta.get('lite_router_usage')
-                        if isinstance(sample, dict) and isinstance(sample.get('model'), str):
-                            router_usage[sample['model']] = sample
-                    if is_current and (not resumed_current):
-                        continue
-                    samples = meta.get('lite_agent_usage')
-                    if isinstance(samples, list):
-                        for sample in samples:
-                            if isinstance(sample.get('agent_id'), str) and isinstance(sample.get('model'), str):
-                                agent_usage[sample['agent_id'], sample['model']] = sample
-                state['historical_router_usage'] = router_usage
-                state['historical_agent_usage'] = agent_usage
+                restore_prompt_usage(state, branch, resume=resume)
             return saved_handoff_statuses(branch, convert_output_to_messages)
         except Exception as error:
             logging.getLogger(__name__).warning('Historical terminal evidence unavailable (%s)', type(error).__name__)
@@ -3161,12 +3479,12 @@ class OWUIAdapter:
 
     async def generate_shared_summary(self, request, user, model_id, messages, previous):
         from open_webui.models.config import Config
+        from open_webui.routers.openai import convert_responses_result
         from open_webui.utils.context_compaction import DEFAULT_CONTEXT_COMPACTION_PROMPT
         from open_webui.utils.models import check_model_access
         from open_webui.utils.payload import apply_params_to_form_data
         from open_webui.utils.task import prompt_template, replace_messages_variable
         from starlette.requests import Request
-        from starlette.responses import StreamingResponse
         model = request.app.state.MODELS.get(model_id)
         if not model or model.get('pipe') or model.get('pipeline') or (model.get('owned_by') != 'openai'):
             raise SummaryGenerationError('Модель суммаризации не найдена или несовместима с OpenAI API.')
@@ -3189,25 +3507,7 @@ class OWUIAdapter:
         body.pop('stream_options', None)
         async with asyncio.timeout(45):
             response = await self.complete(isolated, body, user, bypass_system_prompt=False)
-            if not isinstance(response, dict):
-                if isinstance(response, StreamingResponse):
-                    response = response.body_iterator
-                elif not isinstance(response, (str, bytes, list)):
-                    raise SummaryGenerationError('Провайдер вернул ответ сводки в неожиданном формате.')
-                response = await collect_summary_stream(response)
-        if response.get('error'):
-            propagate_provider_error(response['error'])
-        choices = response.get('choices') or []
-        choice = choices[0] if choices else {}
-        message = choice.get('message') or {}
-        content = message.get('content')
-        if choice.get('finish_reason') == 'length':
-            raise SummaryGenerationError('Генерация сводки достигла лимита модели (finish_reason=length).')
-        if message.get('tool_calls') or message.get('function_call'):
-            raise SummaryGenerationError('Модель суммаризации вернула вызов инструмента.')
-        if choice.get('finish_reason') != 'stop':
-            raise SummaryGenerationError('Провайдер прервал генерацию сводки.')
-        return content.strip() if isinstance(content, str) else ''
+            return await summary_response_text(response, convert_responses=convert_responses_result)
 
     async def complete(self, request, body, user, *, bypass_system_prompt=True):
         from fastapi import HTTPException
@@ -3219,126 +3519,21 @@ class OWUIAdapter:
         try:
             response = await generate_chat_completion(request, body, user, bypass_system_prompt=bypass_system_prompt)
         except HTTPException as error:
-            try:
-                propagate_provider_error(error.detail)
-            except RuntimeError as provider_error:
-                raise provider_error from error
+            raise provider_error(error.detail) from error
         if isinstance(response, Response) and response.status_code >= 400:
             raw = getattr(response, 'body', b'')
             detail = raw.decode(errors='replace') if isinstance(raw, bytes) else str(raw)
-            try:
-                propagate_provider_error(detail or f'Provider HTTP {response.status_code}')
-            except RuntimeError as provider_error:
-                raise provider_error from HTTPException(status_code=response.status_code)
+            raise provider_error(detail or f'Provider HTTP {response.status_code}') from HTTPException(status_code=response.status_code)
         if isinstance(response, StreamingResponse):
             return response
         if isinstance(response, Response):
             response = json.loads(response.body)
         if response is None or (isinstance(response, dict) and response.get('error')):
-            propagate_provider_error(response or 'Provider returned no response')
+            raise provider_error(response or 'Provider returned no response')
         return response
-
-# Source: observation
-"""Observe provider Tool calls to preserve their generation and executor."""
-from copy import deepcopy
-import codecs
-import json
-
-def observe_response(response, state, executor, *, on_usage=None):
-    state['generation'] = state.get('generation', 0) + 1
-    generation = state['generation']
-    calls = {}
-    finished = False
-    usage = None
-
-    def event(data):
-        nonlocal usage
-        if on_usage:
-            reported = data.get('usage')
-            if not reported and data.get('type') == 'response.completed':
-                reported = (data.get('response') or {}).get('usage')
-            if isinstance(reported, dict) and reported:
-                usage = reported
-        if finished:
-            return
-        for choice in data.get('choices', []):
-            for ordinal, call in enumerate((choice.get('delta') or choice.get('message') or {}).get('tool_calls') or []):
-                key = ('chat', choice.get('index', 0), call.get('index', ordinal))
-                entry = calls.setdefault(key, {'id': '', 'name': '', 'arguments': ''})
-                if call.get('id'):
-                    entry['id'] = call['id']
-                function = call.get('function') or {}
-                entry['name'] += function.get('name') or ''
-                arguments = function.get('arguments') or ''
-                entry['arguments'] += json.dumps(arguments) if isinstance(arguments, dict) else arguments
-        item = data.get('item') or {}
-        if item.get('type') == 'function_call':
-            key = ('responses', data.get('output_index', item.get('id')))
-            entry = calls.setdefault(key, {'id': '', 'name': '', 'arguments': ''})
-            entry.update(id=item.get('call_id') or item.get('id') or entry['id'], name=item.get('name') or entry['name'])
-            if item.get('arguments'):
-                entry['arguments'] = item['arguments']
-        elif data.get('type') == 'response.function_call_arguments.delta':
-            key = ('responses', data.get('output_index'))
-            entry = calls.setdefault(key, {'id': '', 'name': '', 'arguments': ''})
-            entry['arguments'] += data.get('delta', '')
-        if any((choice.get('finish_reason') for choice in data.get('choices', []))) or data.get('type') in {'response.completed', 'response.failed', 'response.incomplete'}:
-            finish()
-
-    def finish():
-        nonlocal finished
-        if finished:
-            return
-        finished = True
-        for call in calls.values():
-            try:
-                arguments = json.loads(call['arguments'])
-            except (TypeError, ValueError):
-                arguments = None
-            state.setdefault('audit', []).append({**call, 'arguments': arguments, 'generation': generation, 'executor': deepcopy(executor)})
-    if isinstance(response, dict):
-        event(response)
-        for ordinal, item in enumerate(response.get('output') or []):
-            event({'output_index': ordinal, 'item': item})
-        finish()
-        return response
-    if not hasattr(response, 'body_iterator'):
-        return response
-    original = response.body_iterator
-
-    async def stream():
-        buffer = ''
-        decoder = codecs.getincrementaldecoder('utf-8')()
-        try:
-            async for chunk in original:
-                buffer += decoder.decode(chunk) if isinstance(chunk, bytes) else chunk
-                while '\n' in buffer:
-                    line, buffer = buffer.split('\n', 1)
-                    line = line.strip()
-                    if line.startswith('data:'):
-                        line = line[5:].strip()
-                    if line == '[DONE]':
-                        finish()
-                    if line and line != '[DONE]':
-                        try:
-                            data = json.loads(line)
-                            if isinstance(data, dict):
-                                event(data)
-                        except ValueError:
-                            pass
-                yield chunk
-        finally:
-            finish()
-            if hasattr(original, 'aclose'):
-                await original.aclose()
-            if on_usage:
-                await on_usage(usage)
-    response.body_iterator = stream()
-    return response
 
 # Source: entrypoints.lite_handoff_router
 """Public pipe; continuations remain in OWUI's native tool loop."""
-from copy import deepcopy
 from pydantic import BaseModel, Field
 
 class Pipe:
@@ -3361,50 +3556,13 @@ class Pipe:
                 state['source'].extend(converted)
             capture_native_context(__request__, __metadata__, state, converted)
         target = confirmed_target(state, state['source'])
-        policy = state['context_policy']
-        summary_enabled = bool(policy['shared_summary_model_id'].strip()) and (not state.get('worker'))
-        recipient = target or state['router_id']
-        available = input_budget(policy, recipient)
         sessions_before = set(__request__.scope.get('lite_handoff_mcp', {}))
-
-        def pack():
-            if target and (not state.get('worker')):
-                pack_agent_history(draft['messages'], state, state.get('agent_history_question'), covered_turns=summary.applied_turns if summary else 0, packet=packet)
-
-        async def fit_budget():
-            estimate = estimate_context_budget(draft)
-            initial = estimate.total
-            while summary and estimate.total > available and await summary.extend(draft, packet, full_messages, trigger=f'Бюджет запроса, оценка {estimate.total} токенов при лимите {available}'):
-                pack()
-                estimate = estimate_context_budget(draft)
-            check_context_budget(estimate, available, recipient=recipient, before=initial, hidden_results=state.get('hidden_tool_result_count', 0))
         try:
-            if target and summary_enabled and (state.get('historical_handoff_statuses') is None):
+            if target and summary_model_id(state) and (state.get('historical_handoff_statuses') is None):
                 state['historical_handoff_statuses'] = await adapter.historical_handoff_statuses(__request__, __metadata__, state, user)
             draft, tools = await prepare_model(adapter, __request__, body, user, metadata_draft(__metadata__), state, self.valves.orchestrator_model_id, {'__event_emitter__': __event_emitter__, '__event_call__': __event_call__, '__oauth_token__': __oauth_token__}, target=target)
-            model = draft['model']
-            if target:
-                info = (draft['metadata'].get('model') or {}).get('info') or {}
-                model = info.get('base_model_id') or model
-            summary = None
-            packet = state.get('shared_summary_packet')
-            if summary_enabled:
-                summary = SharedSummary(adapter, __request__, user, state, emitter=__event_emitter__)
-                full_messages = deepcopy(draft['messages'])
-                await summary.load(draft, packet)
-                summary.apply(draft, packet)
-                if available is None:
-                    previous_tokens = last_prompt_tokens(state, model, agent_id=target, summary_key=summary.applied_summary_key())
-                    threshold = policy['agent_summary_trigger_tokens' if target else 'router_summary_trigger_tokens']
-                    if previous_tokens is not None and previous_tokens > threshold:
-                        executor_name = 'Агент' if target else 'Роутер'
-                        await summary.extend(draft, packet, full_messages, trigger=f'{executor_name}, предыдущий вход {previous_tokens} токенов, порог {threshold}')
-            if draft.get('stream'):
-                options = draft.get('stream_options')
-                draft['stream_options'] = {**(options if isinstance(options, dict) else {}), 'include_usage': True}
-            pack()
-            if available is not None:
-                await fit_budget()
+            completion = CompletionContext(adapter, __request__, user, state, draft, target, emitter=__event_emitter__)
+            await completion.prepare()
         except BaseException:
             sessions = __request__.scope.get('lite_handoff_mcp', {})
             await close_mcp_sessions((sessions.pop(key) for key in list(sessions) if key not in sessions_before))
@@ -3416,39 +3574,4 @@ class Pipe:
             state['phase'] = 'agent'
             if not was_active and __event_emitter__:
                 await __event_emitter__({'type': 'status', 'data': {'action': 'handoff', 'description': 'Передача: ' + state['registry'][target].get('agent_name', target), 'done': True}})
-
-        async def complete_prepared():
-            result = await adapter.complete(__request__, draft, user)
-            return await check_initial_stream(result) if summary_enabled else result
-        try:
-            response = await complete_prepared()
-        except ProviderContextOverflow:
-            if not summary_enabled or not await summary.extend(draft, packet, full_messages, trigger='Переполнение контекста основного запроса'):
-                raise
-            pack()
-            if available is not None:
-                await fit_budget()
-            response = await complete_prepared()
-        executor = {'kind': 'agent', 'agent_id': target} if target else {'kind': 'router'}
-        on_usage = None
-        if target or summary_enabled:
-            generation = state.get('generation', 0) + 1
-            summary_key = summary.applied_summary_key() if summary else None
-
-            async def record_usage(usage):
-                tokens = prompt_token_count(usage)
-                if tokens is None and summary is None:
-                    return
-                sample = {'prompt_tokens': tokens, 'summary_key': summary_key}
-                if target:
-                    state.setdefault('agent_usage', {})[target, model] = sample
-                else:
-                    state.setdefault('router_usage', {})[model] = sample
-                await adapter.save_prompt_usage(state, user, model, tokens, summary_key=summary_key, agent_id=target, generation=generation)
-                if tokens is None and summary:
-                    await summary.status('Провайдер не вернул свежий замер входных токенов.', done=True, action='lite_prompt_usage')
-            if hasattr(response, 'body_iterator'):
-                on_usage = record_usage
-            else:
-                await record_usage(response.get('usage') if isinstance(response, dict) else None)
-        return observe_response(response, state, executor, on_usage=on_usage)
+        return await completion.complete()

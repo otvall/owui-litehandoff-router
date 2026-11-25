@@ -12,10 +12,10 @@ from .protocol import delegate_tool, last_user
 from .parallel import parallel_tool, ROUTING_TOOLS, downstream_data
 from .resources import ResourceScope
 from .terminals import terminal_binding, prepare_terminal_scope, is_terminal_tool
-from .native_context import native_record, context_pair_key
-from .protocol import completed_pairs
+from .native_context import native_pairs, native_view_keys
 from .tool_history import ToolResultWindow
 from .context_budget import input_budget
+from .context_policy import summary_model_id
 from .shared_summary import summary_projection_turns
 
 ENVELOPE = frozenset({"stream", "stream_options", "files"})
@@ -165,8 +165,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         tools.update(terminal_tools)
         if terminal_prompt and not target:
             draft["messages"].insert(0, {"role": "system", "content": terminal_prompt})
-    if (READERS | {SKILL_CATALOG}).intersection(tools):
-        raise ValueError("Reserved Skill Tool collision: " + ", ".join(sorted((READERS | {SKILL_CATALOG}).intersection(tools))))
+    collisions = (READERS | {SKILL_CATALOG}).intersection(tools)
+    if collisions:
+        raise ValueError("Reserved Skill Tool collision: " + ", ".join(sorted(collisions)))
     native_delegate = tools.get("delegate_task")
     if native_delegate and native_delegate.get("tool_id") == "builtin:delegate_task" and native_delegate.get("type") == "builtin":
         tools.pop("delegate_task")
@@ -241,14 +242,12 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     native_snapshot = deepcopy(state.get("native_context"))
     native_allowed_snapshot = deepcopy(state.get("native_context_allowed"))
     native_output_snapshot = deepcopy(metadata.get("initial_output"))
-    native_view_keys = sorted(context_pair_key(draft["messages"][i]["tool_calls"][n], draft["messages"][r])
-                              for i, n, r in completed_pairs(draft["messages"])
-                              if native_record(state, draft["messages"][i]["tool_calls"][n], draft["messages"][r]))
+    native_keys = native_view_keys(draft["messages"], state)
     state.pop("shared_summary_unchanged_turns", None)
     state.pop("shared_summary_protected", None)
     state.pop("hidden_tool_result_count", None)
     before_inlet = None
-    if target and not state.get("worker") and (state.get("context_policy", {}).get("shared_summary_model_id") or "").strip():
+    if target and summary_model_id(state):
         before_inlet = deepcopy(summary_projection_turns(draft["messages"], packet))
     if target:
         previous_metadata = getattr(request.state, "metadata", None)
@@ -268,10 +267,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if (state.get("native_context") != native_snapshot
             or state.get("native_context_allowed") != native_allowed_snapshot):
         raise ValueError("Destination inlet changed protected native context")
-    final_native_keys = sorted(context_pair_key(draft["messages"][i]["tool_calls"][n], draft["messages"][r])
-                             for i, n, r in completed_pairs(draft["messages"])
-                             if native_record(state, draft["messages"][i]["tool_calls"][n], draft["messages"][r]))
-    if final_native_keys != native_view_keys:
+    if native_view_keys(draft["messages"], state) != native_keys:
         raise ValueError("Destination inlet changed protected native messages")
     final_metadata = draft.get("metadata")
     if not isinstance(final_metadata, dict) or any(final_metadata.get(key) != value for key, value in identity.items()):
@@ -312,12 +308,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if window is not None:
         window.apply(draft["messages"])
         state["hidden_tool_result_count"] = window.hidden_count
-    if input_budget(state.get("context_policy", {}), target or state["router_id"]) is not None:
+    if input_budget(state.get("context_policy", {}), target or state["router_id"], draft) is not None:
         protected = list(window.protected_messages) if window is not None else []
-        for i, n, r in completed_pairs(draft["messages"]):
-            call, result = draft["messages"][i]["tool_calls"][n], draft["messages"][r]
-            if native_record(state, call, result):
-                protected.append(result)
+        protected.extend(result for _, result in native_pairs(draft["messages"], state))
         state["shared_summary_protected"] = protected
     compose_system(draft["messages"], primary_systems)
     for name, tool in list(tools.items()):

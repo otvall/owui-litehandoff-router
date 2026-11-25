@@ -4,10 +4,9 @@ import json
 
 from .history import HISTORICAL_AGENT_TURN, analyze, historical_handoffs
 from .native_context import native_record
-from .protocol import completed_pairs, object_value, tool_image
+from .protocol import AGENT_HISTORY_HEADING, SHARED_SUMMARY_PREFIX, actual_user, completed_pairs, object_value
 from .tool_history import result_placeholder, result_status
 
-AGENT_HISTORY_HEADING = "[Conversation history]"
 HIDDEN_ERROR = result_placeholder("Error:")
 
 
@@ -41,13 +40,14 @@ def pack_agent_history(messages, state, current_question, *, covered_turns=0, pa
     if current is None:
         return
     first = 1 if messages[0].get("role") == "system" else 0
-    past = [m for m in messages[first:current] if m != packet]
+    section = messages[first:current]
+    past = [m for m in section if m != packet]
     if not past:
         return
 
     source = state["source"]
     boundary = state["user_boundary"]
-    source_questions = [m for m in source[:boundary] if m.get("role") == "user" and not tool_image(m)]
+    source_questions = [m for m in source[:boundary] if actual_user(m)]
     if not source_questions:
         return
     pairs = completed_pairs(past)
@@ -56,27 +56,28 @@ def pack_agent_history(messages, state, current_question, *, covered_turns=0, pa
     exchanges = analyze(source[:boundary], current_boundary=boundary, audit=state.get("audit", ()))
     authors = {exchange.turn: marker["agent_id"]
                for exchange, marker in historical_handoffs(source, exchanges, boundary)}
-    historical_users = [m for m in past if m.get("role") == "user" and not tool_image(m)]
-    projected_questions = historical_users[bool(covered_turns):]
+    historical_users = [m for m in past if actual_user(m)]
+    summary = historical_users[0] if covered_turns and historical_users else None
+    projected_questions = historical_users[1:] if summary is not None else historical_users
     aligned = [m.get("content") for m in projected_questions] == [
         m.get("content") for m in source_questions[covered_turns:]]
 
     results = {(i, ordinal): past[r] for i, ordinal, r in pairs}
     media, turns, attachments = [], [], []
     history = {"turns": turns}
-    if covered_turns and historical_users:
-        history["summary"] = historical_users[0]["content"].removeprefix("[Shared conversation summary]\n")
+    if summary is not None:
+        history["summary"] = summary["content"].removeprefix(SHARED_SUMMARY_PREFIX)
     turn = None
     turn_number = covered_turns - 1
     for index, message in enumerate(past):
         role = message.get("role")
         if role not in {"user", "assistant"}:
             continue
-        if covered_turns and historical_users and message is historical_users[0]:
+        if message is summary:
             continue
         content = history_content(message.get("content"), media)
         attachments.extend(message.get("files") or ())
-        if role == "user" and not tool_image(message):
+        if actual_user(message):
             turn_number += 1
             turn = {"question": content, "events": []}
             if aligned and turn_number in authors:
@@ -116,5 +117,5 @@ def pack_agent_history(messages, state, current_question, *, covered_turns=0, pa
         if attachments:
             media_message["files"] = attachments
         block.append(media_message)
-    retained = [m for m in messages[first:current] if m == packet]
+    retained = [m for m in section if m == packet]
     messages[first:current] = [*block, *retained, {"role": "user", "content": text}]

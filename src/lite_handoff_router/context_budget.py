@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import logging
 
-from .protocol import object_value
+from .protocol import AGENT_HISTORY_HEADING, SHARED_SUMMARY_PREFIX, object_value
 
 MEDIA_PARTS = {"image_url", "input_image", "video_url", "audio_url", "input_audio", "file", "input_file"}
 BUDGET_LOG = logging.getLogger(__name__)
@@ -25,9 +25,19 @@ class ContextBudgetEstimate:
         return self.exact_total if self.exact_total is not None else sum(self.breakdown.values())
 
 
-def input_budget(policy, recipient):
+def input_budget(policy, recipient, draft=None):
     configured = policy.get("context_model_input_budgets", {}).get(recipient, policy.get("context_input_budget_tokens"))
-    return configured - policy["context_safety_margin_tokens"] if configured is not None else None
+    window = policy.get("context_window_tokens")
+    limits = [configured] if configured is not None else []
+    if window is not None:
+        draft = draft or {}
+        options = draft.get("options")
+        ollama_limit = options.get("num_predict") if isinstance(options, dict) else None
+        output_limits = [draft.get(key) for key in ("max_tokens", "max_completion_tokens", "max_output_tokens")]
+        output_limits.extend((ollama_limit, policy["context_response_reserve_tokens"]))
+        reserve = max(value for value in output_limits if type(value) is int and value > 0)
+        limits.append(window - reserve)
+    return max(0, min(limits) - policy["context_safety_margin_tokens"]) if limits else None
 
 
 def estimate_context_budget(draft, *, count_serialized_request=None):
@@ -55,9 +65,9 @@ def estimate_context_budget(draft, *, count_serialized_request=None):
                     breakdown["media"] += 256 if detail == "low" else 2048
                 else:
                     breakdown[category] += count(part)
-        elif isinstance(content, str) and content.startswith("[Shared conversation summary]\n"):
+        elif isinstance(content, str) and content.startswith(SHARED_SUMMARY_PREFIX):
             breakdown["summary"] += count(content)
-        elif isinstance(content, str) and content.startswith("[Conversation history]\n"):
+        elif isinstance(content, str) and content.startswith(AGENT_HISTORY_HEADING + "\n"):
             _, _, data = content.partition("\n")
             history = object_value(data)
             summary = count(history.get("summary"))

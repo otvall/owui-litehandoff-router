@@ -8,10 +8,11 @@ from unittest.mock import AsyncMock
 from lite_handoff_router.agent_history_block import pack_agent_history
 from lite_handoff_router.context_policy import ContextPolicy
 from lite_handoff_router.history import agent_projection, router_projection
-from lite_handoff_router.observation import observe_response
-from lite_handoff_router.owui_adapter import collect_summary_stream
-from lite_handoff_router.shared_summary import (ProviderContextOverflow, SharedSummary, check_initial_stream,
-                                                SummaryGenerationError, last_prompt_tokens, prompt_token_count)
+from lite_handoff_router.observation import check_initial_stream, observe_response
+from lite_handoff_router.prompt_usage import last_prompt_tokens, prompt_token_count, restore_prompt_usage
+from lite_handoff_router.provider_errors import ProviderContextOverflow
+from lite_handoff_router.shared_summary import SharedSummary
+from lite_handoff_router.summary_response import SummaryGenerationError, summary_response_text
 from tests.test_history import turn
 
 
@@ -28,8 +29,7 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
             "JSON array": b"[" + b",\n".join(lines) + b"]",
             "SSE": b"".join(b"data: " + line + b"\n\n" for line in lines) + b"data: [DONE]\n\n",
         }
-        expected = {"choices": [{"message": {"content": "Итог 🧪"}, "finish_reason": "stop"}]}
-        self.assertEqual(await collect_summary_stream(events), expected)
+        self.assertEqual(await summary_response_text(events, convert_responses=None), "Итог 🧪")
         for name, body in bodies.items():
             with self.subTest(format=name):
                 closed = []
@@ -44,19 +44,18 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
                     finally:
                         closed.append(True)
 
-                self.assertEqual(await collect_summary_stream(chunks()), expected)
+                self.assertEqual(await summary_response_text(chunks(), convert_responses=None), "Итог 🧪")
                 self.assertEqual(closed, [True])
 
     async def test_summary_unframed_events_preserve_provider_error_and_require_completion(self):
         body = b'{"error":{"code":"context_length_exceeded","message":"Context length exceeded"}}'
         with self.assertRaises(ProviderContextOverflow):
-            await collect_summary_stream(body)
+            await summary_response_text(body, convert_responses=None)
         first = b'{"choices":[{"delta":{"content":"One"}}]}'
         last = b'{"choices":[{"delta":{"content":" two"},"finish_reason":"stop"}]}'
-        result = await collect_summary_stream(first + b"\n" + last)
-        self.assertEqual(result["choices"][0]["message"]["content"], "One two")
+        self.assertEqual(await summary_response_text(first + b"\n" + last, convert_responses=None), "One two")
         with self.assertRaisesRegex(SummaryGenerationError, "JSON-событий без SSE: 1"):
-            await collect_summary_stream(b"[" + first + b"]")
+            await summary_response_text(b"[" + first + b"]", convert_responses=None)
 
     def test_agent_token_count_uses_the_latest_sample_for_the_same_agent_and_model(self):
         state = {
@@ -73,11 +72,12 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         self.assertIsNone(last_prompt_tokens(state, "other-base", agent_id="a", summary_key=None))
 
     async def test_router_uses_only_the_last_reported_input_usage(self):
-        async def stream(report_usage):
+        async def stream(report_usage, trailing_newline):
             yield b'data: {"choices":[{"finish_reason":"stop"}]}\n\n'
             if report_usage:
-                yield b'data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":300}}\n\n'
-            yield b'data: [DONE]\n\n'
+                yield b'data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":300}}' + trailing_newline
+            if trailing_newline:
+                yield b'data: [DONE]\n\n'
 
         state = {"historical_router_usage": {
             "llm": {"prompt_tokens": 1000, "summary_key": None},
@@ -85,14 +85,33 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         }}
         self.assertEqual(last_prompt_tokens(state, "llm", agent_id=None, summary_key=None), 1000)
         self.assertIsNone(last_prompt_tokens(state, "legacy", agent_id=None, summary_key=None))
-        for report_usage, expected in ((True, 900), (False, None)):
+        for report_usage, ending, expected_chunks, expected in (
+            (True, b"\n\n", 3, 900), (True, b"", 2, 900), (False, b"\n\n", 2, None),
+        ):
             usage = AsyncMock()
-            response = observe_response(SimpleNamespace(body_iterator=stream(report_usage)),
+            response = observe_response(SimpleNamespace(body_iterator=stream(report_usage, ending)),
                                         state, {"kind": "router"}, on_usage=usage)
-            self.assertEqual(len([chunk async for chunk in response.body_iterator]), 3 if report_usage else 2)
+            self.assertEqual(len([chunk async for chunk in response.body_iterator]), expected_chunks)
             tokens = prompt_token_count(usage.await_args.args[0])
             state["router_usage"] = {"llm": {"prompt_tokens": tokens, "summary_key": None}}
             self.assertEqual(last_prompt_tokens(state, "llm", agent_id=None, summary_key=None), expected)
+
+    def test_saved_usage_ignores_malformed_entries_and_uses_current_agent_only_on_resume(self):
+        state = {"chat_id": "chat", "message_id": "current"}
+        earlier = {"agent_id": "a", "model": "base", "prompt_tokens": 200, "summary_key": None}
+        later = {**earlier, "prompt_tokens": 300}
+        branch = [
+            {"id": "previous", "role": "assistant", "meta": {"lite_agent_usage": [None, earlier]}},
+            {"id": "current", "role": "assistant", "meta": {
+                "lite_agent_usage": [later],
+                "lite_router_usage": {"model": "llm", "prompt_tokens": 400, "summary_key": None},
+            }},
+        ]
+        for resume, tokens in ((None, 200), (("chat", "current"), 300)):
+            with self.subTest(resume=resume):
+                restore_prompt_usage(state, branch, resume=resume)
+                self.assertEqual(last_prompt_tokens(state, "base", agent_id="a", summary_key=None), tokens)
+                self.assertIsNone(last_prompt_tokens(state, "llm", agent_id=None, summary_key=None))
 
     async def test_shared_checkpoint_preserves_current_tool_chain_and_parallel_packet(self):
         source = turn("a", "PRIVATE_RESULT")
@@ -297,6 +316,8 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
                     b"the model's context length (2048 tokens)."+b'"}}\n\n')
         with self.assertRaises(ProviderContextOverflow):
             await check_initial_stream(SimpleNamespace(body_iterator=stream(role, overflow)))
+        with self.assertRaises(ProviderContextOverflow):
+            await check_initial_stream(SimpleNamespace(body_iterator=stream(role, overflow.rstrip())))
         response = await check_initial_stream(SimpleNamespace(body_iterator=stream(role, content, overflow)))
         self.assertEqual([chunk async for chunk in response.body_iterator], [role, content, overflow])
 

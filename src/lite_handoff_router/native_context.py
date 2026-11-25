@@ -53,13 +53,29 @@ def capture_native_context(request, metadata, state, converted):
 
 
 def native_record(state, call, result):
-    key = context_pair_key(call, result)
     context = state.get("native_context") or {}
+    records = context.get("records")
+    if not records:
+        return None
     identity = tuple(state.get(k) for k in ("request_id", "user_id", "chat_id", "message_id"))
     if context.get("identity") != identity:
         return None
-    return next((record for record in context.get("records", [])
+    key = context_pair_key(call, result)
+    return next((record for record in records
                  if record["key"] == key or key in record.get("projections", [])), None)
+
+
+def native_pairs(messages, state):
+    if not (state.get("native_context") or {}).get("records"):
+        return
+    for i, n, r in completed_pairs(messages):
+        call, result = messages[i]["tool_calls"][n], messages[r]
+        if native_record(state, call, result):
+            yield call, result
+
+
+def native_view_keys(messages, state):
+    return sorted(context_pair_key(call, result) for call, result in native_pairs(messages, state))
 
 
 async def scoped_knowledge_result(record, eligible, check):

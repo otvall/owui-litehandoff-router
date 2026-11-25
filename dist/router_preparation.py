@@ -42,6 +42,40 @@ async def bind_tool_context(adapter, tool, messages, check=None, pinned=None, re
         protected = await adapter.bind(protected, {**extra, **pinned, **context})
     return {**tool, 'callable': protected}
 
+# Source: context_policy
+"""Administrative context policy; no client metadata participates in resolution."""
+from typing import Annotated
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+def summary_model_id(state):
+    if state.get('worker'):
+        return ''
+    return ((state.get('context_policy') or {}).get('shared_summary_model_id') or '').strip()
+
+class ContextPolicy(BaseModel):
+    model_config = ConfigDict(validate_assignment=True, strict=True)
+    tool_result_history_limit: int | None = Field(default=None, ge=0)
+    shared_summary_model_id: str = ''
+    shared_summary_context_percent: int = Field(default=60, ge=1, le=100, description='Percentage of estimated tokens in eligible unsummarized history to summarize in one update')
+    router_summary_trigger_tokens: int = Field(default=40000, gt=0)
+    agent_summary_trigger_tokens: int = Field(default=40000, gt=0)
+    context_input_budget_tokens: int | None = Field(default=None, gt=0)
+    context_model_input_budgets: dict[str, Annotated[int, Field(gt=0)]] = Field(default_factory=dict)
+    context_window_tokens: int | None = Field(default=None, gt=0, description='Total model context window, including output')
+    context_response_reserve_tokens: int = Field(default=1024, gt=0, description='Minimum output reserve for the total window')
+    context_safety_margin_tokens: int = Field(default=1024, ge=0)
+
+    @model_validator(mode='after')
+    def validate_input_budgets(self):
+        limits = list(self.context_model_input_budgets.values())
+        if self.context_input_budget_tokens is not None:
+            limits.append(self.context_input_budget_tokens)
+        if any((limit <= self.context_safety_margin_tokens for limit in limits)):
+            raise ValueError('Context input budgets must be greater than the safety margin')
+        if self.context_window_tokens is not None and self.context_window_tokens <= self.context_response_reserve_tokens + self.context_safety_margin_tokens:
+            raise ValueError('Context window must be greater than the response reserve and safety margin')
+        return self
+
 # Source: capabilities
 """Native Tools and authenticated MCP sessions owned by one request."""
 import asyncio
@@ -282,31 +316,6 @@ def group_calls(state):
             raise ValueError('Invalid parallel assignment ' + str(index) + ': only agent_id, task and file_ids are accepted')
     return calls
 
-# Source: context_policy
-"""Administrative context policy; no client metadata participates in resolution."""
-from typing import Annotated
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-class ContextPolicy(BaseModel):
-    model_config = ConfigDict(validate_assignment=True, strict=True)
-    tool_result_history_limit: int | None = Field(default=None, ge=0)
-    shared_summary_model_id: str = ''
-    shared_summary_context_percent: int = Field(default=60, ge=1, le=100, description='Percentage of estimated tokens in eligible unsummarized history to summarize in one update')
-    router_summary_trigger_tokens: int = Field(default=40000, gt=0)
-    agent_summary_trigger_tokens: int = Field(default=40000, gt=0)
-    context_input_budget_tokens: int | None = Field(default=None, gt=0)
-    context_model_input_budgets: dict[str, Annotated[int, Field(gt=0)]] = Field(default_factory=dict)
-    context_safety_margin_tokens: int = Field(default=1024, ge=0)
-
-    @model_validator(mode='after')
-    def validate_input_budgets(self):
-        limits = list(self.context_model_input_budgets.values())
-        if self.context_input_budget_tokens is not None:
-            limits.append(self.context_input_budget_tokens)
-        if any((limit <= self.context_safety_margin_tokens for limit in limits)):
-            raise ValueError('Context input budgets must be greater than the safety margin')
-        return self
-
 # Source: runtime
 """Trusted lifecycle state shared by independent uploads through the ASGI scope.
 
@@ -507,6 +516,8 @@ class ResourceScope:
 """Handoff is a completed, server-witnessed Tool exchange, not text parsing."""
 import json
 from uuid import uuid4
+AGENT_HISTORY_HEADING = '[Conversation history]'
+SHARED_SUMMARY_PREFIX = '[Shared conversation summary]\n'
 
 def delegate_tool(adapter, request, user, metadata, state):
     """Build a request-local native Tool; no Workspace Tool upload is needed."""
@@ -524,8 +535,11 @@ def tool_image(message):
     content = message.get('content')
     return message.get('role') == 'user' and isinstance(content, list) and (len(content) > 1) and (content[0] == {'type': 'text', 'text': 'Here are the images from the tool results above. Please analyze them.'}) and all((p.get('type') == 'image_url' for p in content[1:]))
 
+def actual_user(message):
+    return message.get('role') == 'user' and (not tool_image(message))
+
 def last_user(messages):
-    return next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get('role') == 'user' and (not tool_image(messages[i]))), -1)
+    return next((i for i in range(len(messages) - 1, -1, -1) if actual_user(messages[i])), -1)
 
 def object_value(content):
     if isinstance(content, dict):
@@ -550,7 +564,7 @@ def completed_pairs(messages):
         results.clear()
     for index, message in enumerate(messages):
         role = message.get('role')
-        if role == 'assistant' or (role == 'user' and (not tool_image(message))):
+        if role == 'assistant' or actual_user(message):
             finish()
         if role == 'assistant':
             for ordinal, call in enumerate(message.get('tool_calls') or []):
@@ -646,12 +660,26 @@ def capture_native_context(request, metadata, state, converted):
     state['native_context'] = {'identity': identity, 'records': records}
 
 def native_record(state, call, result):
-    key = context_pair_key(call, result)
     context = state.get('native_context') or {}
+    records = context.get('records')
+    if not records:
+        return None
     identity = tuple((state.get(k) for k in ('request_id', 'user_id', 'chat_id', 'message_id')))
     if context.get('identity') != identity:
         return None
-    return next((record for record in context.get('records', []) if record['key'] == key or key in record.get('projections', [])), None)
+    key = context_pair_key(call, result)
+    return next((record for record in records if record['key'] == key or key in record.get('projections', [])), None)
+
+def native_pairs(messages, state):
+    if not (state.get('native_context') or {}).get('records'):
+        return
+    for i, n, r in completed_pairs(messages):
+        call, result = (messages[i]['tool_calls'][n], messages[r])
+        if native_record(state, call, result):
+            yield (call, result)
+
+def native_view_keys(messages, state):
+    return sorted((context_pair_key(call, result) for call, result in native_pairs(messages, state)))
 
 async def scoped_knowledge_result(record, eligible, check):
     """Filter structured native catalogs, without treating their text as authority."""
@@ -877,7 +905,7 @@ def fingerprint(call):
         return None
     if not isinstance(arguments, dict):
         return None
-    return (call.get('id'), function.get('name'), json.dumps(arguments, sort_keys=True, ensure_ascii=False))
+    return json.dumps([call.get('id'), function.get('name'), arguments], sort_keys=True, ensure_ascii=False)
 
 def audit_fingerprint(record):
     return fingerprint({'id': record.get('id'), 'function': {'name': record.get('name'), 'arguments': record.get('arguments')}})
@@ -907,10 +935,12 @@ def analyze(messages, *, current_boundary=None, audit=()):
     """
     turns, turn = ([], -1)
     for i, message in enumerate(messages):
-        if message.get('role') == 'user' and (i == current_boundary or not tool_image(message)):
+        if i == current_boundary and message.get('role') == 'user' or actual_user(message):
             turn += 1
         turns.append(turn)
     pairs = completed_pairs(messages)
+    paired = {(i, n) for i, n, _ in pairs}
+    incomplete_handoffs = {turns[i] for i, message in enumerate(messages) for n, call in enumerate(message.get('tool_calls') or []) if (i, n) not in paired and call.get('function', {}).get('name') == 'lite_delegate'}
     by_turn = {}
     for pair in pairs:
         by_turn.setdefault(turns[pair[0]], []).append(pair)
@@ -923,15 +953,17 @@ def analyze(messages, *, current_boundary=None, audit=()):
                 evidence.append((r, marker))
         marker = evidence[0][1] if len(evidence) == 1 else None
         transition = evidence[0][0] if marker else None
-        paired = {(i, n) for i, n, _ in group}
-        ambiguous_handoff = any((turns[i] == turn and (i, n) not in paired and (call.get('function', {}).get('name') == 'lite_delegate') for i, message in enumerate(messages) for n, call in enumerate(message.get('tool_calls') or []))) or len(evidence) > 1
+        ambiguous_handoff = turn in incomplete_handoffs or len(evidence) > 1
         records = list(marker.get('router_calls') or []) if marker else []
         if current_boundary is not None and any((i > current_boundary for i, _, _ in group)):
             records += list(audit)
+        by_fingerprint = {}
+        for record in records:
+            if isinstance(record, dict) and (key := audit_fingerprint(record)) is not None:
+                by_fingerprint.setdefault(key, []).append(record)
         for i, n, r in group:
             call = messages[i]['tool_calls'][n]
-            key = fingerprint(call)
-            matching = [record for record in records if isinstance(record, dict) and key is not None and (audit_fingerprint(record) == key)]
+            matching = by_fingerprint.get(fingerprint(call), ())
             unique = {json.dumps(record, sort_keys=True): record for record in matching}
             owner, generation = ({'kind': 'unknown'}, None)
             if len(unique) == 1:
@@ -1138,7 +1170,7 @@ def agent_dialogue(state, agent_id, exchanges, boundary):
         batches.setdefault(exchange.batch, []).append(exchange)
     overrides = {}
     historical_turns = {}
-    starts = [i for i, m in enumerate(messages) if m.get('role') == 'user' and (i == boundary or not tool_image(m))]
+    starts = [i for i, m in enumerate(messages) if i == boundary and m.get('role') == 'user' or actual_user(m)]
     for start, end in zip(starts, starts[1:] + [len(messages)]):
         calls = [(i, n) for i in range(start + 1, end) for n, call in enumerate(messages[i].get('tool_calls') or []) if call.get('function', {}).get('name') == 'lite_delegate']
         if len(calls) != 1:
@@ -1251,286 +1283,8 @@ def ordinary_origins(state, selected, positions):
     messages = state['source']
     return {positions[e.result_index]: (e.batch, e.call_index) for e in selected if exchange_name(messages, e) not in READERS | {'lite_delegate'} and (not native_record(state, messages[e.batch]['tool_calls'][e.call_index], messages[e.result_index]))}
 
-# Source: shared_summary
-"""One summary of the shared dialogue, reused by Router and its agents."""
-from asyncio import CancelledError
-from copy import deepcopy
-import hashlib
-import json
-import logging
-import re
-import traceback
-from pathlib import PurePath
-SUMMARY_INPUT_LIMIT = 60000
-SUMMARY_TEXT_PARTS = {'text', 'input_text', 'output_text'}
-SUMMARY_INLINE_MEDIA = re.compile('data:(?:image|audio|video)/[\\w.+-]+;base64,[A-Za-z0-9+/=_-]+', re.IGNORECASE)
-OVERFLOW_MESSAGES = re.compile('context.length.exceeded|(?:context|input|prompt) (?:window|length)(?: limit)? (?:is |was )?(?:exceeded|too (?:long|large))|maximum context length|(?:exceeds|exceeded) (?:the )?(?:maximum |max(?:imum)? supported )?(?:model )?context length|(?:input|prompt) (?:is )?too long|input length \\(\\d+\\) is longer than|(?:input|prompt)(?: length)?\\s+\\([^)]*tokens?[^)]*\\) (?:is longer than|exceeds the maximum allowed length)', re.IGNORECASE)
-EXACT_REFERENCE = re.compile('(?<![\\w-])(?:[A-ZА-ЯЁ]{2,12}-\\d{2,16}|\\d{4}-\\d{2}-\\d{2}|\\d{2}\\.\\d{2}\\.\\d{4})(?![\\w-])')
-
-class ProviderContextOverflow(RuntimeError):
-    pass
-
-class SummaryGenerationError(RuntimeError):
-    """A diagnostic that is safe to display in the chat."""
-
-def summary_error_details(error):
-    details = []
-    for failure in (error, error.__cause__):
-        if failure is None:
-            continue
-        message = str(failure).strip()
-        if message.startswith(('{', '[')):
-            try:
-                payload = json.loads(message)
-            except ValueError:
-                payload = None
-            if isinstance(payload, dict):
-                payload = payload.get('error', payload)
-                message = payload.get('message', '') if isinstance(payload, dict) else ''
-            else:
-                message = ''
-        if isinstance(message, str):
-            message = re.split('(?i)\\b(?:headers|request body|request payload|messages|prompt)\\s*[:=]', message)[0]
-            message = re.sub('(?i)https?://[^\\s<>\\"\']+', '[URL скрыт]', message)
-            message = re.sub('(?i)\\bBearer\\s+\\S+', 'Bearer [скрыто]', message)
-            message = re.sub('(?i)(\\b(?:api[-_ ]?key|authorization|access[-_ ]?token|token|password|secret|cookie)\\b["\']?\\s*[:=]\\s*)(?:"[^"]*"|\'[^\']*\'|[^\\s,;]+)', '\\1[скрыто]', message)
-            message = re.sub('\\b(?:sk-[\\w-]+|hf_[\\w-]+|gh[pousr]_[\\w-]+)\\b', '[скрыто]', message)
-            message = ' '.join(message.split())[:600]
-        else:
-            message = ''
-        frames = traceback.extract_tb(failure.__traceback__)
-        location = ''
-        if frames:
-            frame = frames[-1]
-            location = f' ({PurePath(frame.filename).name}:{frame.lineno}, {frame.name})'
-        status_code = getattr(failure, 'status_code', None)
-        http_status = f' HTTP {status_code}' if type(status_code) is int else ''
-        if message or location or http_status:
-            details.append(f'{type(failure).__name__}{http_status}{location}' + (f' — {message}' if message else ''))
-    return ' | '.join(details)
-
-def propagate_provider_error(detail):
-    text = str(detail)
-    if OVERFLOW_MESSAGES.search(text):
-        raise ProviderContextOverflow(text)
-    raise RuntimeError(text)
-
-def actual_user(message):
-    return message.get('role') == 'user' and (not tool_image(message))
-
-def summary_projection_turns(messages, packet):
-    """Completed turns as received before/after destination inlets."""
-    starts = [i for i, message in enumerate(messages) if actual_user(message) and message != packet]
-    sequence = [messages[start:end] for start, end in zip(starts, starts[1:])]
-    return [[message for message in turn if message.get('role') != 'system' and message != packet] for turn in sequence]
-
-def recap_dialogue_text(content):
-    if isinstance(content, list):
-        content = '\n'.join((part['text'] for part in content if isinstance(part, dict) and part.get('type') in SUMMARY_TEXT_PARTS and isinstance(part.get('text'), str)))
-    return SUMMARY_INLINE_MEDIA.sub('[Медиа было в исходном ходе.]', content) if isinstance(content, str) else ''
-
-def recap_agent_activity(content):
-    packet = json.loads(content)
-    if packet.get('reply'):
-        packet['reply'] = describe_visualizations(recap_dialogue_text(packet['reply']), [])
-    for event in packet['events']:
-        if event['type'] == 'assistant':
-            event['content'] = describe_visualizations(recap_dialogue_text(event['content']), [])
-    return json.dumps(packet, ensure_ascii=False)
-
-def shared_turns(state):
-    messages = state['source']
-    boundary = state['user_boundary']
-    starts = [index for index, message in enumerate(messages[:boundary]) if actual_user(message)]
-    exchanges = analyze(messages, current_boundary=boundary, audit=state['audit'])
-    content, packets = agent_dialogue(state, None, exchanges, boundary)
-    digest = hashlib.sha256(b'lite-shared-summary-v2')
-    turns = []
-    for start, end in zip(starts, starts[1:] + [boundary]):
-        source_user = messages[start]
-        dialogue, visible_dialogue = ([], [])
-        for i in range(start, end):
-            message = messages[i]
-            if i == start:
-                text = recap_dialogue_text(source_user.get('content'))
-                line = {'role': 'user', 'content': text}
-                dialogue.append(line)
-                visible_dialogue.append(line)
-            for item in packets.get(i, ()):
-                if item['role'] == 'tool':
-                    dialogue.append({'role': 'assistant', 'content': recap_agent_activity(item['content'])})
-            if message['role'] == 'assistant':
-                text = recap_dialogue_text(content.get(i, message.get('content')))
-                if text:
-                    line = {'role': 'assistant', 'content': describe_visualizations(text, [])}
-                    dialogue.append(line)
-                    visible_dialogue.append(line)
-        if any((m.get('files') or m.get('embeds') or (isinstance(m.get('content'), list) and any((isinstance(part, dict) and part.get('type') not in SUMMARY_TEXT_PARTS for part in m['content']))) for m in messages[start:end] if m.get('role') in {'user', 'assistant', 'tool'})):
-            dialogue.append({'role': 'assistant', 'content': '[В исходном ходе были медиа или вложения.]'})
-        digest.update(json.dumps([source_user.get('id'), dialogue], ensure_ascii=False).encode())
-        turns.append({'key': digest.hexdigest(), 'messages': dialogue, 'visible_dialogue': visible_dialogue, 'source_user': source_user, 'next_user': messages[end]})
-    return turns
-
-def shared_summary_reference(text, covered):
-    """Keep exact values from visible text beside the model-written recap."""
-    groups = []
-    for number, turn in enumerate(covered, 1):
-        references = dict.fromkeys((match.group() for message in turn['visible_dialogue'] for match in EXACT_REFERENCE.finditer(message['content'])))
-        if references:
-            groups.append(f'Turn {number}: ' + ', '.join(list(references)[:12]))
-    if not groups:
-        return text
-    return '[Exact references from the original dialogue]\n' + '\n'.join(groups[-12:]) + '\n\n' + text
-
-class SharedSummary:
-
-    def __init__(self, adapter, request, user, state, *, emitter=None):
-        self.adapter, self.request, self.user, self.state = (adapter, request, user, state)
-        self.emitter = emitter
-        policy = state['context_policy']
-        self.model_id = policy['shared_summary_model_id'].strip()
-        self.context_percent = policy['shared_summary_context_percent']
-        self.turns = shared_turns(state) if self.model_id and (not state.get('worker')) else []
-        self.checkpoint = None
-        self.applied_turns = 0
-
-    async def status(self, description, *, done, error=False, action='lite_shared_summary'):
-        if self.emitter is not None:
-            try:
-                await self.emitter({'type': 'status', 'data': {'action': action, 'description': description, 'done': done, 'error': error}})
-            except Exception as failure:
-                logging.getLogger(__name__).debug('Shared summary status unavailable (%s)', type(failure).__name__)
-
-    def eligible(self, draft, packet):
-        messages = draft['messages']
-        users = [i for i, m in enumerate(messages) if actual_user(m) and m != packet]
-        guard = self.state.get('shared_summary_unchanged_turns')
-        protected = self.state.get('shared_summary_protected', ())
-        eligible = set()
-        for count, turn in enumerate(self.turns, 1):
-            if len(users) <= count or (guard is not None and count > guard) or messages[users[count - 1]].get('content') != turn['source_user'].get('content'):
-                break
-            if any((message in protected for message in messages[users[count - 1]:users[count]])):
-                break
-            if messages[users[count]].get('content') == turn['next_user'].get('content'):
-                eligible.add(turn['key'])
-        return eligible
-
-    async def load(self, draft=None, packet=None):
-        if not self.turns:
-            return
-        cache = self.state.get('shared_summary_cache')
-        if cache is None:
-            cache = await self.adapter.shared_summary_cache(self.state, self.user, self.model_id)
-            self.state['shared_summary_cache'] = cache
-        eligible = self.eligible(draft, packet) if draft is not None else {turn['key'] for turn in self.turns}
-        self.checkpoint = next((turn for turn in reversed(self.turns) if turn['key'] in eligible and cache.get(turn['key'])), None)
-
-    def applied_summary_key(self):
-        if not self.applied_turns:
-            return None
-        key = self.turns[self.applied_turns - 1]['key']
-        text = self.state['shared_summary_cache'][key]
-        return key + ':' + hashlib.sha256(text.encode()).hexdigest()
-
-    def apply(self, draft, packet):
-        if not self.checkpoint or self.checkpoint['key'] not in self.eligible(draft, packet):
-            return False
-        messages = draft['messages']
-        count = self.turns.index(self.checkpoint) + 1
-        users = [i for i, m in enumerate(messages) if actual_user(m) and m != packet]
-        end = users[count]
-        start = users[0]
-        kept = [message for message in messages[start:end] if message == packet]
-        summary = shared_summary_reference(self.state['shared_summary_cache'][self.checkpoint['key']], self.turns[:count])
-        messages[start:end] = [{'role': 'user', 'content': '[Shared conversation summary]\n' + summary}, *kept]
-        self.applied_turns = count
-        return True
-
-    async def extend(self, draft, packet, full_messages, *, trigger):
-        candidate = {**draft, 'messages': full_messages}
-        eligible = self.eligible(candidate, packet)
-        start = self.turns.index(self.checkpoint) + 1 if self.checkpoint else 0
-        candidates = self.turns[start:]
-        while candidates and candidates[-1]['key'] not in eligible:
-            candidates.pop()
-        if not candidates:
-            if start < len(self.turns):
-                reason = 'История в запросе к модели отличается от исходной. Безопасная граница сжатия не найдена.'
-            elif start:
-                reason = 'Все доступные старые ходы уже входят в сводку.'
-            else:
-                reason = 'В истории ещё нет старых ходов. Текущий ход защищён.'
-            await self.status(f'Сжатие пропущено ({trigger}). {reason}', done=True)
-            return False
-        turn_tokens = [sum((4 + (max(1, len(text) // 4) if text else 0) for text in (message['content'] for message in turn['messages']))) for turn in candidates]
-        total_tokens = sum(turn_tokens)
-        target_tokens = total_tokens * self.context_percent // 100
-        added, selected_tokens, length = ([], 0, 0)
-        for turn, tokens in zip(candidates, turn_tokens):
-            size = sum((len(message['content']) for message in turn['messages']))
-            if length + size > SUMMARY_INPUT_LIMIT or (added and selected_tokens + tokens > target_tokens):
-                break
-            added.append(turn)
-            selected_tokens += tokens
-            length += size
-        if not added:
-            await self.status(f'Сжатие пропущено ({trigger}). Первый непересказанный ход содержит {size} символов при лимите {SUMMARY_INPUT_LIMIT}.', done=True)
-            return False
-        cache = self.state['shared_summary_cache']
-        previous = cache[self.checkpoint['key']] if self.checkpoint else None
-        covered_turns = start + len(added)
-        description = 'Не удалось сократить контекст'
-        failed = True
-        try:
-            await self.status(f'Сжимаю контекст… {trigger}. Модель {self.model_id}. Ходов {len(added)}, символов {length}. Токенов по оценке Open WebUI {selected_tokens} из {total_tokens}. Целевой объём {target_tokens}.', done=False)
-            try:
-                save_options = {}
-                if hasattr(self.adapter, 'shared_summary_source_version'):
-                    source_version = await self.adapter.shared_summary_source_version(self.state, self.user, covered_turns)
-                    save_options = {'covered_turns': covered_turns, 'source_version': source_version}
-                summary = await self.adapter.generate_shared_summary(self.request, self.user, self.model_id, [message for turn in added for message in turn['messages']], previous)
-            except Exception as error:
-                logging.getLogger(__name__).warning('Shared summary unavailable (%s)', type(error).__name__)
-                if isinstance(error, SummaryGenerationError):
-                    reason = str(error)
-                elif isinstance(error, TimeoutError):
-                    reason = 'Модель суммаризации не ответила за 45 секунд.'
-                elif isinstance(error, ProviderContextOverflow):
-                    reason = 'Переполнено окно модели суммаризации.'
-                elif isinstance(error, AttributeError) and isinstance(error.name, str) and error.name.isidentifier():
-                    reason = f'Ошибка Open WebUI (AttributeError: {type(error.obj).__name__}.{error.name}).'
-                else:
-                    reason = f'Ошибка запроса к модели суммаризации ({type(error).__name__}).'
-                description = f'{description}. {reason}'
-                if (details := summary_error_details(error)):
-                    description += f' Подробности — {details}'
-                return False
-            if not summary:
-                description += '. Модель вернула пустую сводку.'
-                return False
-            checkpoint = added[-1]
-            key = checkpoint['key']
-            saved = await self.adapter.save_shared_summary(self.state, self.user, self.model_id, key, summary, **save_options)
-            if saved is False:
-                description += '. Исходная история изменилась во время суммаризации.'
-                return False
-            self.checkpoint = checkpoint
-            cache[key] = saved if isinstance(saved, str) else summary
-            draft['messages'][:] = deepcopy(full_messages)
-            applied = self.apply(draft, packet)
-            if applied:
-                description = f'Контекст сокращён. Ходов в общей сводке {self.applied_turns}.'
-                failed = False
-            else:
-                description += '. Граница сводки не совпала с историей запроса.'
-            return applied
-        except CancelledError:
-            description = 'Сжатие контекста отменено'
-            failed = False
-            raise
-        finally:
-            await self.status(description, done=True, error=failed)
+# Source: prompt_usage
+"""Track the last prompt sample per executor and model on the active branch."""
 
 def prompt_token_count(usage):
     if isinstance(usage, dict):
@@ -1540,85 +1294,108 @@ def prompt_token_count(usage):
                 return value
     return None
 
+def usage_slot(model_id, agent_id):
+    return ('agent_usage', (agent_id, model_id)) if agent_id else ('router_usage', model_id)
+
 def last_prompt_tokens(state, model_id, *, agent_id, summary_key):
-    if agent_id:
-        key = (agent_id, model_id)
-        current, historical = ('agent_usage', 'historical_agent_usage')
-    else:
-        key = model_id
-        current, historical = ('router_usage', 'historical_router_usage')
-    sample = state.get(current, {}).get(key, state.get(historical, {}).get(key))
+    bucket, key = usage_slot(model_id, agent_id)
+    sample = state.get(bucket, {}).get(key, state.get('historical_' + bucket, {}).get(key))
     if sample and 'summary_key' in sample and (sample['summary_key'] == summary_key):
         return prompt_token_count(sample)
     return None
 
-async def check_initial_stream(response):
-    if not hasattr(response, 'body_iterator'):
-        return response
-    stream = aiter(response.body_iterator)
-    prefix, pending, size = ([], b'', 0)
-    try:
-        async for chunk in stream:
-            prefix.append(chunk)
-            data = chunk if isinstance(chunk, bytes) else chunk.encode()
-            pending += data
-            size += len(data)
-            if size > 65536:
-                break
-            complete = False
-            while b'\n' in pending:
-                line, pending = pending.split(b'\n', 1)
-                if not line.startswith(b'data:'):
-                    continue
-                try:
-                    event = json.loads(line[5:])
-                except ValueError:
-                    complete = True
-                    break
-                if not isinstance(event, dict):
-                    complete = True
-                    break
-                error = event.get('error')
-                if not error and event.get('type') == 'response.failed':
-                    error = (event.get('response') or {}).get('error')
-                if error and OVERFLOW_MESSAGES.search(str(error)):
-                    raise ProviderContextOverflow(str(error))
-                choices = event.get('choices') or ()
-                kind = event.get('type')
-                if error or (kind and kind not in {'response.created', 'response.in_progress'}) or any((choice.get('finish_reason') or any((value for key, value in (choice.get('delta') or {}).items() if key != 'role')) for choice in choices)):
-                    complete = True
-                    break
-            if complete:
-                break
-    except BaseException:
-        if hasattr(stream, 'aclose'):
-            await stream.aclose()
-        raise
+def remember_prompt_usage(state, model_id, tokens, *, agent_id, summary_key):
+    bucket, key = usage_slot(model_id, agent_id)
+    state.setdefault(bucket, {})[key] = {'prompt_tokens': tokens, 'summary_key': summary_key}
 
-    async def replay():
-        try:
-            for chunk in prefix:
-                yield chunk
-            async for chunk in stream:
-                yield chunk
-        finally:
-            if hasattr(stream, 'aclose'):
-                await stream.aclose()
-    response.body_iterator = replay()
-    return response
+def restore_prompt_usage(state, branch, *, resume):
+    router_usage, agent_usage = ({}, {})
+    resumed_current = isinstance(resume, (tuple, list)) and tuple(resume[:2]) == (state['chat_id'], state['message_id'])
+    for message in branch:
+        if message.get('role') != 'assistant' or not isinstance(message.get('meta'), dict):
+            continue
+        meta = message['meta']
+        is_current = message.get('id') == state['message_id']
+        if not is_current:
+            sample = meta.get('lite_router_usage')
+            if isinstance(sample, dict) and isinstance(sample.get('model'), str):
+                router_usage[sample['model']] = sample
+        if is_current and (not resumed_current):
+            continue
+        samples = meta.get('lite_agent_usage')
+        if isinstance(samples, list):
+            for sample in samples:
+                if isinstance(sample, dict) and isinstance(sample.get('agent_id'), str) and isinstance(sample.get('model'), str):
+                    agent_usage[sample['agent_id'], sample['model']] = sample
+    state['historical_router_usage'] = router_usage
+    state['historical_agent_usage'] = agent_usage
 
-# Source: owui_adapter
-"""All imports of Open WebUI internal APIs live behind this boundary."""
-import asyncio
-from copy import deepcopy
-import hashlib
-import json
-import logging
+# Source: provider_errors
+"""Classify errors shared by ordinary model calls and summary generation."""
 import re
-from uuid import UUID
+OVERFLOW_MESSAGES = re.compile('context.length.exceeded|(?:context|input|prompt) (?:window|length)(?: limit)? (?:is |was )?(?:exceeded|too (?:long|large))|maximum context length|(?:exceeds|exceeded) (?:the )?(?:maximum |max(?:imum)? supported )?(?:model )?context length|(?:input|prompt) (?:is )?too long|input length \\(\\d+\\) is longer than|(?:input|prompt)(?: length)?\\s+\\([^)]*tokens?[^)]*\\) (?:is longer than|exceeds the maximum allowed length)', re.IGNORECASE)
 
-def as_dict(value):
-    return value.model_dump() if hasattr(value, 'model_dump') else dict(value or {})
+class ProviderContextOverflow(RuntimeError):
+    pass
+
+def provider_error(detail):
+    text = str(detail)
+    return ProviderContextOverflow(text) if OVERFLOW_MESSAGES.search(text) else RuntimeError(text)
+
+def provider_event_error(event):
+    error = event.get('error')
+    if error:
+        return error
+    if event.get('type') in {'error', 'response.failed'}:
+        response = event.get('response')
+        if isinstance(response, dict) and response.get('error'):
+            return response['error']
+        return event
+    return None
+
+# Source: stream_lines
+"""Frame provider chunks without decoding incomplete UTF-8 characters."""
+
+class StreamLines:
+
+    def __init__(self):
+        self.pending = b''
+        self.received = 0
+
+    def feed(self, chunk):
+        data = chunk.encode() if isinstance(chunk, str) else chunk
+        self.received += len(data)
+        lines = (self.pending + data).split(b'\n')
+        self.pending = lines.pop()
+        return lines
+
+    def finish(self):
+        tail, self.pending = (self.pending, b'')
+        return (tail,) if tail else ()
+
+# Source: summary_response
+"""Normalize provider summary responses across Chat Completions and Responses."""
+from dataclasses import dataclass
+import json
+import re
+SUMMARY_STREAM_LIMIT = 4 * 1024 * 1024
+
+class SummaryGenerationError(RuntimeError):
+    """A diagnostic that is safe to display in the chat."""
+
+@dataclass
+class SummaryStreamStats:
+    frames: int = 0
+    line_bytes: int = 0
+    json_events: int = 0
+    text_fragments: int = 0
+    done: bool = False
+    body_format: str = ''
+
+    def missing_finish(self):
+        reason = 'Поток сводки прислал [DONE] без finish_reason или response.completed.' if self.done else 'Поток сводки закрылся без завершающего события.'
+        body_format = f' Формат тела: {self.body_format}.' if self.body_format else ''
+        return SummaryGenerationError(f'{reason} SSE-кадров: {self.frames}, фрагментов текста: {self.text_fragments}, байт в строках: {self.line_bytes}, JSON-событий без SSE: {self.json_events}.' + body_format)
 
 async def summary_stream_lines(stream):
     if isinstance(stream, (str, bytes)):
@@ -1628,19 +1405,15 @@ async def summary_stream_lines(stream):
         chunks = buffered_chunks()
     else:
         chunks = stream
-    pending = b''
-    received = 0
+    framer = StreamLines()
     async for chunk in chunks:
         chunk = chunk.encode() if isinstance(chunk, str) else chunk
-        received += len(chunk)
-        if received > 4 * 1024 * 1024:
+        if framer.received + len(chunk) > SUMMARY_STREAM_LIMIT:
             raise SummaryGenerationError('Поток сводки превысил предел в 4 МиБ.')
-        lines = (pending + chunk).split(b'\n')
-        pending = lines.pop()
-        for line in lines:
+        for line in framer.feed(chunk):
             yield line
-    if pending:
-        yield pending
+    for line in framer.finish():
+        yield line
 
 def summary_unframed_events(body):
     if not body.strip():
@@ -1653,8 +1426,8 @@ def summary_unframed_events(body):
     except UnicodeDecodeError:
         return ([], 'некорректный UTF-8')
     try:
-        parsed = json.loads(decoded)
-        events = parsed if isinstance(parsed, list) else [parsed]
+        payload = json.loads(decoded)
+        events = payload if isinstance(payload, list) else [payload]
     except ValueError:
         try:
             events = [json.loads(line) for line in decoded.split('\n') if line.strip()]
@@ -1668,20 +1441,20 @@ async def summary_stream_events(stream, stats):
     if isinstance(stream, list):
         if not all((isinstance(event, dict) for event in stream)):
             raise SummaryGenerationError('Некорректный список событий в ответе сводки.')
-        stats['json_events'] = len(stream)
+        stats.json_events = len(stream)
         for event in stream:
             yield event
         return
     unframed = bytearray()
     async for line in summary_stream_lines(stream):
-        stats['bytes'] += len(line)
+        stats.line_bytes += len(line)
         if not line.startswith(b'data:'):
-            if not stats['frames']:
+            if not stats.frames:
                 unframed.extend(line + b'\n')
             continue
         data = line[5:].strip()
         if data == b'[DONE]':
-            stats['done'] = True
+            stats.done = True
             return
         if not data:
             continue
@@ -1691,66 +1464,110 @@ async def summary_stream_events(stream, stats):
             raise SummaryGenerationError('Некорректное событие в потоке сводки.') from error
         if not isinstance(event, dict):
             raise SummaryGenerationError('Некорректное событие в потоке сводки.')
-        stats['frames'] += 1
+        stats.frames += 1
         unframed.clear()
         yield event
-    if not stats['frames']:
-        events, stats['format'] = summary_unframed_events(unframed)
-        stats['json_events'] = len(events)
+    if not stats.frames:
+        events, stats.body_format = summary_unframed_events(unframed)
+        stats.json_events = len(events)
         for event in events:
             yield event
 
-async def collect_summary_stream(stream):
-    """Read Chat Completions or Responses events from the body, regardless of transport."""
+def summary_response_document(event, convert_responses):
+    if (error := provider_event_error(event)):
+        raise provider_error(error)
+    kind = event.get('type')
+    status = event.get('status') if event.get('object') == 'response' else None
+    if kind == 'response.incomplete' or status in ('incomplete', 'failed'):
+        raise SummaryGenerationError('Провайдер не завершил генерацию сводки.')
+    if kind == 'response.completed' or status == 'completed':
+        document = event.get('response') if kind == 'response.completed' else event
+        if not isinstance(document, dict):
+            raise SummaryGenerationError('Некорректное событие в потоке сводки.')
+        return convert_responses(document)
+    return None
+
+def summary_choices(document):
+    choices = document.get('choices') or []
+    if not isinstance(choices, list):
+        raise SummaryGenerationError('Некорректное поле choices в ответе сводки.')
+    return choices
+
+def summary_message(value):
+    message = value or {}
+    if not isinstance(message, dict):
+        raise SummaryGenerationError('Некорректное сообщение в ответе сводки.')
+    return message
+
+def summary_tool_call(message):
+    return bool(message.get('tool_calls') or message.get('function_call'))
+
+def completed_summary(content, finish_reason, tool_called):
+    if finish_reason == 'length':
+        raise SummaryGenerationError('Генерация сводки достигла лимита модели (finish_reason=length).')
+    if tool_called:
+        raise SummaryGenerationError('Модель суммаризации вернула вызов инструмента.')
+    if finish_reason != 'stop':
+        raise SummaryGenerationError('Провайдер прервал генерацию сводки.')
+    return content.strip() if isinstance(content, str) else ''
+
+def summary_document_text(document):
+    choices = summary_choices(document)
+    choice = summary_message(choices[0] if choices else None)
+    message = summary_message(choice.get('message'))
+    return completed_summary(message.get('content'), choice.get('finish_reason'), summary_tool_call(message))
+
+async def collect_summary_stream(stream, convert_responses):
+    stats = SummaryStreamStats()
     parts = []
-    snapshot = None
-    finish_reason = None
-    stats = {'frames': 0, 'bytes': 0, 'done': False, 'format': '', 'json_events': 0}
-    text_fragments = 0
-    message = {}
+    snapshot = finish_reason = None
+    tool_called = False
     try:
         async for event in summary_stream_events(stream, stats):
-            if event.get('error'):
-                propagate_provider_error(event['error'])
-            kind = event.get('type')
-            status = event.get('status') if event.get('object') == 'response' else None
-            if kind == 'response.incomplete' or status == 'incomplete':
-                raise SummaryGenerationError('Провайдер не завершил генерацию сводки.')
-            if kind == 'response.completed' or status == 'completed':
-                from open_webui.routers.openai import convert_responses_result
-                return convert_responses_result(event['response'] if kind == 'response.completed' else event)
-            if kind in ('error', 'response.failed'):
-                propagate_provider_error((event.get('response') or {}).get('error') or event)
-            if status == 'failed':
-                raise SummaryGenerationError('Провайдер не завершил генерацию сводки.')
-            choices = event.get('choices') or []
-            if not isinstance(choices, list):
-                raise SummaryGenerationError('Некорректное поле choices в ответе сводки.')
-            for choice in choices:
+            document = summary_response_document(event, convert_responses)
+            if document is not None:
+                return summary_document_text(document)
+            for choice in summary_choices(event):
                 if not isinstance(choice, dict) or choice.get('index', 0) != 0:
                     continue
-                delta = choice.get('delta') or {}
-                full = choice.get('message') or {}
-                if not isinstance(delta, dict) or not isinstance(full, dict):
-                    raise SummaryGenerationError('Некорректное сообщение в ответе сводки.')
+                delta = summary_message(choice.get('delta'))
+                full = summary_message(choice.get('message'))
                 if isinstance(delta.get('content'), str):
                     parts.append(delta['content'])
-                    text_fragments += 1
+                    stats.text_fragments += 1
                 if isinstance(full.get('content'), str):
                     snapshot = full['content']
-                    text_fragments += 1
-                if delta.get('tool_calls') or delta.get('function_call') or full.get('tool_calls') or full.get('function_call'):
-                    message['tool_calls'] = True
+                    stats.text_fragments += 1
+                tool_called = tool_called or summary_tool_call(delta) or summary_tool_call(full)
                 finish_reason = choice.get('finish_reason') or finish_reason
     finally:
         if hasattr(stream, 'aclose'):
             await stream.aclose()
     if not finish_reason:
-        reason = 'Поток сводки прислал [DONE] без finish_reason или response.completed.' if stats['done'] else 'Поток сводки закрылся без завершающего события.'
-        body_format = f" Формат тела: {stats['format']}." if stats['format'] else ''
-        raise SummaryGenerationError(f"{reason} SSE-кадров: {stats['frames']}, фрагментов текста: {text_fragments}, байт в строках: {stats['bytes']}, JSON-событий без SSE: {stats['json_events']}." + body_format)
-    message['content'] = snapshot if snapshot is not None else ''.join(parts)
-    return {'choices': [{'message': message, 'finish_reason': finish_reason}]}
+        raise stats.missing_finish()
+    content = snapshot if snapshot is not None else ''.join(parts)
+    return completed_summary(content, finish_reason, tool_called)
+
+async def summary_response_text(response, *, convert_responses):
+    if isinstance(response, dict):
+        document = summary_response_document(response, convert_responses)
+        return summary_document_text(response if document is None else document)
+    stream = getattr(response, 'body_iterator', response)
+    if not isinstance(stream, (str, bytes, list)) and (not hasattr(stream, '__aiter__')):
+        raise SummaryGenerationError('Провайдер вернул ответ сводки в неожиданном формате.')
+    return await collect_summary_stream(stream, convert_responses)
+
+# Source: owui_adapter
+"""All imports of Open WebUI internal APIs live behind this boundary."""
+import asyncio
+from copy import deepcopy
+import hashlib
+import json
+import logging
+from uuid import UUID
+
+def as_dict(value):
+    return value.model_dump() if hasattr(value, 'model_dump') else dict(value or {})
 
 def register_model_tool(registry, name, tool, namespace):
     alias = bounded_tool_name(name)
@@ -1802,28 +1619,9 @@ class OWUIAdapter:
             if current not in (messages or {}):
                 current = metadata.get('user_message_id')
             branch = get_message_list(messages or {}, current)
-            if (state.get('context_policy') or {}).get('shared_summary_model_id'):
-                router_usage, agent_usage = ({}, {})
+            if summary_model_id(state):
                 resume = getattr(getattr(request, 'state', None), 'tool_approval_resume', None)
-                resumed_current = isinstance(resume, (tuple, list)) and tuple(resume[:2]) == (state['chat_id'], state['message_id'])
-                for message in branch:
-                    if message.get('role') != 'assistant':
-                        continue
-                    meta = message.get('meta') or {}
-                    is_current = message.get('id') == state['message_id']
-                    if not is_current:
-                        sample = meta.get('lite_router_usage')
-                        if isinstance(sample, dict) and isinstance(sample.get('model'), str):
-                            router_usage[sample['model']] = sample
-                    if is_current and (not resumed_current):
-                        continue
-                    samples = meta.get('lite_agent_usage')
-                    if isinstance(samples, list):
-                        for sample in samples:
-                            if isinstance(sample.get('agent_id'), str) and isinstance(sample.get('model'), str):
-                                agent_usage[sample['agent_id'], sample['model']] = sample
-                state['historical_router_usage'] = router_usage
-                state['historical_agent_usage'] = agent_usage
+                restore_prompt_usage(state, branch, resume=resume)
             return saved_handoff_statuses(branch, convert_output_to_messages)
         except Exception as error:
             logging.getLogger(__name__).warning('Historical terminal evidence unavailable (%s)', type(error).__name__)
@@ -2377,12 +2175,12 @@ class OWUIAdapter:
 
     async def generate_shared_summary(self, request, user, model_id, messages, previous):
         from open_webui.models.config import Config
+        from open_webui.routers.openai import convert_responses_result
         from open_webui.utils.context_compaction import DEFAULT_CONTEXT_COMPACTION_PROMPT
         from open_webui.utils.models import check_model_access
         from open_webui.utils.payload import apply_params_to_form_data
         from open_webui.utils.task import prompt_template, replace_messages_variable
         from starlette.requests import Request
-        from starlette.responses import StreamingResponse
         model = request.app.state.MODELS.get(model_id)
         if not model or model.get('pipe') or model.get('pipeline') or (model.get('owned_by') != 'openai'):
             raise SummaryGenerationError('Модель суммаризации не найдена или несовместима с OpenAI API.')
@@ -2405,25 +2203,7 @@ class OWUIAdapter:
         body.pop('stream_options', None)
         async with asyncio.timeout(45):
             response = await self.complete(isolated, body, user, bypass_system_prompt=False)
-            if not isinstance(response, dict):
-                if isinstance(response, StreamingResponse):
-                    response = response.body_iterator
-                elif not isinstance(response, (str, bytes, list)):
-                    raise SummaryGenerationError('Провайдер вернул ответ сводки в неожиданном формате.')
-                response = await collect_summary_stream(response)
-        if response.get('error'):
-            propagate_provider_error(response['error'])
-        choices = response.get('choices') or []
-        choice = choices[0] if choices else {}
-        message = choice.get('message') or {}
-        content = message.get('content')
-        if choice.get('finish_reason') == 'length':
-            raise SummaryGenerationError('Генерация сводки достигла лимита модели (finish_reason=length).')
-        if message.get('tool_calls') or message.get('function_call'):
-            raise SummaryGenerationError('Модель суммаризации вернула вызов инструмента.')
-        if choice.get('finish_reason') != 'stop':
-            raise SummaryGenerationError('Провайдер прервал генерацию сводки.')
-        return content.strip() if isinstance(content, str) else ''
+            return await summary_response_text(response, convert_responses=convert_responses_result)
 
     async def complete(self, request, body, user, *, bypass_system_prompt=True):
         from fastapi import HTTPException
@@ -2435,23 +2215,17 @@ class OWUIAdapter:
         try:
             response = await generate_chat_completion(request, body, user, bypass_system_prompt=bypass_system_prompt)
         except HTTPException as error:
-            try:
-                propagate_provider_error(error.detail)
-            except RuntimeError as provider_error:
-                raise provider_error from error
+            raise provider_error(error.detail) from error
         if isinstance(response, Response) and response.status_code >= 400:
             raw = getattr(response, 'body', b'')
             detail = raw.decode(errors='replace') if isinstance(raw, bytes) else str(raw)
-            try:
-                propagate_provider_error(detail or f'Provider HTTP {response.status_code}')
-            except RuntimeError as provider_error:
-                raise provider_error from HTTPException(status_code=response.status_code)
+            raise provider_error(detail or f'Provider HTTP {response.status_code}') from HTTPException(status_code=response.status_code)
         if isinstance(response, StreamingResponse):
             return response
         if isinstance(response, Response):
             response = json.loads(response.body)
         if response is None or (isinstance(response, dict) and response.get('error')):
-            propagate_provider_error(response or 'Provider returned no response')
+            raise provider_error(response or 'Provider returned no response')
         return response
 
 # Source: parallel
@@ -2820,7 +2594,7 @@ class Filter:
         max_parallel_tasks: int = Field(default=4, ge=0, description='Maximum parallel tasks; 0 disables delegate_task and keeps ordinary handoff.')
         parallel_timeout_seconds: int = Field(default=300, gt=0)
 
-        @field_validator('priority', 'max_parallel_tasks', 'parallel_timeout_seconds', 'tool_result_history_limit', 'router_summary_trigger_tokens', 'agent_summary_trigger_tokens', 'shared_summary_context_percent', 'context_input_budget_tokens', 'context_safety_margin_tokens', mode='before')
+        @field_validator('priority', 'max_parallel_tasks', 'parallel_timeout_seconds', 'tool_result_history_limit', 'router_summary_trigger_tokens', 'agent_summary_trigger_tokens', 'shared_summary_context_percent', 'context_input_budget_tokens', 'context_safety_margin_tokens', 'context_window_tokens', 'context_response_reserve_tokens', mode='before')
         @classmethod
         def reject_boolean_number(cls, value):
             if isinstance(value, bool):

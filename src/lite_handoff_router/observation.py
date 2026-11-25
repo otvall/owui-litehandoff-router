@@ -1,8 +1,73 @@
-"""Observe provider Tool calls to preserve their generation and executor."""
+"""Inspect model streams and preserve tool and usage evidence as they pass through."""
 
 from copy import deepcopy
-import codecs
 import json
+
+from .provider_errors import ProviderContextOverflow, provider_error, provider_event_error
+from .stream_lines import StreamLines
+
+INITIAL_STREAM_LIMIT = 65536
+
+
+def initial_completion_event(line):
+    if not line.startswith(b"data:"):
+        return False
+    try:
+        event = json.loads(line[5:])
+    except ValueError:
+        return True
+    if not isinstance(event, dict):
+        return True
+    if error := provider_event_error(event):
+        failure = provider_error(error)
+        if isinstance(failure, ProviderContextOverflow):
+            raise failure
+        return True
+    kind = event.get("type")
+    if kind and kind not in {"response.created", "response.in_progress"}:
+        return True
+    return any(
+        choice.get("finish_reason") or
+        any(value for key, value in (choice.get("delta") or {}).items() if key != "role")
+        for choice in event.get("choices") or ()
+    )
+
+
+async def check_initial_stream(response):
+    """Catch context overflow before exposing any model output to Open WebUI."""
+    if not hasattr(response, "body_iterator"):
+        return response
+    stream = aiter(response.body_iterator)
+    prefix = []
+    framer = StreamLines()
+    try:
+        async for chunk in stream:
+            prefix.append(chunk)
+            chunk_bytes = chunk.encode() if isinstance(chunk, str) else chunk
+            if framer.received + len(chunk_bytes) > INITIAL_STREAM_LIMIT:
+                break
+            if any(initial_completion_event(line) for line in framer.feed(chunk_bytes)):
+                break
+        else:
+            for line in framer.finish():
+                initial_completion_event(line)
+    except BaseException:
+        if hasattr(stream, "aclose"):
+            await stream.aclose()
+        raise
+
+    async def replay():
+        try:
+            for chunk in prefix:
+                yield chunk
+            async for chunk in stream:
+                yield chunk
+        finally:
+            if hasattr(stream, "aclose"):
+                await stream.aclose()
+
+    response.body_iterator = replay()
+    return response
 
 
 def observe_response(response, state, executor, *, on_usage=None):
@@ -71,27 +136,29 @@ def observe_response(response, state, executor, *, on_usage=None):
         return response
     original = response.body_iterator
 
+    def consume(line):
+        line = line.strip()
+        if line.startswith(b"data:"):
+            line = line[5:].strip()
+        if line == b"[DONE]":
+            finish()
+        elif line:
+            try:
+                data = json.loads(line)
+            except ValueError:
+                return
+            if isinstance(data, dict):
+                event(data)
+
     async def stream():
-        buffer = ""
-        decoder = codecs.getincrementaldecoder("utf-8")()
+        framer = StreamLines()
         try:
             async for chunk in original:
-                buffer += decoder.decode(chunk) if isinstance(chunk, bytes) else chunk
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.strip()
-                    if line.startswith("data:"):
-                        line = line[5:].strip()
-                    if line == "[DONE]":
-                        finish()
-                    if line and line != "[DONE]":
-                        try:
-                            data = json.loads(line)
-                            if isinstance(data, dict):
-                                event(data)
-                        except ValueError:
-                            pass
+                for line in framer.feed(chunk):
+                    consume(line)
                 yield chunk
+            for line in framer.finish():
+                consume(line)
         finally:
             finish()
             if hasattr(original, "aclose"):

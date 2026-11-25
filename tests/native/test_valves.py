@@ -46,6 +46,7 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
                 "shared_summary_model_id", "shared_summary_context_percent",
                 "router_summary_trigger_tokens", "agent_summary_trigger_tokens",
                 "context_input_budget_tokens", "context_model_input_budgets", "context_safety_margin_tokens",
+                "context_window_tokens", "context_response_reserve_tokens",
             })
             self.assertEqual(spec["properties"]["shared_summary_context_percent"]["default"], 60)
             for bad in (True, "0.5", -1):
@@ -71,12 +72,14 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(previous.context_input_budget_tokens, 12000)
             self.assertEqual(previous.context_model_input_budgets, {"agent": 6000})
             values = {"context_input_budget_tokens": "20000", "context_safety_margin_tokens": "800",
-                      "context_model_input_budgets": {"agent": "9000"}}
+                      "context_model_input_budgets": {"agent": "9000"}, "context_window_tokens": "25000",
+                      "context_response_reserve_tokens": "2000"}
             result = await client.post(url + "/update", json=values)
             self.assertEqual(result.status_code, 200, result.text)
             self.assertEqual((await client.get(url)).json(), {
                 "context_input_budget_tokens": 20000, "context_safety_margin_tokens": 800,
                 "context_model_input_budgets": {"agent": 9000},
+                "context_window_tokens": 25000, "context_response_reserve_tokens": 2000,
             })
             for bad in ({"context_input_budget_tokens": 800, "context_safety_margin_tokens": 800},
                         {"context_model_input_budgets": {"agent": True}},

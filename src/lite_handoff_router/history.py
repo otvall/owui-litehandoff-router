@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 import re
 
-from .protocol import completed_pairs, object_value, tool_image, last_user
+from .protocol import actual_user, completed_pairs, object_value, tool_image, last_user
 from .skills import READERS, SKILL_CATALOG
 from .native_context import NATIVE_CONTEXT_NAMES, native_record, project_native_results
 from .tool_history import result_status
@@ -23,7 +23,7 @@ def fingerprint(call):
         return None
     if not isinstance(arguments, dict):
         return None
-    return call.get("id"), function.get("name"), json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+    return json.dumps([call.get("id"), function.get("name"), arguments], sort_keys=True, ensure_ascii=False)
 
 
 def audit_fingerprint(record):
@@ -61,10 +61,15 @@ def analyze(messages, *, current_boundary=None, audit=()):
     """
     turns, turn = [], -1
     for i, message in enumerate(messages):
-        if message.get("role") == "user" and (i == current_boundary or not tool_image(message)):
+        if (i == current_boundary and message.get("role") == "user") or actual_user(message):
             turn += 1
         turns.append(turn)
     pairs = completed_pairs(messages)
+    paired = {(i, n) for i, n, _ in pairs}
+    incomplete_handoffs = {
+        turns[i] for i, message in enumerate(messages) for n, call in enumerate(message.get("tool_calls") or [])
+        if (i, n) not in paired and call.get("function", {}).get("name") == "lite_delegate"
+    }
     by_turn = {}
     for pair in pairs:
         by_turn.setdefault(turns[pair[0]], []).append(pair)
@@ -77,18 +82,17 @@ def analyze(messages, *, current_boundary=None, audit=()):
                 evidence.append((r, marker))
         marker = evidence[0][1] if len(evidence) == 1 else None
         transition = evidence[0][0] if marker else None
-        paired = {(i, n) for i, n, _ in group}
-        ambiguous_handoff = any(
-            turns[i] == turn and (i, n) not in paired and call.get("function", {}).get("name") == "lite_delegate"
-            for i, message in enumerate(messages) for n, call in enumerate(message.get("tool_calls") or [])
-        ) or len(evidence) > 1
+        ambiguous_handoff = turn in incomplete_handoffs or len(evidence) > 1
         records = list(marker.get("router_calls") or []) if marker else []
         if current_boundary is not None and any(i > current_boundary for i, _, _ in group):
             records += list(audit)
+        by_fingerprint = {}
+        for record in records:
+            if isinstance(record, dict) and (key := audit_fingerprint(record)) is not None:
+                by_fingerprint.setdefault(key, []).append(record)
         for i, n, r in group:
             call = messages[i]["tool_calls"][n]
-            key = fingerprint(call)
-            matching = [record for record in records if isinstance(record, dict) and key is not None and audit_fingerprint(record) == key]
+            matching = by_fingerprint.get(fingerprint(call), ())
             # A persisted Router record and live copy describe the same observation.
             unique = {json.dumps(record, sort_keys=True): record for record in matching}
             owner, generation = {"kind": "unknown"}, None
@@ -330,7 +334,7 @@ def agent_dialogue(state, agent_id, exchanges, boundary):
     overrides = {}
     historical_turns = {}
     starts = [i for i, m in enumerate(messages)
-              if m.get("role") == "user" and (i == boundary or not tool_image(m))]
+              if (i == boundary and m.get("role") == "user") or actual_user(m)]
     for start, end in zip(starts, starts[1:] + [len(messages)]):
         calls = [(i, n) for i in range(start + 1, end)
                  for n, call in enumerate(messages[i].get("tool_calls") or [])

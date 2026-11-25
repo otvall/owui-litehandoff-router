@@ -104,7 +104,7 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
         from open_webui.models.config import Config
         from open_webui.utils import chat, models
         from starlette.responses import JSONResponse, StreamingResponse
-        from lite_handoff_router.shared_summary import SummaryGenerationError
+        from lite_handoff_router.summary_response import SummaryGenerationError
 
         request = SimpleNamespace(
             url=SimpleNamespace(path="/api/chat/completions"),
@@ -112,7 +112,7 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
         )
         messages = [{"role": "user", "content": "Old question"}]
         template = "Custom {{PREVIOUS_SUMMARY}} / {{COMPACTED_MESSAGES}} / {{RECENT_MESSAGES}}"
-        for mode in ("json", "json_text", "json_bytes", "stream", "stream_final_line", "interrupted", "stream_eof", "stream_non_sse",
+        for mode in ("json", "json_text", "json_bytes", "response_json", "stream", "stream_final_line", "interrupted", "stream_eof", "stream_non_sse",
                      "stream_non_sse_incomplete", "stream_non_sse_truncated", "stream_response_json", "stream_html",
                      "stream_length", "length", "http_error", "empty", "tool_call"):
             with self.subTest(mode=mode):
@@ -140,11 +140,12 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                     if mode == "stream_non_sse_truncated":
                         raw = raw[:-1]
                     response = StreamingResponse(iter((raw[:85], raw[85:])), media_type="text/event-stream")
-                elif mode == "stream_response_json":
-                    raw = json.dumps({"object": "response", "status": "completed", "output": [
+                elif mode in ("response_json", "stream_response_json"):
+                    document = {"object": "response", "status": "completed", "output": [
                         {"type": "message", "content": [{"type": "output_text", "text": "Result"}]}
-                    ]})
-                    response = StreamingResponse(iter([raw]), media_type="text/event-stream")
+                    ]}
+                    response = (StreamingResponse(iter([json.dumps(document)]), media_type="text/event-stream")
+                                if mode == "stream_response_json" else document)
                 elif mode == "stream_html":
                     response = StreamingResponse(iter(["<html><title>502 Bad Gateway</title>Result</html>"]),
                                                  media_type="text/event-stream")
@@ -168,7 +169,7 @@ class NativeAdapterTest(unittest.IsolatedAsyncioTestCase):
                 ):
                     operation = OWUIAdapter().generate_shared_summary(
                         request, SimpleNamespace(id="u", role="admin"), "llm", messages, "Earlier")
-                    if mode in ("json", "json_text", "json_bytes", "stream", "stream_final_line",
+                    if mode in ("json", "json_text", "json_bytes", "response_json", "stream", "stream_final_line",
                                 "stream_non_sse", "stream_response_json", "empty"):
                         self.assertEqual(await operation, "" if mode == "empty" else "Result")
                     else:

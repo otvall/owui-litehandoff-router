@@ -1,21 +1,16 @@
 """Public pipe; continuations remain in OWUI's native tool loop."""
 
-from copy import deepcopy
-
 from pydantic import BaseModel, Field
 
 from ..model_execution import prepare_model
-from ..agent_history_block import pack_agent_history
-from ..context_budget import check_context_budget, estimate_context_budget, input_budget
+from ..completion_context import CompletionContext
+from ..context_policy import summary_model_id
 from ..owui_adapter import OWUIAdapter
 from ..protocol import confirmed_target
 from ..runtime import require, metadata_draft, publish
 from ..history import refresh_source
 from ..capabilities import close_mcp_sessions
-from ..observation import observe_response
 from ..native_context import capture_native_context
-from ..shared_summary import (ProviderContextOverflow, SharedSummary, check_initial_stream,
-                              last_prompt_tokens, prompt_token_count)
 
 
 class Pipe:
@@ -39,34 +34,9 @@ class Pipe:
                 state["source"].extend(converted)
             capture_native_context(__request__, __metadata__, state, converted)
         target = confirmed_target(state, state["source"])
-        policy = state["context_policy"]
-        summary_enabled = bool(policy["shared_summary_model_id"].strip()) and not state.get("worker")
-        recipient = target or state["router_id"]
-        available = input_budget(policy, recipient)
         sessions_before = set(__request__.scope.get("lite_handoff_mcp", {}))
-
-        def pack():
-            if target and not state.get("worker"):
-                pack_agent_history(
-                    draft["messages"], state, state.get("agent_history_question"),
-                    covered_turns=summary.applied_turns if summary else 0,
-                    packet=packet,
-                )
-
-        async def fit_budget():
-            estimate = estimate_context_budget(draft)
-            initial = estimate.total
-            while summary and estimate.total > available and await summary.extend(
-                draft, packet, full_messages,
-                trigger=f"Бюджет запроса, оценка {estimate.total} токенов при лимите {available}",
-            ):
-                pack()
-                estimate = estimate_context_budget(draft)
-            check_context_budget(estimate, available, recipient=recipient, before=initial,
-                                 hidden_results=state.get("hidden_tool_result_count", 0))
-
         try:
-            if target and summary_enabled and state.get("historical_handoff_statuses") is None:
+            if target and summary_model_id(state) and state.get("historical_handoff_statuses") is None:
                 state["historical_handoff_statuses"] = await adapter.historical_handoff_statuses(
                     __request__, __metadata__, state, user)
             draft, tools = await prepare_model(
@@ -75,33 +45,8 @@ class Pipe:
                 {"__event_emitter__": __event_emitter__, "__event_call__": __event_call__,
                  "__oauth_token__": __oauth_token__}, target=target,
             )
-            model = draft["model"]
-            if target:
-                info = (draft["metadata"].get("model") or {}).get("info") or {}
-                model = info.get("base_model_id") or model
-            summary = None
-            packet = state.get("shared_summary_packet")
-            if summary_enabled:
-                summary = SharedSummary(adapter, __request__, user, state, emitter=__event_emitter__)
-                full_messages = deepcopy(draft["messages"])
-                await summary.load(draft, packet)
-                summary.apply(draft, packet)
-                if available is None:
-                    previous_tokens = last_prompt_tokens(
-                        state, model, agent_id=target, summary_key=summary.applied_summary_key())
-                    threshold = policy["agent_summary_trigger_tokens" if target else "router_summary_trigger_tokens"]
-                    if previous_tokens is not None and previous_tokens > threshold:
-                        executor_name = "Агент" if target else "Роутер"
-                        await summary.extend(draft, packet, full_messages,
-                                             trigger=f"{executor_name}, предыдущий вход {previous_tokens} токенов, порог {threshold}")
-            if draft.get("stream"):
-                options = draft.get("stream_options")
-                draft["stream_options"] = {
-                    **(options if isinstance(options, dict) else {}), "include_usage": True,
-                }
-            pack()
-            if available is not None:
-                await fit_budget()
+            completion = CompletionContext(adapter, __request__, user, state, draft, target, emitter=__event_emitter__)
+            await completion.prepare()
         except BaseException:
             sessions = __request__.scope.get("lite_handoff_mcp", {})
             await close_mcp_sessions(sessions.pop(key) for key in list(sessions) if key not in sessions_before)
@@ -117,45 +62,4 @@ class Pipe:
                     "action": "handoff", "description": "Передача: " + state["registry"][target].get("agent_name", target),
                     "done": True,
                 }})
-
-        async def complete_prepared():
-            result = await adapter.complete(__request__, draft, user)
-            return await check_initial_stream(result) if summary_enabled else result
-
-        try:
-            response = await complete_prepared()
-        except ProviderContextOverflow:
-            if not summary_enabled or not await summary.extend(
-                draft, packet, full_messages, trigger="Переполнение контекста основного запроса",
-            ):
-                raise
-            pack()
-            if available is not None:
-                await fit_budget()
-            response = await complete_prepared()
-        executor = {"kind": "agent", "agent_id": target} if target else {"kind": "router"}
-        on_usage = None
-        if target or summary_enabled:
-            generation = state.get("generation", 0) + 1
-            summary_key = summary.applied_summary_key() if summary else None
-
-            async def record_usage(usage):
-                tokens = prompt_token_count(usage)
-                if tokens is None and summary is None:
-                    return
-                sample = {"prompt_tokens": tokens, "summary_key": summary_key}
-                if target:
-                    state.setdefault("agent_usage", {})[target, model] = sample
-                else:
-                    state.setdefault("router_usage", {})[model] = sample
-                await adapter.save_prompt_usage(
-                    state, user, model, tokens, summary_key=summary_key, agent_id=target, generation=generation)
-                if tokens is None and summary:
-                    await summary.status("Провайдер не вернул свежий замер входных токенов.", done=True,
-                                         action="lite_prompt_usage")
-
-            if hasattr(response, "body_iterator"):
-                on_usage = record_usage
-            else:
-                await record_usage(response.get("usage") if isinstance(response, dict) else None)
-        return observe_response(response, state, executor, on_usage=on_usage)
+        return await completion.complete()

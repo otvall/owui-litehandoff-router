@@ -5,163 +5,22 @@ from copy import deepcopy
 import hashlib
 import json
 import logging
-import re
 from uuid import UUID
 
 from .binding import bind_tool_context
+from .context_policy import summary_model_id
 from .capabilities import MCP_CLOSE_TIMEOUT, bounded_tool_name
 from .native_context import scoped_knowledge_result
 from .history import context_handoff_key, handoff_evidence
 from .protocol import completed_pairs
+from .prompt_usage import restore_prompt_usage
 from .registry import ids
-from .shared_summary import SummaryGenerationError, propagate_provider_error
+from .provider_errors import provider_error
+from .summary_response import SummaryGenerationError, summary_response_text
 
 
 def as_dict(value):
     return value.model_dump() if hasattr(value, "model_dump") else dict(value or {})
-
-
-async def summary_stream_lines(stream):
-    if isinstance(stream, (str, bytes)):
-        async def buffered_chunks():
-            yield stream
-
-        chunks = buffered_chunks()
-    else:
-        chunks = stream
-    pending = b""
-    received = 0
-    async for chunk in chunks:
-        chunk = chunk.encode() if isinstance(chunk, str) else chunk
-        received += len(chunk)
-        if received > 4 * 1024 * 1024:
-            raise SummaryGenerationError("Поток сводки превысил предел в 4 МиБ.")
-        lines = (pending + chunk).split(b"\n")
-        pending = lines.pop()
-        for line in lines:
-            yield line
-    if pending:
-        yield pending
-
-
-def summary_unframed_events(body):
-    if not body.strip():
-        return [], ""
-    if body.lstrip().startswith(b"<"):
-        status = re.search(rb"(?i)<title>\s*([45][0-9]{2})\b", body[:512])
-        return [], f"HTML/XML, код {status[1].decode()}" if status else "HTML/XML"
-    try:
-        decoded = body.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return [], "некорректный UTF-8"
-    try:
-        parsed = json.loads(decoded)
-        events = parsed if isinstance(parsed, list) else [parsed]
-    except ValueError:
-        try:
-            events = [json.loads(line) for line in decoded.split("\n") if line.strip()]
-        except ValueError:
-            return [], "нераспознанное тело"
-    if events and all(isinstance(event, dict) for event in events):
-        return events, ""
-    return [], "неожиданная структура JSON"
-
-
-async def summary_stream_events(stream, stats):
-    if isinstance(stream, list):
-        if not all(isinstance(event, dict) for event in stream):
-            raise SummaryGenerationError("Некорректный список событий в ответе сводки.")
-        stats["json_events"] = len(stream)
-        for event in stream:
-            yield event
-        return
-
-    unframed = bytearray()
-    async for line in summary_stream_lines(stream):
-        stats["bytes"] += len(line)
-        if not line.startswith(b"data:"):
-            if not stats["frames"]:
-                unframed.extend(line + b"\n")
-            continue
-        data = line[5:].strip()
-        if data == b"[DONE]":
-            stats["done"] = True
-            return
-        if not data:
-            continue
-        try:
-            event = json.loads(data)
-        except ValueError as error:
-            raise SummaryGenerationError("Некорректное событие в потоке сводки.") from error
-        if not isinstance(event, dict):
-            raise SummaryGenerationError("Некорректное событие в потоке сводки.")
-        stats["frames"] += 1
-        unframed.clear()
-        yield event
-    if not stats["frames"]:
-        events, stats["format"] = summary_unframed_events(unframed)
-        stats["json_events"] = len(events)
-        for event in events:
-            yield event
-
-
-async def collect_summary_stream(stream):
-    """Read Chat Completions or Responses events from the body, regardless of transport."""
-    parts = []
-    snapshot = None
-    finish_reason = None
-    stats = {"frames": 0, "bytes": 0, "done": False, "format": "", "json_events": 0}
-    text_fragments = 0
-    message = {}
-    try:
-        async for event in summary_stream_events(stream, stats):
-            if event.get("error"):
-                propagate_provider_error(event["error"])
-            kind = event.get("type")
-            status = event.get("status") if event.get("object") == "response" else None
-            if kind == "response.incomplete" or status == "incomplete":
-                raise SummaryGenerationError("Провайдер не завершил генерацию сводки.")
-            if kind == "response.completed" or status == "completed":
-                from open_webui.routers.openai import convert_responses_result
-
-                return convert_responses_result(event["response"] if kind == "response.completed" else event)
-            if kind in ("error", "response.failed"):
-                propagate_provider_error((event.get("response") or {}).get("error") or event)
-            if status == "failed":
-                raise SummaryGenerationError("Провайдер не завершил генерацию сводки.")
-            choices = event.get("choices") or []
-            if not isinstance(choices, list):
-                raise SummaryGenerationError("Некорректное поле choices в ответе сводки.")
-            for choice in choices:
-                if not isinstance(choice, dict) or choice.get("index", 0) != 0:
-                    continue
-                delta = choice.get("delta") or {}
-                full = choice.get("message") or {}
-                if not isinstance(delta, dict) or not isinstance(full, dict):
-                    raise SummaryGenerationError("Некорректное сообщение в ответе сводки.")
-                if isinstance(delta.get("content"), str):
-                    parts.append(delta["content"])
-                    text_fragments += 1
-                if isinstance(full.get("content"), str):
-                    snapshot = full["content"]
-                    text_fragments += 1
-                if (delta.get("tool_calls") or delta.get("function_call")
-                        or full.get("tool_calls") or full.get("function_call")):
-                    message["tool_calls"] = True
-                finish_reason = choice.get("finish_reason") or finish_reason
-    finally:
-        if hasattr(stream, "aclose"):
-            await stream.aclose()
-    if not finish_reason:
-        reason = ("Поток сводки прислал [DONE] без finish_reason или response.completed." if stats["done"]
-                  else "Поток сводки закрылся без завершающего события.")
-        body_format = f" Формат тела: {stats['format']}." if stats["format"] else ""
-        raise SummaryGenerationError(
-            f"{reason} SSE-кадров: {stats['frames']}, фрагментов текста: {text_fragments}, "
-            f"байт в строках: {stats['bytes']}, JSON-событий без SSE: {stats['json_events']}." + body_format
-        )
-    message["content"] = snapshot if snapshot is not None else "".join(parts)
-    return {"choices": [{"message": message, "finish_reason": finish_reason}]}
 
 
 def register_model_tool(registry, name, tool, namespace):
@@ -222,29 +81,9 @@ class OWUIAdapter:
             if current not in (messages or {}):
                 current = metadata.get("user_message_id")
             branch = get_message_list(messages or {}, current)
-            if (state.get("context_policy") or {}).get("shared_summary_model_id"):
-                router_usage, agent_usage = {}, {}
+            if summary_model_id(state):
                 resume = getattr(getattr(request, "state", None), "tool_approval_resume", None)
-                resumed_current = (isinstance(resume, (tuple, list)) and
-                                   tuple(resume[:2]) == (state["chat_id"], state["message_id"]))
-                for message in branch:
-                    if message.get("role") != "assistant":
-                        continue
-                    meta = message.get("meta") or {}
-                    is_current = message.get("id") == state["message_id"]
-                    if not is_current:
-                        sample = meta.get("lite_router_usage")
-                        if isinstance(sample, dict) and isinstance(sample.get("model"), str):
-                            router_usage[sample["model"]] = sample
-                    if is_current and not resumed_current:
-                        continue
-                    samples = meta.get("lite_agent_usage")
-                    if isinstance(samples, list):
-                        for sample in samples:
-                            if isinstance(sample.get("agent_id"), str) and isinstance(sample.get("model"), str):
-                                agent_usage[sample["agent_id"], sample["model"]] = sample
-                state["historical_router_usage"] = router_usage
-                state["historical_agent_usage"] = agent_usage
+                restore_prompt_usage(state, branch, resume=resume)
             return saved_handoff_statuses(branch, convert_output_to_messages)
         except Exception as error:
             logging.getLogger(__name__).warning("Historical terminal evidence unavailable (%s)", type(error).__name__)
@@ -896,12 +735,12 @@ class OWUIAdapter:
 
     async def generate_shared_summary(self, request, user, model_id, messages, previous):
         from open_webui.models.config import Config
+        from open_webui.routers.openai import convert_responses_result
         from open_webui.utils.context_compaction import DEFAULT_CONTEXT_COMPACTION_PROMPT
         from open_webui.utils.models import check_model_access
         from open_webui.utils.payload import apply_params_to_form_data
         from open_webui.utils.task import prompt_template, replace_messages_variable
         from starlette.requests import Request
-        from starlette.responses import StreamingResponse
 
         model = request.app.state.MODELS.get(model_id)
         if not model or model.get("pipe") or model.get("pipeline") or model.get("owned_by") != "openai":
@@ -928,25 +767,7 @@ class OWUIAdapter:
         body.pop("stream_options", None)
         async with asyncio.timeout(45):
             response = await self.complete(isolated, body, user, bypass_system_prompt=False)
-            if not isinstance(response, dict):
-                if isinstance(response, StreamingResponse):
-                    response = response.body_iterator
-                elif not isinstance(response, (str, bytes, list)):
-                    raise SummaryGenerationError("Провайдер вернул ответ сводки в неожиданном формате.")
-                response = await collect_summary_stream(response)
-        if response.get("error"):
-            propagate_provider_error(response["error"])
-        choices = response.get("choices") or []
-        choice = choices[0] if choices else {}
-        message = choice.get("message") or {}
-        content = message.get("content")
-        if choice.get("finish_reason") == "length":
-            raise SummaryGenerationError("Генерация сводки достигла лимита модели (finish_reason=length).")
-        if message.get("tool_calls") or message.get("function_call"):
-            raise SummaryGenerationError("Модель суммаризации вернула вызов инструмента.")
-        if choice.get("finish_reason") != "stop":
-            raise SummaryGenerationError("Провайдер прервал генерацию сводки.")
-        return content.strip() if isinstance(content, str) else ""
+            return await summary_response_text(response, convert_responses=convert_responses_result)
 
     async def complete(self, request, body, user, *, bypass_system_prompt=True):
         from fastapi import HTTPException
@@ -966,21 +787,16 @@ class OWUIAdapter:
                 request, body, user, bypass_system_prompt=bypass_system_prompt,
             )
         except HTTPException as error:
-            try:
-                propagate_provider_error(error.detail)
-            except RuntimeError as provider_error:
-                raise provider_error from error
+            raise provider_error(error.detail) from error
         if isinstance(response, Response) and response.status_code >= 400:
             raw = getattr(response, "body", b"")
             detail = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
-            try:
-                propagate_provider_error(detail or f"Provider HTTP {response.status_code}")
-            except RuntimeError as provider_error:
-                raise provider_error from HTTPException(status_code=response.status_code)
+            raise provider_error(detail or f"Provider HTTP {response.status_code}") from HTTPException(
+                status_code=response.status_code)
         if isinstance(response, StreamingResponse):
             return response
         if isinstance(response, Response):
             response = json.loads(response.body)
         if response is None or (isinstance(response, dict) and response.get("error")):
-            propagate_provider_error(response or "Provider returned no response")
+            raise provider_error(response or "Provider returned no response")
         return response

@@ -9,32 +9,18 @@ import re
 import traceback
 from pathlib import PurePath
 
+from .context_policy import summary_model_id
 from .history import agent_dialogue, analyze, describe_visualizations
-from .protocol import tool_image
+from .protocol import SHARED_SUMMARY_PREFIX, actual_user
+from .provider_errors import ProviderContextOverflow
+from .summary_response import SummaryGenerationError
 
 SUMMARY_INPUT_LIMIT = 60000
 SUMMARY_TEXT_PARTS = {"text", "input_text", "output_text"}
 SUMMARY_INLINE_MEDIA = re.compile(r"data:(?:image|audio|video)/[\w.+-]+;base64,[A-Za-z0-9+/=_-]+", re.IGNORECASE)
-OVERFLOW_MESSAGES = re.compile(
-    r"context.length.exceeded|(?:context|input|prompt) (?:window|length)(?: limit)? "
-    r"(?:is |was )?(?:exceeded|too (?:long|large))|maximum context length|"
-    r"(?:exceeds|exceeded) (?:the )?(?:maximum |max(?:imum)? supported )?(?:model )?context length|"
-    r"(?:input|prompt) (?:is )?too long|input length \(\d+\) is longer than|"
-    r"(?:input|prompt)(?: length)?\s+\([^)]*tokens?[^)]*\) "
-    r"(?:is longer than|exceeds the maximum allowed length)", re.IGNORECASE,
-)
-
 EXACT_REFERENCE = re.compile(
     r"(?<![\w-])(?:[A-ZА-ЯЁ]{2,12}-\d{2,16}|\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})(?![\w-])"
 )
-
-
-class ProviderContextOverflow(RuntimeError):
-    pass
-
-
-class SummaryGenerationError(RuntimeError):
-    """A diagnostic that is safe to display in the chat."""
 
 
 def summary_error_details(error):
@@ -75,17 +61,6 @@ def summary_error_details(error):
         if message or location or http_status:
             details.append(f"{type(failure).__name__}{http_status}{location}" + (f" — {message}" if message else ""))
     return " | ".join(details)
-
-
-def propagate_provider_error(detail):
-    text = str(detail)
-    if OVERFLOW_MESSAGES.search(text):
-        raise ProviderContextOverflow(text)
-    raise RuntimeError(text)
-
-
-def actual_user(message):
-    return message.get("role") == "user" and not tool_image(message)
 
 
 def summary_projection_turns(messages, packet):
@@ -175,10 +150,10 @@ class SharedSummary:
         self.adapter, self.request, self.user, self.state = adapter, request, user, state
         self.emitter = emitter
         policy = state["context_policy"]
-        self.model_id = policy["shared_summary_model_id"].strip()
+        self.model_id = summary_model_id(state)
         self.context_percent = policy["shared_summary_context_percent"]
-        self.turns = shared_turns(state) if self.model_id and not state.get("worker") else []
-        self.checkpoint = None
+        self.turns = shared_turns(state) if self.model_id else []
+        self.checkpoint_turns = 0
         self.applied_turns = 0
 
     async def status(self, description, *, done, error=False, action="lite_shared_summary"):
@@ -190,14 +165,13 @@ class SharedSummary:
             except Exception as failure:
                 logging.getLogger(__name__).debug("Shared summary status unavailable (%s)", type(failure).__name__)
 
-    def eligible(self, draft, packet):
-        messages = draft["messages"]
+    def eligible_boundaries(self, messages, packet):
         users = [i for i, m in enumerate(messages) if actual_user(m) and m != packet]
         guard = self.state.get("shared_summary_unchanged_turns")
         protected = self.state.get("shared_summary_protected", ())
         # A destination filter may rewrite user messages. Match the whole candidate
         # prefix before dropping any messages from that projection.
-        eligible = set()
+        boundaries = {}
         for count, turn in enumerate(self.turns, 1):
             if (len(users) <= count or (guard is not None and count > guard)
                     or messages[users[count - 1]].get("content") != turn["source_user"].get("content")):
@@ -205,8 +179,8 @@ class SharedSummary:
             if any(message in protected for message in messages[users[count - 1]:users[count]]):
                 break
             if messages[users[count]].get("content") == turn["next_user"].get("content"):
-                eligible.add(turn["key"])
-        return eligible
+                boundaries[count] = (users[0], users[count])
+        return boundaries
 
     async def load(self, draft=None, packet=None):
         if not self.turns:
@@ -215,9 +189,10 @@ class SharedSummary:
         if cache is None:
             cache = await self.adapter.shared_summary_cache(self.state, self.user, self.model_id)
             self.state["shared_summary_cache"] = cache
-        eligible = self.eligible(draft, packet) if draft is not None else {turn["key"] for turn in self.turns}
-        self.checkpoint = next((turn for turn in reversed(self.turns)
-                                if turn["key"] in eligible and cache.get(turn["key"])), None)
+        eligible = (self.eligible_boundaries(draft["messages"], packet) if draft is not None
+                    else range(1, len(self.turns) + 1))
+        self.checkpoint_turns = next((count for count in reversed(eligible)
+                                      if cache.get(self.turns[count - 1]["key"])), 0)
 
     def applied_summary_key(self):
         if not self.applied_turns:
@@ -227,27 +202,25 @@ class SharedSummary:
         return key + ":" + hashlib.sha256(text.encode()).hexdigest()
 
     def apply(self, draft, packet):
-        if not self.checkpoint or self.checkpoint["key"] not in self.eligible(draft, packet):
+        count = self.checkpoint_turns
+        if not count:
             return False
         messages = draft["messages"]
-        count = self.turns.index(self.checkpoint) + 1
-        users = [i for i, m in enumerate(messages) if actual_user(m) and m != packet]
-        end = users[count]
-        start = users[0]
+        bounds = self.eligible_boundaries(messages, packet).get(count)
+        if bounds is None:
+            return False
+        start, end = bounds
         kept = [message for message in messages[start:end] if message == packet]
-        summary = shared_summary_reference(self.state["shared_summary_cache"][self.checkpoint["key"]],
-                                           self.turns[:count])
-        messages[start:end] = [{"role": "user", "content": "[Shared conversation summary]\n" + summary}, *kept]
+        key = self.turns[count - 1]["key"]
+        summary = shared_summary_reference(self.state["shared_summary_cache"][key], self.turns[:count])
+        messages[start:end] = [{"role": "user", "content": SHARED_SUMMARY_PREFIX + summary}, *kept]
         self.applied_turns = count
         return True
 
     async def extend(self, draft, packet, full_messages, *, trigger):
-        candidate = {**draft, "messages": full_messages}
-        eligible = self.eligible(candidate, packet)
-        start = self.turns.index(self.checkpoint) + 1 if self.checkpoint else 0
-        candidates = self.turns[start:]
-        while candidates and candidates[-1]["key"] not in eligible:
-            candidates.pop()
+        start = self.checkpoint_turns
+        eligible = self.eligible_boundaries(full_messages, packet)
+        candidates = self.turns[start:max(eligible, default=0)]
         if not candidates:
             if start < len(self.turns):
                 reason = "История в запросе к модели отличается от исходной. Безопасная граница сжатия не найдена."
@@ -258,14 +231,15 @@ class SharedSummary:
             await self.status(f"Сжатие пропущено ({trigger}). {reason}", done=True)
             return False
         # Open WebUI's estimate for text messages, applied to the summary projection.
-        turn_tokens = [sum(4 + (max(1, len(text) // 4) if text else 0)
-                           for text in (message["content"] for message in turn["messages"]))
-                       for turn in candidates]
-        total_tokens = sum(turn_tokens)
+        turn_sizes = []
+        for turn in candidates:
+            lengths = [len(message["content"]) for message in turn["messages"]]
+            tokens = sum(4 + (max(1, length // 4) if length else 0) for length in lengths)
+            turn_sizes.append((sum(lengths), tokens))
+        total_tokens = sum(tokens for _, tokens in turn_sizes)
         target_tokens = total_tokens * self.context_percent // 100
         added, selected_tokens, length = [], 0, 0
-        for turn, tokens in zip(candidates, turn_tokens):
-            size = sum(len(message["content"]) for message in turn["messages"])
+        for turn, (size, tokens) in zip(candidates, turn_sizes):
             # The oldest whole turn stays eligible even for a small percentage.
             if length + size > SUMMARY_INPUT_LIMIT or (added and selected_tokens + tokens > target_tokens):
                 break
@@ -278,7 +252,7 @@ class SharedSummary:
                               done=True)
             return False
         cache = self.state["shared_summary_cache"]
-        previous = cache[self.checkpoint["key"]] if self.checkpoint else None
+        previous = cache[self.turns[start - 1]["key"]] if start else None
         covered_turns = start + len(added)
         description = "Не удалось сократить контекст"
         failed = True
@@ -314,14 +288,13 @@ class SharedSummary:
             if not summary:
                 description += ". Модель вернула пустую сводку."
                 return False
-            checkpoint = added[-1]
-            key = checkpoint["key"]
+            key = added[-1]["key"]
             saved = await self.adapter.save_shared_summary(
                 self.state, self.user, self.model_id, key, summary, **save_options)
             if saved is False:
                 description += ". Исходная история изменилась во время суммаризации."
                 return False
-            self.checkpoint = checkpoint
+            self.checkpoint_turns = covered_turns
             cache[key] = saved if isinstance(saved, str) else summary
             draft["messages"][:] = deepcopy(full_messages)
             applied = self.apply(draft, packet)
@@ -337,84 +310,3 @@ class SharedSummary:
             raise
         finally:
             await self.status(description, done=True, error=failed)
-
-
-def prompt_token_count(usage):
-    if isinstance(usage, dict):
-        for key in ("prompt_tokens", "input_tokens", "prompt_eval_count"):
-            value = usage.get(key)
-            if type(value) is int and value > 0:
-                return value
-    return None
-
-
-def last_prompt_tokens(state, model_id, *, agent_id, summary_key):
-    if agent_id:
-        key = agent_id, model_id
-        current, historical = "agent_usage", "historical_agent_usage"
-    else:
-        key = model_id
-        current, historical = "router_usage", "historical_router_usage"
-    sample = state.get(current, {}).get(key, state.get(historical, {}).get(key))
-    if sample and "summary_key" in sample and sample["summary_key"] == summary_key:
-        return prompt_token_count(sample)
-    return None
-
-
-async def check_initial_stream(response):
-    if not hasattr(response, "body_iterator"):
-        return response
-    stream = aiter(response.body_iterator)
-    prefix, pending, size = [], b"", 0
-    try:
-        async for chunk in stream:
-            prefix.append(chunk)
-            data = chunk if isinstance(chunk, bytes) else chunk.encode()
-            pending += data
-            size += len(data)
-            if size > 65536:
-                break
-            complete = False
-            while b"\n" in pending:
-                line, pending = pending.split(b"\n", 1)
-                if not line.startswith(b"data:"):
-                    continue
-                try:
-                    event = json.loads(line[5:])
-                except ValueError:
-                    complete = True
-                    break
-                if not isinstance(event, dict):
-                    complete = True
-                    break
-                error = event.get("error")
-                if not error and event.get("type") == "response.failed":
-                    error = (event.get("response") or {}).get("error")
-                if error and OVERFLOW_MESSAGES.search(str(error)):
-                    raise ProviderContextOverflow(str(error))
-                choices = event.get("choices") or ()
-                kind = event.get("type")
-                if error or kind and kind not in {"response.created", "response.in_progress"} or any(choice.get("finish_reason") or
-                        any(value for key, value in (choice.get("delta") or {}).items() if key != "role")
-                        for choice in choices):
-                    complete = True
-                    break
-            if complete:
-                break
-    except BaseException:
-        if hasattr(stream, "aclose"):
-            await stream.aclose()
-        raise
-
-    async def replay():
-        try:
-            for chunk in prefix:
-                yield chunk
-            async for chunk in stream:
-                yield chunk
-        finally:
-            if hasattr(stream, "aclose"):
-                await stream.aclose()
-
-    response.body_iterator = replay()
-    return response

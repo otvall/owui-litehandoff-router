@@ -28,6 +28,7 @@ class Filter:
             "priority", "max_parallel_tasks", "parallel_timeout_seconds",
             "tool_result_history_limit", "router_summary_trigger_tokens", "agent_summary_trigger_tokens",
             "shared_summary_context_percent", "context_input_budget_tokens", "context_safety_margin_tokens",
+            "context_window_tokens", "context_response_reserve_tokens",
             mode="before")
         @classmethod
         def reject_boolean_number(cls, value):
