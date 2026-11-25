@@ -125,8 +125,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         preparation, _, _, prep_source = await load_function_module_by_id("prep_" + suffix, (ROOT / "dist/router_preparation.py").read_text())
         prep_source.AGENTS = {agent_id: skill_id}
         preparation.valves.tool_result_history_limit = 1
-        preparation.valves.context_input_budget_tokens = 50000
-        preparation.valves.context_model_input_budgets = {agent_id: 12000}
+        preparation.valves.context_window_tokens = 50000
         self.assertEqual(preparation.valves.base_tool_ids, [])
         metadata = {"chat_id": "local:" + suffix, "message_id": "answer-" + suffix, "session_id": "test-session-" + suffix,
                     "params": {"function_calling": "native", "tool_approval_mode": "full"}, "files": [{"id": "user-file"}],
@@ -376,7 +375,7 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed_calls.count("profile_lookup"), 1)
         self.assertNotIn("profile_finish", failed_calls)
 
-        preparation.valves.context_model_input_budgets[b_id] = 10000
+        preparation.valves.context_window_tokens = 13024
         request_budget, _, filter_seen, filter_events = await next_turn("profile a budget filter")
         self.assertEqual([p["model"] for p in filter_seen], ["router-llm", "router-llm"])
         self.assertIsNone(request_budget.scope["lite_handoff_router"]["active_agent"])

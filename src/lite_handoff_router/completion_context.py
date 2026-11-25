@@ -16,7 +16,7 @@ class CompletionContext:
         self.adapter, self.request, self.user = adapter, request, user
         self.state, self.draft, self.target = state, draft, target
         self.recipient = target or state["router_id"]
-        self.available = input_budget(state["context_policy"], self.recipient, draft)
+        self.available = input_budget(state["context_policy"], draft)
         self.model_id = draft["model"]
         if target:
             info = (draft["metadata"].get("model") or {}).get("info") or {}
@@ -38,15 +38,19 @@ class CompletionContext:
         await self.pack_and_fit_budget(proactive=True)
 
     def proactive_trigger(self, estimate):
+        policy = self.state["context_policy"]
+        window = policy["context_window_tokens"]
+        if window is None or not self.summary.turns:
+            return None
+        percent = policy["shared_summary_trigger_percent"]
+        threshold = (window * percent + 99) // 100
         previous = last_prompt_tokens(
             self.state, self.model_id, agent_id=self.target, summary_key=self.summary.applied_summary_key())
-        executor = "agent" if self.target else "router"
-        threshold = self.state["context_policy"][f"{executor}_summary_trigger_tokens"]
         name = "Агент" if self.target else "Роутер"
-        if previous is not None and previous > threshold:
-            return f"{name}, предыдущий вход {previous} токенов, порог {threshold}"
-        if self.available is None and estimate.total > threshold:
-            return f"{name}, оценка текущего входа {estimate.total} токенов, порог {threshold}"
+        if previous is not None and previous >= threshold:
+            return f"{name}, предыдущий вход {previous} токенов, порог {threshold} ({percent}%)"
+        if estimate.total >= threshold:
+            return f"{name}, оценка текущего входа {estimate.total} токенов, порог {threshold} ({percent}%)"
         return None
 
     async def compact(self, trigger):

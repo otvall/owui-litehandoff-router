@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 import logging
 
+from .context_policy import CONTEXT_MIN_RESPONSE_TOKENS, CONTEXT_SAFETY_MARGIN_TOKENS
 from .protocol import AGENT_HISTORY_HEADING, SHARED_SUMMARY_PREFIX, object_value
 
 MEDIA_PARTS = {"image_url", "input_image", "video_url", "audio_url", "input_audio", "file", "input_file"}
@@ -25,19 +26,17 @@ class ContextBudgetEstimate:
         return self.exact_total if self.exact_total is not None else sum(self.breakdown.values())
 
 
-def input_budget(policy, recipient, draft=None):
-    configured = policy.get("context_model_input_budgets", {}).get(recipient, policy.get("context_input_budget_tokens"))
-    window = policy.get("context_model_window_tokens", {}).get(recipient, policy.get("context_window_tokens"))
-    limits = [configured] if configured is not None else []
-    if window is not None:
-        draft = draft or {}
-        options = draft.get("options")
-        ollama_limit = options.get("num_predict") if isinstance(options, dict) else None
-        output_limits = [draft.get(key) for key in ("max_tokens", "max_completion_tokens", "max_output_tokens")]
-        output_limits.extend((ollama_limit, policy["context_response_reserve_tokens"]))
-        reserve = max(value for value in output_limits if type(value) is int and value > 0)
-        limits.append(window - reserve)
-    return max(0, min(limits) - policy["context_safety_margin_tokens"]) if limits else None
+def input_budget(policy, draft=None):
+    window = policy.get("context_window_tokens")
+    if window is None:
+        return None
+    draft = draft or {}
+    options = draft.get("options")
+    ollama_limit = options.get("num_predict") if isinstance(options, dict) else None
+    output_limits = [draft.get(key) for key in ("max_tokens", "max_completion_tokens", "max_output_tokens")]
+    output_limits.extend((ollama_limit, CONTEXT_MIN_RESPONSE_TOKENS))
+    reserve = max(value for value in output_limits if type(value) is int and value > 0)
+    return max(0, window - reserve - CONTEXT_SAFETY_MARGIN_TOKENS)
 
 
 def estimate_context_budget(draft, *, count_serialized_request=None):

@@ -414,9 +414,10 @@ def group_calls(state):
 
 # Source: context_policy
 """Administrative context policy; no client metadata participates in resolution."""
-from typing import Annotated
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
+CONTEXT_MIN_RESPONSE_TOKENS = 1024
+CONTEXT_SAFETY_MARGIN_TOKENS = 1024
 
 def summary_model_id(state):
     if state.get('worker'):
@@ -427,29 +428,9 @@ class ContextPolicy(BaseModel):
     model_config = ConfigDict(validate_assignment=True, strict=True)
     tool_result_history_limit: int | None = Field(default=None, ge=0)
     shared_summary_model_id: str = ''
-    context_window_tokens: int | None = Field(default=None, gt=0, description='Total model context window, including output')
-    context_model_window_tokens: dict[str, Annotated[int, Field(gt=0)]] = Field(default_factory=dict, description='Total context window overrides by Workspace Model ID')
+    context_window_tokens: int | None = Field(default=None, gt=CONTEXT_MIN_RESPONSE_TOKENS + CONTEXT_SAFETY_MARGIN_TOKENS, description='Total context window shared by Router and agents, including output')
+    shared_summary_trigger_percent: int = Field(default=90, ge=1, le=100, description='Percentage of the shared context window that triggers early summarization')
     shared_summary_context_percent: SkipJsonSchema[int] = Field(default=60, ge=1, le=100)
-    router_summary_trigger_tokens: SkipJsonSchema[int] = Field(default=40000, gt=0)
-    agent_summary_trigger_tokens: SkipJsonSchema[int] = Field(default=40000, gt=0)
-    context_input_budget_tokens: SkipJsonSchema[int | None] = Field(default=None, gt=0)
-    context_model_input_budgets: SkipJsonSchema[dict[str, Annotated[int, Field(gt=0)]]] = Field(default_factory=dict)
-    context_response_reserve_tokens: SkipJsonSchema[int] = Field(default=1024, gt=0)
-    context_safety_margin_tokens: SkipJsonSchema[int] = Field(default=1024, ge=0)
-
-    @model_validator(mode='after')
-    def validate_input_budgets(self):
-        limits = list(self.context_model_input_budgets.values())
-        if self.context_input_budget_tokens is not None:
-            limits.append(self.context_input_budget_tokens)
-        if any((limit <= self.context_safety_margin_tokens for limit in limits)):
-            raise ValueError('Context input budgets must be greater than the safety margin')
-        windows = list(self.context_model_window_tokens.values())
-        if self.context_window_tokens is not None:
-            windows.append(self.context_window_tokens)
-        if any((window <= self.context_response_reserve_tokens + self.context_safety_margin_tokens for window in windows)):
-            raise ValueError('Context window must be greater than the response reserve and safety margin')
-        return self
 
 # Source: runtime
 """Trusted lifecycle state shared by independent uploads through the ASGI scope.
@@ -1660,19 +1641,17 @@ class ContextBudgetEstimate:
     def total(self):
         return self.exact_total if self.exact_total is not None else sum(self.breakdown.values())
 
-def input_budget(policy, recipient, draft=None):
-    configured = policy.get('context_model_input_budgets', {}).get(recipient, policy.get('context_input_budget_tokens'))
-    window = policy.get('context_model_window_tokens', {}).get(recipient, policy.get('context_window_tokens'))
-    limits = [configured] if configured is not None else []
-    if window is not None:
-        draft = draft or {}
-        options = draft.get('options')
-        ollama_limit = options.get('num_predict') if isinstance(options, dict) else None
-        output_limits = [draft.get(key) for key in ('max_tokens', 'max_completion_tokens', 'max_output_tokens')]
-        output_limits.extend((ollama_limit, policy['context_response_reserve_tokens']))
-        reserve = max((value for value in output_limits if type(value) is int and value > 0))
-        limits.append(window - reserve)
-    return max(0, min(limits) - policy['context_safety_margin_tokens']) if limits else None
+def input_budget(policy, draft=None):
+    window = policy.get('context_window_tokens')
+    if window is None:
+        return None
+    draft = draft or {}
+    options = draft.get('options')
+    ollama_limit = options.get('num_predict') if isinstance(options, dict) else None
+    output_limits = [draft.get(key) for key in ('max_tokens', 'max_completion_tokens', 'max_output_tokens')]
+    output_limits.extend((ollama_limit, CONTEXT_MIN_RESPONSE_TOKENS))
+    reserve = max((value for value in output_limits if type(value) is int and value > 0))
+    return max(0, window - reserve - CONTEXT_SAFETY_MARGIN_TOKENS)
 
 def estimate_context_budget(draft, *, count_serialized_request=None):
     messages = draft['messages']
@@ -2446,7 +2425,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if window is not None:
         window.apply(draft['messages'])
         state['hidden_tool_result_count'] = window.hidden_count
-    if input_budget(state.get('context_policy', {}), target or state['router_id'], draft) is not None:
+    if input_budget(state.get('context_policy', {}), draft) is not None:
         protected = list(window.protected_messages) if window is not None else []
         protected.extend((result for _, result in native_pairs(draft['messages'], state)))
         state['shared_summary_protected'] = protected
@@ -2783,7 +2762,7 @@ class CompletionContext:
         self.adapter, self.request, self.user = (adapter, request, user)
         self.state, self.draft, self.target = (state, draft, target)
         self.recipient = target or state['router_id']
-        self.available = input_budget(state['context_policy'], self.recipient, draft)
+        self.available = input_budget(state['context_policy'], draft)
         self.model_id = draft['model']
         if target:
             info = (draft['metadata'].get('model') or {}).get('info') or {}
@@ -2802,14 +2781,18 @@ class CompletionContext:
         await self.pack_and_fit_budget(proactive=True)
 
     def proactive_trigger(self, estimate):
+        policy = self.state['context_policy']
+        window = policy['context_window_tokens']
+        if window is None or not self.summary.turns:
+            return None
+        percent = policy['shared_summary_trigger_percent']
+        threshold = (window * percent + 99) // 100
         previous = last_prompt_tokens(self.state, self.model_id, agent_id=self.target, summary_key=self.summary.applied_summary_key())
-        executor = 'agent' if self.target else 'router'
-        threshold = self.state['context_policy'][f'{executor}_summary_trigger_tokens']
         name = 'Агент' if self.target else 'Роутер'
-        if previous is not None and previous > threshold:
-            return f'{name}, предыдущий вход {previous} токенов, порог {threshold}'
-        if self.available is None and estimate.total > threshold:
-            return f'{name}, оценка текущего входа {estimate.total} токенов, порог {threshold}'
+        if previous is not None and previous >= threshold:
+            return f'{name}, предыдущий вход {previous} токенов, порог {threshold} ({percent}%)'
+        if estimate.total >= threshold:
+            return f'{name}, оценка текущего входа {estimate.total} токенов, порог {threshold} ({percent}%)'
         return None
 
     async def compact(self, trigger):

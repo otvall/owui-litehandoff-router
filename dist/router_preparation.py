@@ -44,9 +44,10 @@ async def bind_tool_context(adapter, tool, messages, check=None, pinned=None, re
 
 # Source: context_policy
 """Administrative context policy; no client metadata participates in resolution."""
-from typing import Annotated
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
+CONTEXT_MIN_RESPONSE_TOKENS = 1024
+CONTEXT_SAFETY_MARGIN_TOKENS = 1024
 
 def summary_model_id(state):
     if state.get('worker'):
@@ -57,29 +58,9 @@ class ContextPolicy(BaseModel):
     model_config = ConfigDict(validate_assignment=True, strict=True)
     tool_result_history_limit: int | None = Field(default=None, ge=0)
     shared_summary_model_id: str = ''
-    context_window_tokens: int | None = Field(default=None, gt=0, description='Total model context window, including output')
-    context_model_window_tokens: dict[str, Annotated[int, Field(gt=0)]] = Field(default_factory=dict, description='Total context window overrides by Workspace Model ID')
+    context_window_tokens: int | None = Field(default=None, gt=CONTEXT_MIN_RESPONSE_TOKENS + CONTEXT_SAFETY_MARGIN_TOKENS, description='Total context window shared by Router and agents, including output')
+    shared_summary_trigger_percent: int = Field(default=90, ge=1, le=100, description='Percentage of the shared context window that triggers early summarization')
     shared_summary_context_percent: SkipJsonSchema[int] = Field(default=60, ge=1, le=100)
-    router_summary_trigger_tokens: SkipJsonSchema[int] = Field(default=40000, gt=0)
-    agent_summary_trigger_tokens: SkipJsonSchema[int] = Field(default=40000, gt=0)
-    context_input_budget_tokens: SkipJsonSchema[int | None] = Field(default=None, gt=0)
-    context_model_input_budgets: SkipJsonSchema[dict[str, Annotated[int, Field(gt=0)]]] = Field(default_factory=dict)
-    context_response_reserve_tokens: SkipJsonSchema[int] = Field(default=1024, gt=0)
-    context_safety_margin_tokens: SkipJsonSchema[int] = Field(default=1024, ge=0)
-
-    @model_validator(mode='after')
-    def validate_input_budgets(self):
-        limits = list(self.context_model_input_budgets.values())
-        if self.context_input_budget_tokens is not None:
-            limits.append(self.context_input_budget_tokens)
-        if any((limit <= self.context_safety_margin_tokens for limit in limits)):
-            raise ValueError('Context input budgets must be greater than the safety margin')
-        windows = list(self.context_model_window_tokens.values())
-        if self.context_window_tokens is not None:
-            windows.append(self.context_window_tokens)
-        if any((window <= self.context_response_reserve_tokens + self.context_safety_margin_tokens for window in windows)):
-            raise ValueError('Context window must be greater than the response reserve and safety margin')
-        return self
 
 # Source: capabilities
 """Native Tools and authenticated MCP sessions owned by one request."""
@@ -2601,17 +2582,10 @@ class Filter:
         max_parallel_tasks: int = Field(default=4, ge=0, description='Maximum parallel tasks; 0 disables delegate_task and keeps ordinary handoff.')
         parallel_timeout_seconds: int = Field(default=300, gt=0)
 
-        @field_validator('priority', 'max_parallel_tasks', 'parallel_timeout_seconds', 'tool_result_history_limit', 'router_summary_trigger_tokens', 'agent_summary_trigger_tokens', 'shared_summary_context_percent', 'context_input_budget_tokens', 'context_safety_margin_tokens', 'context_window_tokens', 'context_response_reserve_tokens', mode='before')
+        @field_validator('priority', 'max_parallel_tasks', 'parallel_timeout_seconds', 'tool_result_history_limit', 'shared_summary_trigger_percent', 'shared_summary_context_percent', 'context_window_tokens', mode='before')
         @classmethod
         def reject_boolean_number(cls, value):
             if isinstance(value, bool):
-                raise ValueError('Boolean is not a numeric setting')
-            return value
-
-        @field_validator('context_model_window_tokens', 'context_model_input_budgets', mode='before')
-        @classmethod
-        def reject_boolean_budgets(cls, value):
-            if isinstance(value, dict) and any((isinstance(limit, bool) for limit in value.values())):
                 raise ValueError('Boolean is not a numeric setting')
             return value
 

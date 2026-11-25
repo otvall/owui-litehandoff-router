@@ -308,7 +308,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if window is not None:
         window.apply(draft["messages"])
         state["hidden_tool_result_count"] = window.hidden_count
-    if input_budget(state.get("context_policy", {}), target or state["router_id"], draft) is not None:
+    if input_budget(state.get("context_policy", {}), draft) is not None:
         protected = list(window.protected_messages) if window is not None else []
         protected.extend(result for _, result in native_pairs(draft["messages"], state))
         state["shared_summary_protected"] = protected
