@@ -155,7 +155,9 @@ class PipeContextBudgetTest(IsolatedAsyncioTestCase):
                     save_shared_summary=AsyncMock(return_value="Shared recap"),
                     save_prompt_usage=AsyncMock(),
                 )
-                result, _, _, _ = await self.invoke(history, policy, recipient=recipient, adapter=adapter)
+                emitter = AsyncMock()
+                result, _, draft, _ = await self.invoke(history, policy, recipient=recipient, adapter=adapter,
+                                                        emitter=emitter)
                 self.assertEqual(result["choices"][0]["message"]["content"], "ok")
                 self.assertEqual(len(sent), 2)
                 self.assertIn("Original response", str(sent[0]))
@@ -163,6 +165,10 @@ class PipeContextBudgetTest(IsolatedAsyncioTestCase):
                 self.assertIn(heading, sent[1][0]["content"])
                 self.assertIn("Shared recap", sent[1][0]["content"])
                 self.assertEqual(sent[1][-1], history[-1])
+                before, after = [estimate_context_budget({**draft, "messages": messages}).total for messages in sent]
+                statuses = [event.args[0]["data"] for event in emitter.await_args_list
+                            if event.args[0]["data"]["action"] == "lite_shared_summary"]
+                self.assertIn(f"Оценка входа: {before} → {after} токенов.", statuses[-1]["description"])
                 adapter.generate_shared_summary.assert_awaited_once()
                 adapter.save_prompt_usage.assert_awaited_once()
                 self.assertEqual(adapter.save_prompt_usage.await_args.args[-1], 42)

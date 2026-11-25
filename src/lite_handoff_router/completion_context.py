@@ -37,7 +37,8 @@ class CompletionContext:
             self.draft["stream_options"] = {
                 **(options if isinstance(options, dict) else {}), "include_usage": True,
             }
-        await self.pack_and_fit_budget(proactive=True)
+        self.pack()
+        await self.fit_budget(proactive=True)
 
     def proactive_trigger(self, estimate):
         policy = self.state["context_policy"]
@@ -57,7 +58,7 @@ class CompletionContext:
 
     async def compact(self, trigger):
         return self.summary is not None and await self.summary.extend(
-            self.draft, self.packet, self.full_messages, trigger=trigger)
+            self.draft, self.packet, self.full_messages, trigger=trigger, pack=self.pack)
 
     def pack(self):
         if self.target and not self.state.get("worker"):
@@ -66,21 +67,18 @@ class CompletionContext:
                 covered_turns=self.summary.applied_turns if self.summary else 0, packet=self.packet,
             )
 
-    async def pack_and_fit_budget(self, *, proactive=False):
-        self.pack()
+    async def fit_budget(self, *, proactive=False):
         estimate = estimate_context_budget(self.draft)
         initial = estimate.total
         if proactive and self.summary and (self.available is None or estimate.total <= self.available):
             trigger = self.proactive_trigger(estimate)
             if trigger and await self.compact(trigger):
-                self.pack()
                 estimate = estimate_context_budget(self.draft)
         if self.available is None:
             return
         while 0 < self.available < estimate.total and await self.compact(
             f"Бюджет запроса, оценка {estimate.total} токенов при лимите {self.available}",
         ):
-            self.pack()
             estimate = estimate_context_budget(self.draft)
         if 0 < self.available < estimate.total:
             estimate, _ = await self.shorten_results(estimate)
@@ -119,7 +117,7 @@ class CompletionContext:
             response = await self.send()
         except ProviderContextOverflow:
             if await self.compact("Переполнение контекста основного запроса"):
-                await self.pack_and_fit_budget()
+                await self.fit_budget()
                 try:
                     response = await self.send()
                 except ProviderContextOverflow:

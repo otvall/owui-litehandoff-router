@@ -9,6 +9,7 @@ import re
 import traceback
 from pathlib import PurePath
 
+from .context_budget import estimate_context_budget
 from .context_policy import summary_model_id
 from .history import (CONVERSATION_HISTORY_TOOL, HISTORICAL_AGENT_TURN, agent_dialogue, analyze,
                       describe_visualizations, exchange_name, ordinary_exchange)
@@ -18,7 +19,6 @@ from .provider_errors import ProviderContextOverflow
 from .summary_response import SummaryGenerationError
 from .tool_history import result_placeholder, result_status, split_tool_result_window
 
-SUMMARY_INPUT_LIMIT = 60000
 SUMMARY_TOOL_RESULT_LIMIT = 2000
 SUMMARY_TURN_TOOL_LIMIT = 8000
 SUMMARY_TOOL_RECORD_LIMIT = 24
@@ -291,10 +291,11 @@ class SharedSummary:
         self.applied_turns = count
         return True
 
-    async def extend(self, draft, packet, full_messages, *, trigger):
+    async def extend(self, draft, packet, full_messages, *, trigger, pack=None):
         start = self.checkpoint_turns
         eligible, blocker = self.eligible_boundaries(full_messages, packet)
-        candidates = self.turns[start:max(eligible, default=0)]
+        last = max(eligible, default=0)
+        candidates = self.turns[start:last]
         if not candidates:
             if start < len(self.turns):
                 reason = f"Безопасная граница сжатия не найдена. {blocker}"
@@ -304,27 +305,27 @@ class SharedSummary:
                 reason = "В истории ещё нет старых ходов. Текущий ход защищён."
             await self.status(f"Сжатие пропущено ({trigger}). {reason}", done=True)
             return False
-        # Open WebUI's estimate for text messages, applied to the summary projection.
+        # Count the model-facing history before agent packing. The preserved
+        # parallel result packet and turns already covered by a summary add no weight.
         turn_sizes = []
-        for turn in candidates:
-            lengths = [len(message["content"]) for message in turn["messages"]]
-            tokens = sum(4 + (max(1, length // 4) if length else 0) for length in lengths)
-            turn_sizes.append((sum(lengths), tokens))
-        total_tokens = sum(tokens for _, tokens in turn_sizes)
-        target_tokens = total_tokens * self.context_percent // 100
-        added, selected_tokens, length = [], 0, 0
-        for turn, (size, tokens) in zip(candidates, turn_sizes):
-            # The oldest whole turn stays eligible even for a small percentage.
-            if length + size > SUMMARY_INPUT_LIMIT or (added and selected_tokens + tokens > target_tokens):
-                break
+        previous_end = eligible[start][1] if start else eligible[1][0]
+        for count in range(start + 1, last + 1):
+            end = eligible[count][1]
+            turn_sizes.append(sum(
+                len(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+                for message in full_messages[previous_end:end] if message != packet
+            ))
+            previous_end = end
+        total_chars = sum(turn_sizes)
+        target_chars = (total_chars * self.context_percent + 99) // 100
+        added, selected_chars = [], 0
+        for turn, turn_chars in zip(candidates, turn_sizes):
             added.append(turn)
-            selected_tokens += tokens
-            length += size
-        if not added:
-            await self.status(f"Сжатие пропущено ({trigger}). Первый непересказанный ход содержит "
-                              f"{size} символов при лимите {SUMMARY_INPUT_LIMIT}.",
-                              done=True)
-            return False
+            selected_chars += turn_chars
+            if selected_chars >= target_chars:
+                break
+        summary_messages = [message for turn in added for message in turn["messages"]]
+        summary_input_chars = sum(len(message["content"]) for message in summary_messages)
         cache = self.state["shared_summary_cache"]
         previous = cache[self.turns[start - 1]["key"]] if start else None
         covered_turns = start + len(added)
@@ -332,17 +333,16 @@ class SharedSummary:
         failed = True
         try:
             await self.status(f"Сжимаю контекст… {trigger}. Модель {self.model_id}. "
-                              f"Ходов {len(added)}, символов {length}. "
-                              f"Токенов по оценке Open WebUI {selected_tokens} из {total_tokens}. "
-                              f"Целевой объём {target_tokens}.", done=False)
+                              f"Ходов {len(added)}. Убираемая история: {selected_chars} из {total_chars} символов. "
+                              f"Цель: {target_chars} символов ({self.context_percent}%). "
+                              f"Материал для сводки: {summary_input_chars} символов.", done=False)
             try:
                 save_options = {}
                 if hasattr(self.adapter, "shared_summary_source_version"):
                     source_version = await self.adapter.shared_summary_source_version(self.state, self.user, covered_turns)
                     save_options = {"covered_turns": covered_turns, "source_version": source_version}
                 summary = await self.adapter.generate_shared_summary(
-                    self.request, self.user, self.model_id,
-                    [message for turn in added for message in turn["messages"]], previous)
+                    self.request, self.user, self.model_id, summary_messages, previous)
             except Exception as error:
                 logging.getLogger(__name__).warning("Shared summary unavailable (%s)", type(error).__name__)
                 if isinstance(error, SummaryGenerationError):
@@ -370,10 +370,16 @@ class SharedSummary:
                 return False
             self.checkpoint_turns = covered_turns
             cache[key] = saved if isinstance(saved, str) else summary
+            before = estimate_context_budget(draft).total
             draft["messages"][:] = deepcopy(full_messages)
             applied = self.apply(draft, packet)
             if applied:
-                description = f"Контекст сокращён. Ходов в общей сводке {self.applied_turns}."
+                if pack is not None:
+                    pack()
+                after = estimate_context_budget(draft).total
+                outcome = "Контекст сокращён." if after < before else "Сводка применена без уменьшения входа."
+                description = (f"{outcome} Ходов в общей сводке {self.applied_turns}. "
+                               f"Оценка входа: {before} → {after} токенов.")
                 failed = False
             else:
                 description += ". Граница сводки не совпала с историей запроса."
