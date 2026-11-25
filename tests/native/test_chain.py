@@ -74,6 +74,9 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
     async def profile_finish(self, __user__: dict, __messages__: list, __files__: list) -> str:
         assert "INLET_A" in str(__messages__)
         assert "ROUTER_PROMPT" not in str(__messages__)
+        if "budget continuation" in str(__messages__):
+            assert "Tool result shortened" in str(__messages__)
+            return "TOOL_RESULT_42:" + __user__["id"]
         assert "Image file read successfully" in str(__messages__)
         assert "data:image/png;base64" in str(__messages__)
         assert any(item.get("id") == "user-file" for item in __files__)
@@ -383,12 +386,18 @@ class NativeChainTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("FILTER_PROMPT", str(filter_events))
 
         _, budget_ctx, budget_seen, budget_events = await next_turn("profile a budget continuation")
-        self.assertEqual([p["model"] for p in budget_seen], ["router-llm", "router-llm", agent_id], budget_events)
-        self.assertIn("Входной контекст превышает бюджет", str(budget_events))
+        self.assertEqual([p["model"] for p in budget_seen], ["router-llm", "router-llm", agent_id, agent_id, agent_id],
+                         budget_events)
+        self.assertIn("сокращены результаты инструментов", str(budget_events))
+        shortened = next(m["content"] for m in budget_seen[3]["messages"]
+                         if m.get("role") == "tool" and "Tool result shortened" in m.get("content", ""))
+        self.assertLess(len(shortened), 1300)
+        self.assertIn("FRESH_RESULT " * 6000, str(budget_ctx["assistant_message"]["output"]))
+        self.assertIn("final: TOOL_RESULT_42", str(budget_ctx["assistant_message"]["output"]))
         budget_calls = [item["name"] for item in budget_ctx["assistant_message"]["output"]
                         if item.get("type") == "function_call"]
         self.assertEqual(budget_calls.count("profile_lookup"), 1)
-        self.assertNotIn("profile_finish", budget_calls)
+        self.assertEqual(budget_calls.count("profile_finish"), 1)
 
         saved_tools = preparation.valves.base_tool_ids
         try:

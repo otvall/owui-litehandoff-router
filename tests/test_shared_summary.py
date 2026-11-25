@@ -183,7 +183,7 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         current = {"role": "user", "content": "Current"}
         source = history + [current]
         for policy_state, projected, expected in (
-            ({"shared_summary_protected": [history[4]]}, source, "Ход 1 содержит защищённый результат"),
+            ({"shared_summary_protected": [history[4]]}, source, "Ход 1 содержит защищённый штатный контекст"),
             ({"shared_summary_unchanged_turns": 0}, source, "Фильтр агента изменил историю с хода 1"),
             ({}, history + [{**current, "content": "Rewritten"}], "Вопрос после хода 1 отличается"),
             ({}, history, "В запросе нет пользовательского сообщения после хода 1"),

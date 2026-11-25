@@ -3,18 +3,20 @@
 from copy import deepcopy
 
 from .agent_history_block import pack_agent_history
-from .context_budget import check_context_budget, estimate_context_budget, input_budget
+from .context_budget import check_context_budget, estimate_context_budget, input_budget, shorten_current_tool_results
 from .context_policy import summary_model_id
 from .observation import check_initial_stream, observe_response
 from .prompt_usage import last_prompt_tokens, prompt_token_count, remember_prompt_usage
+from .protocol import last_user
 from .provider_errors import ProviderContextOverflow
-from .shared_summary import SharedSummary
+from .shared_summary import SharedSummary, emit_context_status
 
 
 class CompletionContext:
     def __init__(self, adapter, request, user, state, draft, target, *, emitter=None):
         self.adapter, self.request, self.user = adapter, request, user
         self.state, self.draft, self.target = state, draft, target
+        self.emitter = emitter
         self.recipient = target or state["router_id"]
         self.available = input_budget(state["context_policy"], draft)
         self.model_id = draft["model"]
@@ -80,21 +82,54 @@ class CompletionContext:
         ):
             self.pack()
             estimate = estimate_context_budget(self.draft)
-        check_context_budget(estimate, self.available, recipient=self.recipient, before=initial,
-                             hidden_results=self.state.get("hidden_tool_result_count", 0))
+        if 0 < self.available < estimate.total:
+            estimate, _ = await self.shorten_results(estimate)
+        self.check_budget(estimate, initial)
+
+    def check_budget(self, estimate, initial):
+        if self.available is not None:
+            check_context_budget(estimate, self.available, recipient=self.recipient, before=initial,
+                                 hidden_results=self.state.get("hidden_tool_result_count", 0))
+
+    async def shorten_results(self, estimate):
+        updated, count = shorten_current_tool_results(self.draft, self.state, estimate, self.available)
+        if count:
+            await emit_context_status(
+                self.emitter, f"Из-за размера контекста сокращены результаты инструментов: {count}. "
+                "Полные результаты остались в чате.", done=True, action="lite_tool_result_budget",
+            )
+        return updated, count
+
+    async def retry_with_shorter_results(self):
+        estimate = estimate_context_budget(self.draft)
+        updated, count = await self.shorten_results(estimate)
+        if count:
+            self.check_budget(updated, estimate.total)
+        return count
 
     async def send(self):
         response = await self.adapter.complete(self.request, self.draft, self.user)
-        return await check_initial_stream(response) if self.summary else response
+        messages = self.draft["messages"]
+        if self.summary or any(message.get("role") == "tool" for message in messages[last_user(messages) + 1:]):
+            return await check_initial_stream(response)
+        return response
 
     async def complete(self):
         try:
             response = await self.send()
         except ProviderContextOverflow:
-            if not await self.compact("Переполнение контекста основного запроса"):
-                raise
-            await self.pack_and_fit_budget()
-            response = await self.send()
+            if await self.compact("Переполнение контекста основного запроса"):
+                await self.pack_and_fit_budget()
+                try:
+                    response = await self.send()
+                except ProviderContextOverflow:
+                    if not await self.retry_with_shorter_results():
+                        raise
+                    response = await self.send()
+            else:
+                if not await self.retry_with_shorter_results():
+                    raise
+                response = await self.send()
         executor = {"kind": "agent", "agent_id": self.target} if self.target else {"kind": "router"}
         if not (self.target or self.summary):
             return observe_response(response, self.state, executor)

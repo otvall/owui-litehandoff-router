@@ -222,3 +222,36 @@ class PipeContextBudgetTest(IsolatedAsyncioTestCase):
                               {"context_window_tokens": 3024},
                               adapter=adapter, model_options={"max_completion_tokens": 1800})
         adapter.complete.assert_not_awaited()
+
+    async def test_current_oversized_tool_result_is_shortened_on_budget_or_provider_overflow(self):
+        call = {"id": "lookup", "type": "function", "function": {"name": "fixture", "arguments": "{}"}}
+        history = [{"role": "user", "content": "Read the result"},
+                   {"role": "assistant", "tool_calls": [call]},
+                   {"role": "tool", "tool_call_id": "lookup", "content": "BEGIN " + "x" * 9000 + " TAIL"}]
+        for window in (3000, None):
+            with self.subTest(window=window):
+                sent = []
+
+                async def send(request, draft, user):
+                    sent.append(deepcopy(draft["messages"]))
+                    if window is None and len(sent) == 1:
+                        async def overflow():
+                            yield b'data: {"error":{"code":"context_length_exceeded"}}'
+
+                        return SimpleNamespace(body_iterator=overflow())
+                    return {"choices": [{"message": {"content": "Answer"}}]}
+
+                emitter = AsyncMock()
+                adapter = SimpleNamespace(user=AsyncMock(return_value=SimpleNamespace(id="owner")),
+                                          complete=AsyncMock(side_effect=send))
+                response, state, _, _ = await self.invoke(history, {"context_window_tokens": window}, adapter=adapter,
+                                                           emitter=emitter)
+                self.assertEqual(response["choices"][0]["message"]["content"], "Answer")
+                self.assertEqual(len(sent), 2 if window is None else 1)
+                self.assertEqual(sent[-1][-2], history[-2])
+                self.assertEqual(sent[-1][-1]["tool_call_id"], "lookup")
+                self.assertIn("Tool result shortened", sent[-1][-1]["content"])
+                self.assertIn("BEGIN", sent[-1][-1]["content"])
+                self.assertNotIn("TAIL", sent[-1][-1]["content"])
+                self.assertEqual(state["source"], history)
+                self.assertEqual(emitter.await_args.args[0]["data"]["action"], "lite_tool_result_budget")

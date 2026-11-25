@@ -208,6 +208,16 @@ def shared_summary_reference(text, covered):
     return "[Exact references from the original dialogue]\n" + "\n".join(groups[-12:]) + "\n\n" + text
 
 
+async def emit_context_status(emitter, description, *, done, error=False, action="lite_shared_summary"):
+    if emitter is not None:
+        try:
+            await emitter({"type": "status", "data": {
+                "action": action, "description": description, "done": done, "error": error,
+            }})
+        except Exception as failure:
+            logging.getLogger(__name__).debug("Context status unavailable (%s)", type(failure).__name__)
+
+
 class SharedSummary:
     def __init__(self, adapter, request, user, state, *, emitter=None):
         self.adapter, self.request, self.user, self.state = adapter, request, user, state
@@ -220,13 +230,7 @@ class SharedSummary:
         self.applied_turns = 0
 
     async def status(self, description, *, done, error=False, action="lite_shared_summary"):
-        if self.emitter is not None:
-            try:
-                await self.emitter({"type": "status", "data": {
-                    "action": action, "description": description, "done": done, "error": error,
-                }})
-            except Exception as failure:
-                logging.getLogger(__name__).debug("Shared summary status unavailable (%s)", type(failure).__name__)
+        await emit_context_status(self.emitter, description, done=done, error=error, action=action)
 
     def eligible_boundaries(self, messages, packet):
         users = [i for i, m in enumerate(messages) if actual_user(m) and m != packet]
@@ -243,7 +247,7 @@ class SharedSummary:
             if messages[users[count - 1]].get("content") != turn["source_user"].get("content"):
                 return boundaries, f"История в запросе к модели отличается от исходной в ходе {count}."
             if any(message in protected for message in messages[users[count - 1]:users[count]]):
-                return boundaries, f"Ход {count} содержит защищённый результат инструмента или штатный контекст Open WebUI."
+                return boundaries, f"Ход {count} содержит защищённый штатный контекст Open WebUI."
             if messages[users[count]].get("content") != turn["next_user"].get("content"):
                 return boundaries, f"Вопрос после хода {count} отличается от исходного."
             boundaries[count] = (users[0], users[count])

@@ -33,7 +33,6 @@ class ToolResultWindow:
         self.entries = []
         self.native_keys = []
         self.packets = {}
-        self.protected_messages = []
         self.hidden_count = 0
 
     def capture(self, messages, native_origins, nested_origins=None):
@@ -70,7 +69,7 @@ class ToolResultWindow:
                            for child, original in zip(children, expected["tool_results"]))):
                 raise ValueError("Destination inlet changed historical handoff packet under the result limit")
             packets[ordinal] = deepcopy(found)
-        hidden, kept = split_tool_result_window(self.entries, self.limit)
+        hidden, _ = split_tool_result_window(self.entries, self.limit)
         self.hidden_count = len(hidden)
         hidden_batches = set()
         for _, ordinal, child in hidden:
@@ -88,8 +87,6 @@ class ToolResultWindow:
             r = pairs[ordinal][2]
             messages[r] = {"role": "tool", "tool_call_id": messages[r]["tool_call_id"],
                            "content": json.dumps(packet, ensure_ascii=False)}
-        protected_ordinals = {ordinal for _, ordinal, _ in kept}
-        self.protected_messages = [messages[pairs[ordinal][2]] for ordinal in protected_ordinals]
         # Synthetic images are grouped by OWUI; never remove user attachments.
         previous = None
         remove = []

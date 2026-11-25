@@ -817,7 +817,6 @@ class ToolResultWindow:
         self.entries = []
         self.native_keys = []
         self.packets = {}
-        self.protected_messages = []
         self.hidden_count = 0
 
     def capture(self, messages, native_origins, nested_origins=None):
@@ -848,7 +847,7 @@ class ToolResultWindow:
             if not isinstance(children, list) or len(children) != len(expected['tool_results']) or {k: v for k, v in found.items() if k != 'tool_results'} != {k: v for k, v in expected.items() if k != 'tool_results'} or any((not isinstance(child, dict) or set(child) != set(original) or {k: v for k, v in child.items() if k != 'result'} != {k: v for k, v in original.items() if k != 'result'} for child, original in zip(children, expected['tool_results']))):
                 raise ValueError('Destination inlet changed historical handoff packet under the result limit')
             packets[ordinal] = deepcopy(found)
-        hidden, kept = split_tool_result_window(self.entries, self.limit)
+        hidden, _ = split_tool_result_window(self.entries, self.limit)
         self.hidden_count = len(hidden)
         hidden_batches = set()
         for _, ordinal, child in hidden:
@@ -864,8 +863,6 @@ class ToolResultWindow:
         for ordinal, packet in packets.items():
             r = pairs[ordinal][2]
             messages[r] = {'role': 'tool', 'tool_call_id': messages[r]['tool_call_id'], 'content': json.dumps(packet, ensure_ascii=False)}
-        protected_ordinals = {ordinal for _, ordinal, _ in kept}
-        self.protected_messages = [messages[pairs[ordinal][2]] for ordinal in protected_ordinals]
         previous = None
         remove = []
         for index, message in enumerate(messages):

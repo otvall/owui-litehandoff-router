@@ -14,7 +14,6 @@ from .resources import ResourceScope
 from .terminals import terminal_binding, prepare_terminal_scope, is_terminal_tool
 from .native_context import native_pairs, native_view_keys
 from .tool_history import ToolResultWindow
-from .context_budget import input_budget
 from .context_policy import summary_model_id
 from .shared_summary import summary_projection_turns
 
@@ -308,10 +307,8 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if window is not None:
         window.apply(draft["messages"])
         state["hidden_tool_result_count"] = window.hidden_count
-    if input_budget(state.get("context_policy", {}), draft) is not None:
-        protected = list(window.protected_messages) if window is not None else []
-        protected.extend(result for _, result in native_pairs(draft["messages"], state))
-        state["shared_summary_protected"] = protected
+    if summary_model_id(state):
+        state["shared_summary_protected"] = [result for _, result in native_pairs(draft["messages"], state)]
     compose_system(draft["messages"], primary_systems)
     for name, tool in list(tools.items()):
         if not isinstance(tool, dict) or (tool.get("spec") or {}).get("name") != name:

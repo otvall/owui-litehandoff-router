@@ -5,9 +5,18 @@ import json
 import logging
 
 from .context_policy import CONTEXT_MIN_RESPONSE_TOKENS, CONTEXT_SAFETY_MARGIN_TOKENS
-from .protocol import AGENT_HISTORY_HEADING, SHARED_SUMMARY_PREFIX, object_value
+from .history import CONVERSATION_HISTORY_TOOL, HISTORICAL_AGENT_TURN
+from .native_context import NATIVE_CONTEXT_NAMES, native_record
+from .protocol import AGENT_HISTORY_HEADING, SHARED_SUMMARY_PREFIX, completed_pairs, last_user, object_value
+from .skills import READERS
+from .tool_history import result_status
 
 MEDIA_PARTS = {"image_url", "input_image", "video_url", "audio_url", "input_audio", "file", "input_file"}
+TOOL_BUDGET_EXCLUSIONS = READERS | NATIVE_CONTEXT_NAMES | {
+    CONVERSATION_HISTORY_TOOL, HISTORICAL_AGENT_TURN, "lite_delegate", "lite_parallel", "delegate_task",
+}
+TOOL_BUDGET_EXCERPT_CHARS = 1024
+TOOL_BUDGET_NOTICE = "[Tool result shortened to fit the context window"
 BUDGET_LOG = logging.getLogger(__name__)
 
 
@@ -84,6 +93,49 @@ def estimate_context_budget(draft, *, count_serialized_request=None):
         if type(exact) is int and exact >= 0:
             return ContextBudgetEstimate(breakdown, "exact", exact)
     return ContextBudgetEstimate(breakdown, "estimated")
+
+
+def shorten_current_tool_results(draft, state, estimate, available):
+    """Make a model-only copy of oversized ordinary results in the current turn."""
+    messages = draft["messages"]
+    first = last_user(messages) + 1
+    if not first:
+        return estimate, 0
+    current = messages[first:]
+    candidates = []
+    for i, n, r in completed_pairs(current):
+        call, result = current[i]["tool_calls"][n], current[r]
+        name = (call.get("function") or {}).get("name")
+        content = result.get("content")
+        if (not name or name in TOOL_BUDGET_EXCLUSIONS or native_record(state, call, result)
+                or (isinstance(content, str) and content.startswith(TOOL_BUDGET_NOTICE))):
+            continue
+        size = estimate_context_budget({"messages": [result]}).total
+        if size > 1024:
+            candidates.append((size, first + r, result))
+    shortened = []
+    for _, index, original in sorted(candidates, reverse=True):
+        notice = f"{TOOL_BUDGET_NOTICE}; full result retained in chat; status={result_status(original.get('content'))}]"
+        replacement = {key: original[key] for key in ("role", "tool_call_id", "name") if key in original}
+        content = original.get("content")
+        excerpt = content[:TOOL_BUDGET_EXCERPT_CHARS] if isinstance(content, str) else ""
+        replacement["content"] = notice + ("\n" + excerpt if excerpt else "")
+        messages[index] = replacement
+        shortened.append((index, notice))
+        if available is not None:
+            estimate = estimate_context_budget(draft)
+            if estimate.total <= available:
+                break
+    if available is not None:
+        for index, notice in shortened:
+            if estimate.total <= available:
+                break
+            if messages[index]["content"] != notice:
+                messages[index]["content"] = notice
+                estimate = estimate_context_budget(draft)
+    elif shortened:
+        estimate = estimate_context_budget(draft)
+    return estimate, len(shortened)
 
 
 def check_context_budget(estimate, available, *, recipient, before, hidden_results):
