@@ -2,12 +2,14 @@ import copy
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from lite_handoff_router.history import HISTORICAL_AGENT_TURN, agent_projection, router_projection
 from lite_handoff_router.model_execution import prepare_model
 from lite_handoff_router.protocol import completed_pairs
 from lite_handoff_router.runtime import begin
 from lite_handoff_router.native_context import capture_native_context
+from lite_handoff_router.shared_summary import SharedSummary
 from lite_handoff_router.tool_history import ToolResultWindow
 from tests.test_history import turn
 from tests.test_protocol import call
@@ -142,6 +144,28 @@ class ToolHistoryTest(unittest.TestCase):
 
 
 class ToolHistoryIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_retained_old_result_does_not_block_shared_summary(self):
+        adapter = Adapter()
+        adapter.shared_summary_cache = AsyncMock(return_value={})
+        adapter.generate_shared_summary = AsyncMock(return_value="Old turn summary")
+        adapter.save_shared_summary = AsyncMock(return_value="Old turn summary")
+        current = {"role": "user", "content": "next"}
+        source = turn("a", "RETAINED_RESULT") + [current]
+        request = SimpleNamespace(scope={}, state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace(
+            MODELS={"llm": {"owned_by": "openai"}})))
+        body, metadata = {"model": "router", "messages": source}, {}
+        state = begin(request, body, metadata, "u", {}, [], [], [], context_policy={
+            "tool_result_history_limit": 1, "shared_summary_model_id": "summary", "context_window_tokens": 3000,
+        })
+        draft, _ = await prepare_model(adapter, request, body, User(), metadata, state, "llm", {})
+        self.assertIn("RETAINED_RESULT", str(draft["messages"]))
+        summary = SharedSummary(adapter, request, User(), state)
+        await summary.load(draft)
+        self.assertTrue(await summary.extend(draft, None, copy.deepcopy(draft["messages"]), trigger="Бюджет"))
+        self.assertIn("Old turn summary", str(draft["messages"]))
+        self.assertNotIn("RETAINED_RESULT", str(draft["messages"]))
+        self.assertEqual(state["source"], source)
+
     async def test_agent_inlet_edits_are_limited_before_callable_binding(self):
         seen = []
 

@@ -22,13 +22,17 @@ def result_placeholder(content):
     return "[Tool result hidden by history limit; original retained in chat; status=" + result_status(content) + "]"
 
 
+def split_tool_result_window(entries, limit):
+    ordered = sorted(entries)
+    return (ordered[:-limit], ordered[-limit:]) if limit else (ordered, [])
+
+
 class ToolResultWindow:
     def __init__(self, limit):
         self.limit = limit
         self.entries = []
         self.native_keys = []
         self.packets = {}
-        self.protected_messages = []
         self.hidden_count = 0
 
     def capture(self, messages, native_origins, nested_origins=None):
@@ -65,8 +69,7 @@ class ToolResultWindow:
                            for child, original in zip(children, expected["tool_results"]))):
                 raise ValueError("Destination inlet changed historical handoff packet under the result limit")
             packets[ordinal] = deepcopy(found)
-        ordered = sorted(self.entries)
-        hidden = ordered[:-self.limit] if self.limit else ordered
+        hidden, _ = split_tool_result_window(self.entries, self.limit)
         self.hidden_count = len(hidden)
         hidden_batches = set()
         for _, ordinal, child in hidden:
@@ -84,8 +87,6 @@ class ToolResultWindow:
             r = pairs[ordinal][2]
             messages[r] = {"role": "tool", "tool_call_id": messages[r]["tool_call_id"],
                            "content": json.dumps(packet, ensure_ascii=False)}
-        protected_ordinals = {ordinal for _, ordinal, _ in ordered[-self.limit:]} if self.limit else set()
-        self.protected_messages = [messages[pairs[ordinal][2]] for ordinal in protected_ordinals]
         # Synthetic images are grouped by OWUI; never remove user attachments.
         previous = None
         remove = []

@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
-from tests.context_helpers import work_results
+from tests.context_helpers import catalog_result, work_results
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,7 +38,8 @@ class NativeParallelContextTest(unittest.IsolatedAsyncioTestCase):
                                                 "Worker test", role="admin")
         self.app = FastAPI()
         self.app.state.redis = None
-        self.app.state.MODELS = {"worker-router-llm": {"id": "worker-router-llm", "owned_by": "openai"}}
+        self.router_llm, self.agent_base = "router-base-" + suffix, "agent-base-" + suffix
+        self.app.state.MODELS = {self.router_llm: {"id": self.router_llm, "owned_by": "openai"}}
         self.app.state.worker_contexts = []
         self.request = Request({"type": "http", "app": self.app, "headers": [], "method": "POST",
                                 "path": "/api/chat/completions"})
@@ -84,10 +85,10 @@ class Tools:
                 source.AGENTS = {self.agent: self.route}
                 self.preparation = module
             else:
-                await Functions.update_function_valves_by_id(identifier, {"orchestrator_model_id": "worker-router-llm"})
+                await Functions.update_function_valves_by_id(identifier, {"orchestrator_model_id": self.router_llm})
         for identifier, base, system, meta in (
             (self.router, pipe_id, "PARENT_SYSTEM", {"toolIds": [], "skillIds": []}),
-            (self.agent, "worker-base", "AGENT_OWN_SYSTEM", {"toolIds": [tool_id], "skillIds": [self.skill]}),
+            (self.agent, self.agent_base, "AGENT_OWN_SYSTEM", {"toolIds": [tool_id], "skillIds": [self.skill]}),
         ):
             row = await Models.insert_new_model(ModelForm(id=identifier, name=identifier, base_model_id=base,
                                                           params={"system": system}, meta=meta), self.user.id)
@@ -124,23 +125,24 @@ class Tools:
         await middleware.process_chat_response(response, ctx)
         return ctx
 
-    async def parent(self, question):
+    async def parent(self, question, actor=None):
         from open_webui.models.chats import Chats, ChatForm
 
+        actor = actor or self.user
         chat_id, mid, uid = str(uuid4()), str(uuid4()), str(uuid4())
         messages = [{"role": "user", "content": "PARENT_EARLIER: FTP-42, 2026-11-01–2026-11-30"},
                     {"role": "assistant", "content": "PARENT_VISIBLE_ANSWER"},
                     {"role": "user", "content": question}]
-        await Chats.insert_new_chat(chat_id, self.user.id, ChatForm(chat={"history": {"currentId": mid, "messages": {
+        await Chats.insert_new_chat(chat_id, actor.id, ChatForm(chat={"history": {"currentId": mid, "messages": {
             uid: {"id": uid, "role": "user", "content": question, "childrenIds": [mid]},
             mid: {"id": mid, "role": "assistant", "content": "", "done": False, "parentId": uid},
         }}}))
-        metadata = {"user_id": self.user.id, "chat_id": chat_id, "message_id": mid,
+        metadata = {"user_id": actor.id, "chat_id": chat_id, "message_id": mid,
                     "session_id": "worker-test", "params": {"tool_approval_mode": "full"},
-                    "files": [{"id": self.file_id}]}
+                    "files": [{"id": self.file_id}] if actor.id == self.user.id else []}
         self.request.state.metadata = metadata
         body = {"model": self.router, "stream": True, "messages": messages, "metadata": metadata}
-        await self.preparation.inlet(body, self.request, self.user.model_dump(), metadata)
+        await self.preparation.inlet(body, self.request, actor.model_dump(), metadata)
         return body, metadata
 
     async def provider(self, request, form_data, user):
@@ -151,8 +153,11 @@ class Tools:
         messages = payload["messages"]
         results = work_results(messages)
         name, args, answer = None, {}, "PARENT_FINAL"
-        if payload["model"] == "worker-router-llm":
-            if not results:
+        if payload["model"] == self.router_llm:
+            plan = getattr(self, "routing_plan", None)
+            if plan:
+                name, args = plan(payload)
+            elif not results:
                 name, args = "delegate_task", self.assignments[0]
             elif getattr(self, "final_handoff", False):
                 name, args = "lite_delegate", {"agent_id": self.agent}
@@ -183,6 +188,114 @@ class Tools:
                     "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}) + "\n\n"
             yield "data: [DONE]\n\n"
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    async def test_shared_profile_runs_native_handoff_and_parallel_with_personal_catalog_and_rollback(self):
+        from open_webui.models.access_grants import AccessGrants
+        from open_webui.models.auths import Auths
+        from open_webui.models.models import Models, ModelForm
+        from open_webui.models.skills import Skills, SkillForm
+        from open_webui.utils import chat
+
+        suffix = uuid4().hex[:10]
+        shared, other = "shared-" + suffix, "second-" + suffix
+        path, private_path = "profiles/first.md", "profiles/second.md"
+        owner = self.user
+        alice, bob = [await Auths.insert_new_auth(f"{name}-{suffix}@example.test", "unused-test-password",
+                                                  name, role="user") for name in ("alice", "bob")]
+        row = await Models.insert_new_model(ModelForm(id=other, name=other, params={}, meta={}), owner.id)
+        self.app.state.MODELS[other] = {"id": other, "owned_by": "openai", "info": row.model_dump()}
+        base_ids = {self.app.state.MODELS[self.router]["info"]["base_model_id"], self.router_llm, self.agent_base}
+        for identifier in base_ids:
+            if not await Models.get_model_by_id(identifier):
+                await Models.insert_new_model(ModelForm(id=identifier, name=identifier, params={}, meta={}), owner.id)
+        for actor, target in ((alice, self.agent), (bob, other)):
+            for resource in {self.router, target, *base_ids}:
+                await AccessGrants.grant_access("model", resource, "user", actor.id, "read")
+        files = [{"path": file_path, "content": content} for file_path, content in (
+            ("SKILL.md", "Shared routing"),
+            ("agents.json", json.dumps({self.agent: {"path": path, "description": "First description"},
+                                       other: {"path": private_path, "description": "Second description"}})),
+            (path, "FIRST_PROFILE_BODY"),
+            (private_path, "PRIVATE_SECOND_PROFILE"),
+        )]
+        folder = await Skills.insert_new_skill(owner.id, SkillForm(id=shared, name=shared, files=files))
+        self.preparation.valves.routing_skill_id = shared
+        self.assignments = [{"agent_id": self.agent, "task": "Profile folder checks"}]
+
+        def assert_catalog(payload, target, profile, other_profile):
+            catalog = catalog_result(payload["messages"])
+            self.assertIn(f"<agent_id>{target}</agent_id>", catalog)
+            self.assertIn(f"<path>{profile}</path>", catalog)
+            self.assertNotIn(other_profile, catalog)
+            self.assertNotIn("agents.json", catalog)
+            for schema in payload["tools"]:
+                if schema["function"]["name"] in ("lite_delegate", "delegate_task"):
+                    self.assertEqual(schema["function"]["parameters"]["properties"]["agent_id"]["enum"], [target])
+
+        def run_first(payload):
+            assert_catalog(payload, self.agent, path, private_path)
+            results = work_results(payload["messages"])
+            if not results:
+                return "read_skill_file", {"id": shared, "path": path}
+            self.assertIn("FIRST_PROFILE_BODY", str(results))
+            if flow == "parallel" and len(results) == 1:
+                return "delegate_task", self.assignments[0]
+            return "lite_delegate", {"agent_id": self.agent}
+
+        async def run(actor, question):
+            body, metadata = await self.parent(question, actor)
+            with patch.object(chat, "generate_openai_chat_completion", self.provider):
+                await self.run_loop(self.request, body, actor, metadata)
+            return self.request.scope["lite_handoff_router"]
+
+        def run_second(payload):
+            assert_catalog(payload, other, private_path, path)
+            return None, {}
+
+        self.routing_plan = run_second
+        second = await run(bob, "Show my specialist")
+        self.assertEqual(set(second["registry"]), {other})
+        for flow in ("handoff", "parallel"):
+            self.routing_plan = run_first
+            start = len(self.seen)
+            current = await run(alice, "Run folder " + flow)
+            self.assertEqual(current["active_agent"], self.agent)
+            if flow == "parallel":
+                self.assertEqual(current["parallel"]["status"], "completed")
+                self.assertEqual(len(self.children), 1)
+            self.assertTrue(any(p["model"] == self.agent for p in self.seen[start:]))
+            for payload in (p for p in self.seen[start:] if p["model"] == self.agent):
+                self.assertNotIn("FIRST_PROFILE_BODY", str(payload["messages"]))
+                self.assertNotIn(path, str(payload["messages"]))
+
+        await Skills.update_skill_by_id(shared, {
+            "operations": [{"op": "put", "path": "agents.json", "content": "{"}],
+            "expected_version_id": folder.version_id,
+        }, user_id=owner.id)
+
+        def without_routes(payload):
+            self.assertIn("<routing_skills />", catalog_result(payload["messages"]))
+            self.assertFalse({"lite_delegate", "delegate_task"} & {
+                schema["function"]["name"] for schema in payload["tools"]})
+            return None, {}
+
+        self.routing_plan = without_routes
+        damaged = await run(alice, "General question with malformed index")
+        self.assertEqual(damaged["registry"], {})
+        self.assertTrue(damaged["diagnostics"])
+        self.preparation.valves.routing_skill_id = ""
+
+        def legacy(payload):
+            catalog = catalog_result(payload["messages"])
+            self.assertIn(f"<id>{self.route}</id>", catalog)
+            self.assertNotIn("<path>", catalog)
+            if not work_results(payload["messages"]):
+                return "view_skill", {"id": self.route}
+            return "lite_delegate", {"agent_id": self.agent}
+
+        self.routing_plan = legacy
+        rollback = await run(alice, "Profile after rollback")
+        self.assertEqual(rollback["active_agent"], self.agent)
 
     async def test_same_agent_exports_keep_assignment_across_native_child_and_tool_loop(self):
         from open_webui.utils import chat
@@ -263,8 +376,8 @@ class Tools:
     async def test_worker_budget_is_checked_before_dispatching_to_the_model(self):
         from open_webui.utils import chat
 
-        self.preparation.valves.context_input_budget_tokens = 50000
-        self.preparation.valves.context_model_input_budgets = {self.agent: 3100}
+        # Leave room for Router's catalog and Tool schemas; the long worker assignment still exceeds its budget.
+        self.preparation.valves.context_window_tokens = 5000
         self.assignments = [{"agent_id": self.agent, "task": "oversized " * 1000},
                             {"agent_id": self.agent, "task": "Keep a short assignment"}]
         body, metadata = await self.parent("PARENT_REQUEST: two assignments")
@@ -280,8 +393,7 @@ class Tools:
         from open_webui.utils import chat
 
         self.preparation.valves.tool_result_history_limit = 0
-        self.preparation.valves.context_input_budget_tokens = 30000
-        self.preparation.valves.context_model_input_budgets = {self.agent: 12000}
+        self.preparation.valves.context_window_tokens = 13024
         self.final_handoff = True
         self.assignments = [{"agent_id": self.agent, "task": "FIRST_FORECAST: FTP-42"},
                             {"agent_id": self.agent, "task": "SECOND_FORECAST: FTP-99"}]
@@ -386,7 +498,7 @@ class Tools:
 
         async def provider(request, form_data, user):
             nonlocal parent_count
-            if form_data["model"] != "worker-router-llm":
+            if form_data["model"] != self.router_llm:
                 return await self.provider(request, form_data, user)
             parent_count += 1
             if parent_count == 1:

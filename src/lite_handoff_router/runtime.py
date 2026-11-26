@@ -15,7 +15,8 @@ RECEIPT = "lite_router"
 
 
 def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids,
-          *, max_parallel_tasks=4, parallel_timeout_seconds=300, context_policy=None, chat_skill_ids=()):
+          *, max_parallel_tasks=4, parallel_timeout_seconds=300, context_policy=None, chat_skill_ids=(),
+          routing_skill_id=""):
     state = {
         "request_id": uuid4().hex, "user_id": user_id,
         "chat_id": metadata.get("chat_id"), "message_id": metadata.get("message_id"),
@@ -24,6 +25,7 @@ def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, ski
         "diagnostics": diagnostics, "base_tool_ids": list(tool_ids),
         "base_skill_ids": list(skill_ids), "source": deepcopy(body.get("messages", [])),
         "chat_skill_ids": list(chat_skill_ids),
+        "routing_skill_id": routing_skill_id,
         "phase": "router", "pending": [], "active_agent": None,
         "skill_scope": None,
         "original_source": deepcopy(body.get("messages", [])),

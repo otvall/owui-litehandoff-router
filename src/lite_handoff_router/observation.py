@@ -70,15 +70,34 @@ async def check_initial_stream(response):
     return response
 
 
-def observe_response(response, state, executor, *, on_usage=None):
+def routing_completion_status(event):
+    if provider_event_error(event) or event.get("type") in {"response.failed", "response.incomplete"}:
+        return "failed"
+    if event.get("type") == "response.completed":
+        output = (event.get("response") or {}).get("output") or []
+        return "tools_pending" if any(item.get("type") == "function_call" for item in output) else "completed"
+    reasons = {choice.get("finish_reason") for choice in event.get("choices") or ()}
+    if reasons & {"length", "content_filter"}:
+        return "failed"
+    if reasons & {"tool_calls", "function_call"}:
+        return "tools_pending"
+    if "stop" in reasons:
+        return "completed"
+    return None
+
+
+def observe_response(response, state, executor, *, on_usage=None, on_finish=None):
     state["generation"] = state.get("generation", 0) + 1
     generation = state["generation"]
     calls = {}
     finished = False
     usage = None
+    routing_status = None
 
     def event(data):
-        nonlocal usage
+        nonlocal usage, routing_status
+        if on_finish:
+            routing_status = routing_completion_status(data) or routing_status
         if on_usage:
             reported = data.get("usage")
             if not reported and data.get("type") == "response.completed":
@@ -165,5 +184,7 @@ def observe_response(response, state, executor, *, on_usage=None):
                 await original.aclose()
             if on_usage:
                 await on_usage(usage)
+            if on_finish:
+                await on_finish(routing_status or "incomplete")
     response.body_iterator = stream()
     return response

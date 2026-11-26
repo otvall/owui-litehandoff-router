@@ -14,9 +14,35 @@ TEXT_FIELDS = (
 )
 EXAMPLE_FIELDS = ("positive_examples", "negative_examples")
 TOKEN = re.compile(r"\{\{([A-Z_]+)\}\}")
+SKILL_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
-def render(fields: dict, template: str) -> str:
+def routing_name_candidates(model_id, suggested_name, number=1):
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", model_id.strip()).strip("-").lower()
+    if not slug:
+        slug = suggested_name.removeprefix("route-") if suggested_name.startswith("route-") else ""
+        if not SKILL_NAME.fullmatch(slug):
+            raise ValueError("Provide an agreed ASCII fallback as skill_name (route-<slug>)")
+    base = "route-" + slug
+    while True:
+        suffix = "" if number == 1 else f"-{number}"
+        yield base[:64 - len(suffix)].rstrip("-") + suffix
+        number += 1
+
+
+def matching_routing_name(model_id, suggested_name, name):
+    if not isinstance(name, str) or not name:
+        return False
+    candidates = routing_name_candidates(model_id, suggested_name)
+    if name == next(candidates):
+        return True
+    suffix = re.search(r"-([1-9][0-9]{0,8})$", name)
+    if not suffix or int(suffix[1]) < 2:
+        return False
+    return name == next(routing_name_candidates(model_id, suggested_name, int(suffix[1])))
+
+
+def render(fields: dict, template: str, *, resolved_name=None) -> str:
     """Return SKILL.md. Both example lists must already be agreed with the author."""
     if not isinstance(fields, dict):
         raise ValueError("Input must be a JSON object")
@@ -41,7 +67,7 @@ def render(fields: dict, template: str) -> str:
             raise ValueError(name + " must contain non-empty strings")
         values[name] = [item.strip() for item in examples]
 
-    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", values["skill_name"]) or len(values["skill_name"]) > 64:
+    if not SKILL_NAME.fullmatch(values["skill_name"]) or len(values["skill_name"]) > 64:
         raise ValueError("skill_name must be a lowercase hyphenated name, at most 64 characters")
     if len(values["routing_description"]) > 1024:
         raise ValueError("routing_description must be at most 1024 characters")
@@ -52,6 +78,11 @@ def render(fields: dict, template: str) -> str:
         items = value if isinstance(value, list) else [value]
         if any("{{" in item or "}}" in item for item in items):
             raise ValueError("Replace all template placeholders in input fields")
+
+    model_id, suggested = values["agent_model_id"], values["skill_name"]
+    name = resolved_name or suggested
+    values["skill_name"] = (name if matching_routing_name(model_id, suggested, name)
+                            else next(routing_name_candidates(model_id, suggested)))
 
     # Model ID is a control input for authoring Tools, not part of the profile.
     expected = Counter({name.upper(): 1 for name in TEXT_FIELDS + EXAMPLE_FIELDS if name != "agent_model_id"})

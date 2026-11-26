@@ -128,10 +128,11 @@ def skill_is_current(messages, exchange, skill_ids):
 
 
 def reconstruct(messages, selected, *, images=False, positions=None, assistant_content=None,
-                historical_turns=None):
+                historical_turns=None, call_arguments=None):
     calls = {(e.batch, e.call_index) for e in selected}
     results = {e.result_index for e in selected}
     historical_turns = historical_turns or {}
+    call_arguments = call_arguments or {}
     output = []
     for i, message in enumerate(messages):
         role = message.get("role")
@@ -145,7 +146,14 @@ def reconstruct(messages, selected, *, images=False, positions=None, assistant_c
             continue
         if role == "assistant":
             original_calls = message.get("tool_calls") or []
-            kept = [deepcopy(call) for n, call in enumerate(original_calls) if (i, n) in calls]
+            kept = []
+            for n, call in enumerate(original_calls):
+                if (i, n) in calls:
+                    call = deepcopy(call)
+                    replacement = call_arguments.get((i, n))
+                    if replacement is not None:
+                        call["function"]["arguments"] = replacement
+                    kept.append(call)
             content = deepcopy((assistant_content or {}).get(i, message.get("content")) or "")
             if not kept and not content:
                 continue
@@ -164,12 +172,12 @@ def reconstruct(messages, selected, *, images=False, positions=None, assistant_c
     return output
 
 
-def router_projection(state, tool_names, skill_ids, *, window=None):
+def router_projection(state, tool_names, skill_ids, *, window=None, routing_paths=()):
     messages = state["source"]
     boundary = state.get("user_boundary", last_user(messages))
     exchanges = analyze(messages, current_boundary=boundary, audit=state.get("audit", []))
     exchanges.sort(key=lambda e: (e.batch, e.call_index))
-    selected, overrides, packets = [], {}, {}
+    selected, overrides, packets, route_stubs = [], {}, {}, {}
     handoffs = historical_handoffs(messages, exchanges, boundary)
     by_turn = {e.turn: (e, marker) for e, marker in handoffs}
     for exchange, marker in handoffs:
@@ -198,15 +206,35 @@ def router_projection(state, tool_names, skill_ids, *, window=None):
         belongs = (destination is not None and exchange.executor == {
             "kind": "agent", "agent_id": destination[1]["agent_id"]})
         if name in READERS:
+            arguments = object_value(call.get("function", {}).get("arguments"))
+            skill_id = arguments.get("id")
+            shared = (bool(state.get("routing_skill_id")) and isinstance(skill_id, str)
+                      and skill_id.lower() == state["routing_skill_id"])
+            if shared and exchange.batch > boundary:
+                # OWUI strips extra Tool arguments, so a supplied path cannot narrow an overview.
+                path = None if name == "view_skill" else arguments.get("path")
+                if path is None:
+                    allowed = bool(routing_paths) and all(entry.get("path") in routing_paths
+                                                           for entry in state["registry"].values())
+                else:
+                    allowed = isinstance(path, str) and path in routing_paths
+                if not allowed:
+                    if result_status(content) != "error":
+                        continue
+                    selected.append(exchange)
+                    route_stubs[exchange.batch, exchange.call_index] = json.dumps({"id": skill_id})
+                    overrides[exchange.result_index] = {"error": "Routing profile is outside the current scope"}
+                    continue
             if (exchange.batch > boundary and exchange.executor.get("kind") == "router"
                     and name in tool_names and skill_is_current(messages, exchange, skill_ids)):
                 selected.append(exchange)
                 continue
-            fact = {"tool": name, "skill_id": object_value(call.get("function", {}).get("arguments")).get("id"),
-                    "status": result_status(content)}
+            fact = {"tool": name, "skill_id": skill_id, "status": result_status(content)}
             if belongs:
                 packets[destination[0].result_index].setdefault("skill_reads", []).append(fact)
                 continue
+            if shared:
+                route_stubs[exchange.batch, exchange.call_index] = json.dumps({"id": skill_id})
             overrides[exchange.result_index] = fact
         elif belongs:
             packet_index = destination[0].result_index
@@ -218,7 +246,7 @@ def router_projection(state, tool_names, skill_ids, *, window=None):
             continue
         selected.append(exchange)
     positions = {}
-    output = reconstruct(messages, selected, images=True, positions=positions)
+    output = reconstruct(messages, selected, images=True, positions=positions, call_arguments=route_stubs)
     for source_index, value in {**overrides, **packets}.items():
         original = output[positions[source_index]]
         output[positions[source_index]] = {"role": "tool", "tool_call_id": original["tool_call_id"],
@@ -474,7 +502,12 @@ def agent_projection(state, agent_id, tool_names, skill_ids, *, window=None):
 
 
 def ordinary_origins(state, selected, positions):
-    messages = state["source"]
     return {positions[e.result_index]: (e.batch, e.call_index) for e in selected
-            if exchange_name(messages, e) not in READERS | {"lite_delegate"}
-            and not native_record(state, messages[e.batch]["tool_calls"][e.call_index], messages[e.result_index])}
+            if ordinary_exchange(state, e)}
+
+
+def ordinary_exchange(state, exchange):
+    messages = state["source"]
+    return (exchange_name(messages, exchange) not in READERS | {"lite_delegate"}
+            and not native_record(state, messages[exchange.batch]["tool_calls"][exchange.call_index],
+                                  messages[exchange.result_index]))

@@ -17,7 +17,7 @@ render = runpy.run_path(str(SCRIPT))["render"]
 
 def fields():
     return {
-        "skill_name": "route-forecast",
+        "skill_name": "route-forecast-model-1",
         "routing_description": 'Прогноз: "продажи".\nНа основе ряда.',
         "agent_name": "Прогнозист",
         "agent_model_id": "forecast/model-1",
@@ -36,7 +36,7 @@ class RoutingSkillRendererTests(unittest.TestCase):
         import yaml
         metadata = yaml.safe_load(result.split("---", 2)[1])
         self.assertEqual(metadata["description"], fields()["routing_description"])
-        self.assertEqual(metadata["name"], "route-forecast")
+        self.assertEqual(metadata["name"], "route-forecast-model-1")
         self.assertEqual(metadata, {"name": fields()["skill_name"],
                                     "description": fields()["routing_description"]})
         self.assertNotIn(fields()["agent_model_id"], result)
@@ -49,6 +49,16 @@ class RoutingSkillRendererTests(unittest.TestCase):
         for key in ("routing_criteria", "exclusion_criteria", "expected_result"):
             self.assertIn(fields()[key], result)
         self.assertNotIn("{{", result)
+
+    def test_canonical_names_cover_punctuation_fallback_and_length(self):
+        def name(model_id, suggested="route-fallback"):
+            values = {**fields(), "agent_model_id": model_id, "skill_name": suggested}
+            return json.loads(render(values, TEMPLATE).splitlines()[1].removeprefix("name: "))
+
+        self.assertEqual(name(" Forecast_Agent "), "route-forecast-agent")
+        self.assertEqual(name("Прогноз"), "route-fallback")
+        self.assertEqual(name("Model!" * 20), ("route-" + "model-" * 20)[:64].rstrip("-"))
+        self.assertEqual(name("Forecast_Agent", "route-forecast-agent-2"), "route-forecast-agent-2")
 
     def test_agent_identity_stays_in_markdown_without_extra_yaml_fields(self):
         import yaml
