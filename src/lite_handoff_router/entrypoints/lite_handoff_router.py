@@ -11,6 +11,7 @@ from ..runtime import require, metadata_draft, publish
 from ..history import refresh_source
 from ..capabilities import close_mcp_sessions
 from ..native_context import capture_native_context
+from ..routing_trace import record_routing_event
 
 
 class Pipe:
@@ -50,6 +51,7 @@ class Pipe:
         except BaseException:
             sessions = __request__.scope.get("lite_handoff_mcp", {})
             await close_mcp_sessions(sessions.pop(key) for key in list(sessions) if key not in sessions_before)
+            await record_routing_event(adapter, state, user, "prepare_execution", "failed", target)
             raise
 
         publish(__request__, __metadata__, draft["metadata"], tools)
@@ -62,4 +64,8 @@ class Pipe:
                     "action": "handoff", "description": "Передача: " + state["registry"][target].get("agent_name", target),
                     "done": True,
                 }})
-        return await completion.complete()
+        try:
+            return await completion.complete()
+        except BaseException:
+            await record_routing_event(adapter, state, user, "execution", "failed", target)
+            raise

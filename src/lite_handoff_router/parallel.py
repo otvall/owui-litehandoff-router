@@ -8,7 +8,8 @@ from uuid import uuid4
 from .capabilities import close_mcp_sessions
 from .parallel_state import group_calls, rejected_followup
 from .runtime import begin, require
-from .resources import routing_owner
+from .resources import check_routing_skill
+from .routing_trace import record_routing_event
 
 PARALLEL_RUNS = "lite_handoff_parallel_runs"
 PARALLEL_TICKET = "lite_parallel_ticket"
@@ -52,8 +53,7 @@ async def validate_batch(adapter, request, user, metadata, state, tasks):
             if not isinstance(files, list) or any(not isinstance(f, str) or f not in available for f in files):
                 raise ValueError("file_ids must refer to available input attachments")
             await adapter.model(request, agent, user)
-            owner = await routing_owner(adapter, request, user, state["router_id"])
-            await adapter.skill(state["registry"][agent]["skill_id"], owner)
+            await check_routing_skill(adapter, request, user, state["router_id"], state["registry"][agent])
             attachments = [await adapter.file(f, user) for f in dict.fromkeys(files)]
             validated.append({"agent_id": agent, "task": task.strip(), "files": attachments})
         except Exception as error:
@@ -90,13 +90,13 @@ async def prepare_worker(adapter, request, body, metadata, user):
     metadata.setdefault("chat_context", {}).pop(PARALLEL_TICKET, None)
     request.state.chat_context.pop(PARALLEL_TICKET, None)
     await adapter.model(request, entry["agent_id"], user)
-    owner = await routing_owner(adapter, request, user, entry["router_id"])
-    await adapter.skill(entry["registry_entry"]["skill_id"], owner)
+    await check_routing_skill(adapter, request, user, entry["router_id"], entry["registry_entry"])
     body["messages"] = deepcopy(entry["input"])
     body["files"] = deepcopy(entry["files"])
     metadata["files"] = deepcopy(entry["files"])
     state = begin(request, body, metadata, user.id, {entry["agent_id"]: entry["registry_entry"]}, [], [], [],
-                  max_parallel_tasks=0, context_policy=entry.get("context_policy"))
+                  max_parallel_tasks=0, context_policy=entry.get("context_policy"),
+                  routing_skill_id=entry.get("routing_skill_id", ""))
     state.update(worker=True, active_agent=entry["agent_id"], phase="agent")
     # Binding persists correlation and the parent link. Finish its transaction
     # before native cancellation can close the child and cascade-delete it.
@@ -220,7 +220,8 @@ def worker_runtime(adapter, request, user, metadata, state, events):
                  "user_id": user.id, "parent_chat_id": state["chat_id"],
                  "parent_message_id": state["message_id"], "router_id": state["router_id"],
                  "registry_entry": deepcopy(state["registry"][assignment["agent_id"]]), "bound": bound,
-                 "context_policy": deepcopy(state.get("context_policy", {}))}
+                 "context_policy": deepcopy(state.get("context_policy", {})),
+                 "routing_skill_id": state.get("routing_skill_id", "")}
         # Unique benign task labels also correlate children cancelled before Filter binding.
         entry["native_task"] = "[Задание " + entry["task_id"] + "] " + entry["task"]
         entry["input"] = [{"role": "user", "content": entry["native_task"]}]
@@ -229,8 +230,7 @@ def worker_runtime(adapter, request, user, metadata, state, events):
         try:
             actor = await adapter.user(user.id)
             await adapter.model(request, entry["agent_id"], actor)
-            owner = await routing_owner(adapter, request, actor, state["router_id"])
-            await adapter.skill(entry["registry_entry"]["skill_id"], owner)
+            await check_routing_skill(adapter, request, actor, state["router_id"], entry["registry_entry"])
             entry["files"] = [await adapter.file(f["id"], actor) for f in entry["files"]]
             native_metadata = {"model_id": state["router_id"], "chat_id": state["chat_id"],
                 "message_id": state["message_id"], "session_id": metadata.get("session_id"),
@@ -313,6 +313,8 @@ def parallel_tool(adapter, request, user, metadata, state, events):
             arguments["file_ids"] = file_ids
         if require(request, metadata, user.id) is not state:
             raise ValueError("Stale parallel request context")
+        target = agent_id if agent_id in state["registry"] else None
+        await record_routing_event(adapter, state, user, "parallel_handoff", "attempted", target)
         calls = group_calls(state)
         group = state["parallel"]
         generation = state["generation"]
@@ -397,6 +399,7 @@ def parallel_tool(adapter, request, user, metadata, state, events):
                     "result": "", "files": [], "error": "Parallel execution did not complete"}
                 if group["status"] == "timed_out" and group["results"][index]["status"] == "cancelled":
                     group["results"][index].update(status="timed_out", error="Parallel group deadline exceeded")
+            await record_routing_event(adapter, state, user, "parallel_execution", group["results"][index]["status"], target)
 
     return {"spec": {"name": "delegate_task", "description":
         "Run ONE self-contained assignment in the selected agent. For four assignments issue four "

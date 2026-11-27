@@ -421,6 +421,12 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
         history = turn("agent-a", "PRIVATE_AGENT_RESULT")
         history[1:1] = [
             {"role": "assistant", "tool_calls": [
+                {"id": "route-page", "type": "function", "function": {
+                    "name": "read_skill_file",
+                    "arguments": '{"id":"shared","path":"profiles/private-route.md"}',
+                }}]},
+            {"role": "tool", "tool_call_id": "route-page", "content": "PRIVATE_ROUTING_PROFILE"},
+            {"role": "assistant", "tool_calls": [
                 {"id": "lookup-r", "type": "function",
                  "function": {"name": "common_lookup", "arguments": "{}"}}]},
             {"role": "tool", "tool_call_id": "lookup-r", "content": "ROUTER_FACT " + "a" * 2000 + " ROUTER_TAIL"},
@@ -447,6 +453,8 @@ class SharedSummaryTest(IsolatedAsyncioTestCase):
                                  ("common_lookup", "router", "completed"))
                 self.assertEqual((agent_call["tool"], agent_call["agent_id"]), ("lookup", "agent-a"))
                 self.assertNotIn("PRIVATE_AGENT_RESULT", str(result))
+                self.assertNotIn("PRIVATE_ROUTING_PROFILE", str(result))
+                self.assertNotIn("private-route.md", str(result))
                 self.assertNotIn("ROUTER_TAIL", str(result))
                 if limit is None:
                     self.assertIn("ROUTER_FACT", router_call["result"])

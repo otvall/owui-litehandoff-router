@@ -4,7 +4,8 @@ from copy import deepcopy
 
 from .registry import ids
 from .skills import (READERS, SKILL_CATALOG, manifest, prepare_skill_scope, scoped_reader,
-                     routing_guidance, skill_catalog_messages, validate_skill_catalog)
+                     permitted_routing_paths, routing_guidance, routing_reader, skill_catalog_messages,
+                     validate_skill_catalog, observe_routing_reader)
 from .capabilities import load_capabilities
 from .binding import bind_tool_context
 from .history import CONVERSATION_HISTORY_TOOL, HISTORICAL_AGENT_TURN, router_projection, agent_projection
@@ -51,6 +52,11 @@ ROUTER_HISTORY_PROMPT = (
     "Read it as a reference for compacted older turns. Historical lite_delegate results describe past handoffs. "
     "Attribute their tool_results to the named agent. Treat an unknown status as unconfirmed. "
     "A live lite_delegate acknowledgement confirms the transfer. Verify the outcome before reporting completion. "
+    "For a follow-up that changes an existing chart or other artifact, identify the artifact and its author "
+    "from the current request, recent turns, and summary. Honor an explicit reference first. Otherwise, use the "
+    "most recent relevant artifact when the reference is clear. If an agent produced it, continue with that "
+    "agent after checking its current routing Skill. Read earlier attachments only when they belong to the "
+    "selected artifact or the user asks to use them. If several artifacts remain plausible, ask which one to update. "
     + HISTORY_EVIDENCE_PROMPT
 )
 
@@ -109,14 +115,22 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     selected = deepcopy(model)
     selected["owned_by"] = inference.get("owned_by")
     meta = model.get("info", {}).get("meta") or {}
+    skills_enabled = (meta.get("builtinTools") or {}).get("skills", True)
     tool_ids = ids(meta.get("toolIds") or []) if target else ids(
         state["base_tool_ids"] + ids(meta.get("toolIds") or []))
-    skill_ids = ids(meta.get("skillIds") or []) if target else ids(
-        state["base_skill_ids"] + ids(meta.get("skillIds") or [])
-        + [entry["skill_id"] for entry in state["registry"].values()]
-    )
-    chat_skill_ids = [sid for sid in state.get("chat_skill_ids", []) if sid not in skill_ids] if not target else []
-    skill_ids = ids(skill_ids + chat_skill_ids)
+    skill_ids = ids(meta.get("skillIds") or []) if skills_enabled else []
+    routing_skill_id = state.get("routing_skill_id", "")
+    routes = [entry for entry in state["registry"].values() if "path" in entry] if not target else []
+    chat_skill_ids = []
+    if skills_enabled and not target:
+        skill_ids = ids(state["base_skill_ids"] + skill_ids)
+        chat_skill_ids = [sid for sid in state.get("chat_skill_ids", []) if sid not in skill_ids]
+        legacy_ids = [entry["skill_id"] for entry in state["registry"].values() if "path" not in entry]
+        chat_skill_ids = [sid for sid in chat_skill_ids if sid.lower() != routing_skill_id and sid not in legacy_ids]
+        skill_ids = ids(skill_ids + legacy_ids + chat_skill_ids)
+    skill_ids = [sid for sid in skill_ids if sid.lower() != routing_skill_id]
+    if skills_enabled and routes:
+        skill_ids.append(routing_skill_id)
     terminal_id = terminal_binding(model)
     chat_terminal = bool(not target and state.get("chat_terminal_id")
                          and (meta.get("capabilities") or {}).get("terminal", True))
@@ -125,7 +139,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     prepare_terminal_scope(metadata, terminal_id)
     resources = ResourceScope(adapter, request, user, model, owner, tool_ids, skill_ids,
                               router=not target, terminal_id=terminal_id, chat_terminal=chat_terminal,
-                              chat_skill_ids=chat_skill_ids)
+                              chat_skill_ids=chat_skill_ids, routing_skill_id=routing_skill_id)
     prepare_skill_scope(metadata, state, model["id"], skill_ids)
     draft = {key: deepcopy(value) for key, value in body.items() if key in ENVELOPE}
     draft.update(model=llm_id, messages=[
@@ -148,7 +162,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     if packet:
         draft["files"] = deepcopy(metadata["files"])
     catalog_context = []
-    if not target or skill_ids:
+    if skills_enabled and (not target or skill_ids):
         catalog = await manifest(adapter, skill_ids, owner, None if target else state["registry"],
                                  chat_user=user, chat_skill_ids=chat_skill_ids)
         catalog_context = skill_catalog_messages(state, model["id"], catalog)
@@ -156,6 +170,10 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
             guidance = {"role": "system", "content": routing_guidance()}
             draft["messages"].insert(0, guidance)
             primary_systems.append(deepcopy(guidance))
+    elif not target:
+        guidance = {"role": "system", "content": "Skill reading and agent delegation are disabled for this model."}
+        draft["messages"].append(guidance)
+        primary_systems.append(deepcopy(guidance))
     extra = injections(request, user, metadata, model, draft["messages"], events)
     tools, mcp_instructions = await load_capabilities(adapter, request, tool_ids, owner, extra)
     terminal_names = set()
@@ -188,7 +206,7 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
             draft["messages"].insert(0, section)
     if target and terminal_prompt:
         draft["messages"].append({"role": "system", "content": terminal_prompt})
-    if state["registry"] and not target:
+    if skills_enabled and state["registry"] and not target:
         if "lite_delegate" in tools:
             raise ValueError("Reserved delegate Tool collision: lite_delegate; remove the separate delegate Tool from base_tool_ids")
         tools["lite_delegate"] = delegate_tool(adapter, request, user, metadata, state)
@@ -212,8 +230,11 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
                 raise ValueError("Required builtin Skill reader unavailable: " + name)
             if name in tools:
                 raise ValueError("Reserved Skill reader collision: " + name)
-            tools[name] = await scoped_reader(adapter, builtins[name], skill_ids, owner,
-                                               draft["messages"], check_scope=resources.skill)
+            intercept = routing_reader(adapter, resources, name, routing_skill_id, routes) if routing_skill_id else None
+            observe = (observe_routing_reader(adapter, state, user, name)
+                       if not target and state.get("routing_trace") is not None and name != "grep_skill_files" else None)
+            tools[name] = await scoped_reader(adapter, builtins[name], skill_ids, owner, draft["messages"],
+                                               check_scope=resources.skill, intercept=intercept, observe=observe)
     if (state.get("native_context") or {}).get("records"):
         state["native_context_allowed"] = await adapter.native_context_policy(
             request, metadata, state, model, user)
@@ -225,7 +246,15 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
         if state.get("historical_handoff_statuses") is None and hasattr(adapter, "historical_handoff_statuses"):
             state["historical_handoff_statuses"] = await adapter.historical_handoff_statuses(
                 request, metadata, state, user)
-        history = router_projection(state, set(tools), skill_ids, window=window)
+        permitted_paths = set()
+        if routes and READERS.intersection(tools) and state.get("generation"):
+            try:
+                await adapter.routing_skill_snapshot(routing_skill_id, owner, routes[0]["skill_version_id"])
+            except Exception:
+                pass
+            else:
+                permitted_paths = await permitted_routing_paths(adapter, request, user, routes)
+        history = router_projection(state, set(tools), skill_ids, window=window, routing_paths=permitted_paths)
     systems = [m for m in draft["messages"] if m.get("role") == "system"]
     index = last_user(history)
     if target:

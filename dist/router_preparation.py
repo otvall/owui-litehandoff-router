@@ -9,19 +9,25 @@ from __future__ import annotations
 """Bind a Tool's effective context through OWUI's native callable refresh."""
 import inspect
 
-async def bind_tool_context(adapter, tool, messages, check=None, pinned=None, resolve=None):
+async def bind_tool_context(adapter, tool, messages, check=None, pinned=None, resolve=None, intercept=None, observe=None):
     function = tool['callable']
     original = getattr(function, '__function__', function)
     extra = getattr(function, '__extra_params__', None)
     signature = inspect.signature(original)
     pinned = {key: value for key, value in (pinned or {}).items() if key in signature.parameters}
-    if check is None and resolve is None and (not pinned) and (messages is None or '__messages__' not in signature.parameters):
+    if check is None and resolve is None and (intercept is None) and (not pinned) and (messages is None or '__messages__' not in signature.parameters):
         return tool
 
-    async def protected(*args, **kwargs):
+    async def invoke(*args, **kwargs):
         kwargs.update(pinned)
         if messages is not None and '__messages__' in signature.parameters:
             kwargs['__messages__'] = messages
+        if intercept is not None:
+            arguments = signature.bind_partial(*args, **kwargs)
+            arguments.apply_defaults()
+            intercepted = await intercept(arguments.arguments)
+            if intercepted is not None:
+                return intercepted
         if check is not None:
             arguments = signature.bind_partial(*args, **kwargs).arguments
             await check(arguments)
@@ -31,6 +37,19 @@ async def bind_tool_context(adapter, tool, messages, check=None, pinned=None, re
             kwargs.update({key: value for key, value in overrides.items() if key in signature.parameters})
         result = original(*args, **kwargs)
         return await result if inspect.isawaitable(result) else result
+
+    async def protected(*args, **kwargs):
+        if observe is None:
+            return await invoke(*args, **kwargs)
+        arguments = signature.bind_partial(*args, **kwargs)
+        arguments.apply_defaults()
+        try:
+            result = await invoke(*args, **kwargs)
+        except Exception:
+            await observe(arguments.arguments, None)
+            raise
+        await observe(arguments.arguments, result)
+        return result
     protected.__name__ = getattr(original, '__name__', 'tool')
     protected.__signature__ = signature
     try:
@@ -313,8 +332,8 @@ from uuid import uuid4
 SCOPE_KEY = 'lite_handoff_router'
 RECEIPT = 'lite_router'
 
-def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids, *, max_parallel_tasks=4, parallel_timeout_seconds=300, context_policy=None, chat_skill_ids=()):
-    state = {'request_id': uuid4().hex, 'user_id': user_id, 'chat_id': metadata.get('chat_id'), 'message_id': metadata.get('message_id'), 'router_id': body['model'], 'registry': deepcopy(registry), 'chat_terminal_id': body.get('terminal_id') if isinstance(body.get('terminal_id'), str) else None, 'diagnostics': diagnostics, 'base_tool_ids': list(tool_ids), 'base_skill_ids': list(skill_ids), 'source': deepcopy(body.get('messages', [])), 'chat_skill_ids': list(chat_skill_ids), 'phase': 'router', 'pending': [], 'active_agent': None, 'skill_scope': None, 'original_source': deepcopy(body.get('messages', [])), 'user_boundary': next((i for i in range(len(body.get('messages', [])) - 1, -1, -1) if body['messages'][i].get('role') == 'user'), -1), 'generation': 0, 'audit': [], 'native_context': None, 'context_policy': ContextPolicy.model_validate(context_policy or {}).model_dump(), 'parallel': group_state(max_parallel_tasks, parallel_timeout_seconds)}
+def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids, *, max_parallel_tasks=4, parallel_timeout_seconds=300, context_policy=None, chat_skill_ids=(), routing_skill_id=''):
+    state = {'request_id': uuid4().hex, 'user_id': user_id, 'chat_id': metadata.get('chat_id'), 'message_id': metadata.get('message_id'), 'router_id': body['model'], 'registry': deepcopy(registry), 'chat_terminal_id': body.get('terminal_id') if isinstance(body.get('terminal_id'), str) else None, 'diagnostics': diagnostics, 'base_tool_ids': list(tool_ids), 'base_skill_ids': list(skill_ids), 'source': deepcopy(body.get('messages', [])), 'chat_skill_ids': list(chat_skill_ids), 'routing_skill_id': routing_skill_id, 'phase': 'router', 'pending': [], 'active_agent': None, 'skill_scope': None, 'original_source': deepcopy(body.get('messages', [])), 'user_boundary': next((i for i in range(len(body.get('messages', [])) - 1, -1, -1) if body['messages'][i].get('role') == 'user'), -1), 'generation': 0, 'audit': [], 'native_context': None, 'context_policy': ContextPolicy.model_validate(context_policy or {}).model_dump(), 'parallel': group_state(max_parallel_tasks, parallel_timeout_seconds)}
     request.scope[SCOPE_KEY] = state
     request.scope['lite_handoff_metadata'] = metadata
     metadata['tools'] = {}
@@ -355,6 +374,66 @@ def publish(request, current, draft, tools):
     request.state.metadata = draft
     request.scope[SCOPE_KEY]['skill_scope'] = draft.get('lite_skill_scope')
 
+# Source: routing_profiles
+"""The registry and file layout of a shared routing Skill."""
+from collections import Counter
+import json
+from pathlib import PurePosixPath
+ROUTING_INDEX = 'agents.json'
+ROUTING_OVERVIEW = 'SKILL.md'
+
+def unique_routing_keys(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError('Routing registry contains repeated JSON keys')
+        result[key] = value
+    return result
+
+def routing_index(files):
+    file = files.get(ROUTING_INDEX)
+    if not file or file.get('encoding'):
+        raise ValueError('Routing Skill requires a text agents.json')
+    entries = json.loads(file['content'], object_pairs_hook=unique_routing_keys)
+    if not isinstance(entries, dict):
+        raise ValueError('agents.json must be a JSON object')
+    return entries
+
+def routing_profile_path(value):
+    if isinstance(value, str) and '\\' not in value and (':' not in value) and (not any((ord(char) < 32 for char in value))):
+        path = PurePosixPath(value)
+        if len(path.parts) >= 2 and path.parts[0] == 'profiles' and ('..' not in path.parts) and (str(path) == value) and (path.suffix == '.md'):
+            return value
+    raise ValueError('Routing profile must use a canonical Markdown path under profiles/')
+
+def routing_file_map(snapshot):
+    return {file['path']: file for file in snapshot['data']['files']}
+
+def routing_entries(snapshot):
+    files = routing_file_map(snapshot)
+    index = routing_index(files)
+    paths = Counter((entry['path'] for entry in index.values() if isinstance(entry, dict) and isinstance(entry.get('path'), str)))
+    entries, invalid = ({}, {})
+    for model, entry in index.items():
+        try:
+            if not model or model.strip() != model or (not isinstance(entry, dict)):
+                raise ValueError('Routing entry requires an exact Model ID and an object')
+            if set(entry) != {'path', 'description'}:
+                raise ValueError('Routing entry must contain path and description')
+            path = routing_profile_path(entry['path'])
+            description = entry['description']
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError('Routing entry requires a nonempty description')
+            file = files.get(path)
+            if not file or file.get('encoding') or (not file['content'].strip()):
+                raise ValueError('Routing profile is missing, empty or unreadable')
+            if paths[path] != 1:
+                raise ValueError('Routing profile path belongs to more than one Model ID')
+            entries[model] = {'path': path, 'description': description}
+        except ValueError as error:
+            invalid[model] = str(error)
+    return (entries, invalid)
+
 # Source: registry
 """The same immutable request snapshot supplies routing discovery and execution."""
 import logging
@@ -382,24 +461,47 @@ def ids(values):
         raise ValueError('Resource IDs must be a list of non-empty strings')
     return list(dict.fromkeys((v.strip() for v in values)))
 
-async def discover(adapter, request, user, catalog, router_id):
-    if not isinstance(catalog, dict) or any((not isinstance(k, str) or not k.strip() or k != k.strip() or (not isinstance(v, str)) or (not v.strip()) or (v != v.strip()) for k, v in catalog.items())):
+async def discover(adapter, request, user, catalog, router_id, *, routing_skill_id='', source=None):
+    if not routing_skill_id and (not isinstance(catalog, dict) or any((not isinstance(k, str) or not k.strip() or k != k.strip() or (not isinstance(v, str)) or (not v.strip()) or (v != v.strip()) for k, v in catalog.items()))):
         raise ValueError('AGENTS must map exact Workspace Model IDs to routing Skill IDs')
     entries, diagnostics = ({}, [])
     router = await adapter.model(request, router_id, user)
     owner = await adapter.owner(router)
+    if source is not None:
+        source.update(kind='shared_skill' if routing_skill_id else 'AGENTS', skill_id=routing_skill_id or None, version_id=None)
+    if routing_skill_id:
+        try:
+            snapshot = await adapter.routing_skill_snapshot(routing_skill_id, owner)
+        except Exception as error:
+            return (entries, [routing_diagnostic(error, category='skill_unavailable')])
+        if source is not None:
+            source['version_id'] = snapshot['version_id']
+        try:
+            profiles, invalid = routing_entries(snapshot)
+        except Exception as error:
+            return (entries, [routing_diagnostic(error, category='invalid_registry')])
+        diagnostics.extend((routing_diagnostic(reason, agent_id, 'invalid_profile') for agent_id, reason in invalid.items()))
+        catalog = dict.fromkeys(profiles, routing_skill_id)
     for agent_id, skill_id in catalog.items():
+        category = 'model_unavailable'
         try:
             model = await adapter.model(request, agent_id, user)
             if agent_id == router_id or (model.get('pipe') and pipe_dispatcher(model, request.app.state.MODELS) == pipe_dispatcher(router, request.app.state.MODELS)):
                 raise ValueError('Target resolves back to the Router Pipe')
-            skill = await adapter.skill(skill_id, owner)
-            entries[agent_id] = {'agent_id': agent_id, 'skill_id': skill_id, 'agent_name': model.get('info', {}).get('name') or model.get('name') or agent_id, 'name': skill['name'], 'description': skill.get('description') or ''}
+            category = 'skill_unavailable'
+            skill = snapshot if routing_skill_id else await adapter.skill(skill_id, owner)
+            entry = {'agent_id': agent_id, 'skill_id': skill_id, 'agent_name': model.get('info', {}).get('name') or model.get('name') or agent_id, 'name': skill['name'], 'description': skill.get('description') or ''}
+            if routing_skill_id:
+                entry.update(profiles[agent_id], skill_version_id=snapshot['version_id'])
+            entries[agent_id] = entry
         except Exception as error:
-            reason = str(getattr(error, 'detail', error))
-            diagnostics.append({'agent_id': agent_id, 'reason': reason})
-            log.warning('Excluded agent %s: %s', agent_id, reason)
+            diagnostics.append(routing_diagnostic(error, agent_id, category))
     return (entries, diagnostics)
+
+def routing_diagnostic(error, agent_id=None, category='unknown'):
+    reason = str(getattr(error, 'detail', error))
+    log.warning('Excluded routing entry %s: %s', agent_id or 'registry', reason)
+    return {'agent_id': agent_id, 'reason': reason, 'category': category}
 
 # Source: terminals
 """Optional server terminal binding; never inherit a client's selection."""
@@ -450,9 +552,16 @@ def prepare_terminal_scope(metadata, identifier):
 async def routing_owner(adapter, request, user, router_id):
     return await adapter.owner(await adapter.model(request, router_id, user))
 
+async def check_routing_skill(adapter, request, user, router_id, entry):
+    owner = await routing_owner(adapter, request, user, router_id)
+    if 'path' in entry:
+        await adapter.routing_skill_snapshot(entry['skill_id'], owner, entry['skill_version_id'])
+    else:
+        await adapter.skill(entry['skill_id'], owner)
+
 class ResourceScope:
 
-    def __init__(self, adapter, request, user, model, owner, tool_ids, skill_ids, *, router=False, terminal_id=None, chat_terminal=False, chat_skill_ids=()):
+    def __init__(self, adapter, request, user, model, owner, tool_ids, skill_ids, *, router=False, terminal_id=None, chat_terminal=False, chat_skill_ids=(), routing_skill_id=''):
         self.adapter, self.request, self.user = (adapter, request, user)
         self.model_id, self.owner_id = (model['id'], owner.id)
         self.tool_ids, self.skill_ids = (frozenset(tool_ids), frozenset(skill_ids))
@@ -461,7 +570,7 @@ class ResourceScope:
         self.chat_terminal = chat_terminal and router
         self.chat_skill_ids = frozenset(chat_skill_ids) if router else frozenset()
         meta = model.get('info', {}).get('meta') or {}
-        self.card_ids = {'skill': frozenset(ids(meta.get('skillIds') or [])), 'tool': frozenset(ids(meta.get('toolIds') or []))}
+        self.card_ids = {'skill': frozenset(ids(meta.get('skillIds') or [])) - {routing_skill_id}, 'tool': frozenset(ids(meta.get('toolIds') or []))}
 
     async def authority(self, kind, identifier):
         allowed = self.skill_ids if kind == 'skill' else {self.terminal_id} - {None} if kind == 'terminal' else self.tool_ids
@@ -498,6 +607,38 @@ class ResourceScope:
         owner = await self.authority('terminal', identifier)
         await self.adapter.terminal_access(self.request, identifier, owner)
 
+# Source: routing_trace
+"""Persist signed routing evidence alongside the assistant message."""
+import hashlib
+import hmac
+import json
+ROUTING_TRACE = 'lite_routing_trace'
+
+def routing_trace_signature(trace, chat_id, message_id, secret):
+    value = json.dumps([ROUTING_TRACE, chat_id, message_id, trace], sort_keys=True, separators=(',', ':'))
+    return hmac.new(secret.encode(), value.encode(), hashlib.sha256).hexdigest()
+
+def trusted_routing_trace(message, chat_id, message_id, secret):
+    meta = message.get('meta')
+    record = meta.get(ROUTING_TRACE) if isinstance(meta, dict) else None
+    if isinstance(record, dict) and isinstance(record.get('trace'), dict) and isinstance(record.get('signature'), str):
+        signature = routing_trace_signature(record['trace'], chat_id, message_id, secret)
+        if hmac.compare_digest(signature, record['signature']):
+            return record['trace']
+    return None
+
+async def record_routing_event(adapter, state, user, stage=None, status=None, agent_id=None):
+    trace = state.get('routing_trace')
+    if trace is None:
+        return
+    if stage:
+        if len(trace['events']) < 256:
+            trace['events'].append({'stage': stage, 'status': status, 'agent_id': agent_id, 'generation': state['generation']})
+        else:
+            trace['events_truncated'] = True
+    if state.get('chat_id') and state.get('message_id'):
+        await adapter.save_routing_trace(state, user)
+
 # Source: protocol
 """Handoff is a completed, server-witnessed Tool exchange, not text parsing."""
 import json
@@ -513,8 +654,15 @@ def delegate_tool(adapter, request, user, metadata, state):
         current = require(request, metadata, actor.id)
         if current is not state:
             raise ValueError('Stale delegate request context')
-        control_generation(current, 'lite_delegate', {'agent_id': agent_id})
-        return await delegate(adapter, request, actor, current, agent_id)
+        target = agent_id if agent_id in state['registry'] else None
+        try:
+            control_generation(current, 'lite_delegate', {'agent_id': agent_id})
+            result = await delegate(adapter, request, actor, current, agent_id)
+        except Exception:
+            await record_routing_event(adapter, state, actor, 'handoff', 'rejected', target)
+            raise
+        await record_routing_event(adapter, state, actor, 'handoff', 'accepted', target)
+        return result
     return {'spec': {'name': 'lite_delegate', 'description': "Hand off this user request and its current chat to an exact advertised Workspace Model ID. Call alone. Pass only agent_id; do not pass task or rewrite the user's request.", 'parameters': {'type': 'object', 'additionalProperties': False, 'properties': {'agent_id': {'type': 'string', 'description': 'Workspace Model ID from the current routing manifest.', 'enum': list(state['registry'])}}, 'required': ['agent_id']}}, 'callable': lite_delegate}
 
 def tool_image(message):
@@ -568,8 +716,7 @@ async def delegate(adapter, request, user, state, agent_id):
     if agent_id not in state['registry']:
         raise ValueError('agent_id is not in the current permitted registry; use the exact Workspace Model ID')
     await adapter.model(request, agent_id, user)
-    owner = await routing_owner(adapter, request, user, state['router_id'])
-    await adapter.skill(state['registry'][agent_id]['skill_id'], owner)
+    await check_routing_skill(adapter, request, user, state['router_id'], state['registry'][agent_id])
     pending = {'__lite_delegate__': 'v2', 'agent_id': agent_id, 'request_id': state['request_id'], 'nonce': uuid4().hex, 'router_calls': list(state.get('audit') or [])}
     state['pending'].append(pending)
     state['phase'] = 'pending-handoff'
@@ -707,12 +854,13 @@ def project_native_results(messages, state):
 
 # Source: skills
 """A model receives a small manifest; instruction text is read lazily."""
+import json
 import xml.etree.ElementTree as ET
 from uuid import uuid4
 READERS = frozenset({'view_skill', 'read_skill_file', 'grep_skill_files'})
 SKILL_CATALOG = 'list_available_skills'
 
-async def scoped_reader(adapter, tool, allowed_ids, user, messages, check_scope=None):
+async def scoped_reader(adapter, tool, allowed_ids, user, messages, check_scope=None, intercept=None, observe=None):
     allowed = frozenset(allowed_ids)
 
     async def resolve(arguments):
@@ -725,7 +873,57 @@ async def scoped_reader(adapter, tool, allowed_ids, user, messages, check_scope=
             await adapter.skill(skill_id, user)
             principal = user
         return {'__user__': (principal or user).model_dump()}
-    return await bind_tool_context(adapter, tool, messages, resolve=resolve)
+    return await bind_tool_context(adapter, tool, messages, resolve=resolve, intercept=intercept, observe=observe)
+
+def observe_routing_reader(adapter, state, user, name):
+
+    async def observe(arguments, result):
+        routes = [entry for entry in state['registry'].values() if entry['skill_id'] == arguments.get('id') and ('path' not in entry and arguments.get('path') in (None, 'SKILL.md') or ('path' in entry and name == 'read_skill_file' and (entry['path'] == arguments.get('path'))))]
+        if not routes:
+            return
+        try:
+            value = json.loads(result) if isinstance(result, str) else result
+        except ValueError:
+            value = None
+        if not isinstance(value, dict) or value.get('error'):
+            status = 'failed'
+        else:
+            status = 'page' if value.get('next_offset') is not None else 'completed'
+        for route in routes:
+            await record_routing_event(adapter, state, user, 'profile_read', status, route['agent_id'])
+    return observe
+
+async def permitted_routing_paths(adapter, request, user, routes, path=None):
+    allowed = {ROUTING_OVERVIEW}
+    for route in routes:
+        if path is not None and path != route['path']:
+            continue
+        try:
+            await adapter.model(request, route['agent_id'], user)
+        except Exception:
+            continue
+        allowed.add(route['path'])
+    return allowed
+
+def routing_reader(adapter, resources, name, skill_id, routes):
+
+    async def read(arguments):
+        identifier = arguments.get('id')
+        if not isinstance(identifier, str) or identifier.lower() != skill_id:
+            return None
+        if identifier != skill_id or not routes or (not resources.router):
+            raise ValueError('Skill is outside the current model scope')
+        owner = await resources.authority('skill', skill_id)
+        path = arguments.get('path')
+        if path is None and name == 'read_skill_file':
+            raise ValueError('A routing file path is required')
+        allowed = await permitted_routing_paths(adapter, resources.request, resources.user, routes, path)
+        if path is not None and (not isinstance(path, str) or path not in allowed):
+            raise ValueError('Routing file is outside the current model scope')
+        snapshot = await adapter.routing_skill_snapshot(skill_id, owner, routes[0]['skill_version_id'])
+        files = {key: file for key, file in routing_file_map(snapshot).items() if key in allowed}
+        return await adapter.render_routing_read(name, arguments, snapshot['name'], files)
+    return read
 
 def prepare_skill_scope(metadata, state, model_id, skill_ids):
     previous = state.get('skill_scope') or {}
@@ -745,8 +943,11 @@ async def manifest(adapter, skill_ids, user, registry=None, *, chat_user=None, c
     entries = []
     routing = list((registry or {}).values())
     routed_ids = {entry['skill_id'] for entry in routing}
+    shared_ids = {entry['skill_id'] for entry in routing if 'path' in entry}
     skills = {}
     for skill_id in skill_ids:
+        if skill_id in shared_ids:
+            continue
         skill = await adapter.skill(skill_id, chat_user if skill_id in chat_skill_ids else user)
         skills[skill_id] = skill
         if skill_id in routed_ids:
@@ -754,12 +955,15 @@ async def manifest(adapter, skill_ids, user, registry=None, *, chat_user=None, c
         entry = {'id': skill_id, 'name': skill['name'], 'description': skill.get('description') or ''}
         entries.append(entry)
     for route in routing:
-        skill = skills[route['skill_id']]
-        entries.append({'id': route['skill_id'], 'agent_id': route['agent_id'], 'agent_name': route.get('agent_name') or route['agent_id'], 'name': skill['name'], 'description': skill.get('description') or ''})
+        skill = route if 'path' in route else skills[route['skill_id']]
+        entry = {'id': route['skill_id'], 'agent_id': route['agent_id'], 'agent_name': route.get('agent_name') or route['agent_id'], 'name': skill['name'], 'description': skill.get('description') or ''}
+        if 'path' in route:
+            entry['path'] = route['path']
+        entries.append(entry)
     routes, available = (ET.Element('routing_skills'), ET.Element('available_skills'))
     for entry in entries:
         item = ET.SubElement(routes if 'agent_id' in entry else available, 'skill')
-        for key in ('id', 'agent_id', 'agent_name', 'name', 'description'):
+        for key in ('id', 'agent_id', 'agent_name', 'name', 'description', 'path'):
             if key in entry:
                 ET.SubElement(item, key).text = entry[key]
     catalogs = [routes, available] if registry is not None else [available]
@@ -768,7 +972,7 @@ async def manifest(adapter, skill_ids, user, registry=None, *, chat_user=None, c
     return '\n'.join((ET.tostring(catalog, encoding='unicode') for catalog in catalogs))
 
 def routing_guidance():
-    return 'The server-provided list_available_skills result contains the current routing catalog. It is preloaded context; do not call list_available_skills. Catalog metadata does not establish that you read a routing Skill.\nWhen asked about your capabilities (for example, "что ты можешь", "что ты умеешь", or "which agents are available"), answer directly in the user\'s language and list all available agents by agent_name from the current manifest. Use descriptions to briefly explain their capabilities; name is the routing Skill name, not the agent name. Do not delegate merely to describe capabilities. Only list agents from this manifest; if none have agent_id, explicitly say that no agents are currently available.\nBefore choosing an agent, read its routing Skill with view_skill(id=id). Use the exact agent_id in lite_delegate; the Skill id is not an agent ID.'
+    return 'The server-provided list_available_skills result contains the current routing catalog. It is preloaded context; do not call list_available_skills. Catalog metadata does not establish that you read a routing Skill.\nWhen asked about your capabilities (for example, "что ты можешь", "что ты умеешь", or "which agents are available"), answer directly in the user\'s language and list all available agents by agent_name from the current manifest. Use descriptions to briefly explain their capabilities; name is the routing Skill name, not the agent name. Do not delegate merely to describe capabilities. Only list agents from this manifest; if none have agent_id, explicitly say that no agents are currently available.\nBefore lite_delegate or any delegate_task assignment, read that agent\'s complete routing profile in the current request. If the catalog entry has a path, call read_skill_file(id=id, path=path) with both values from that entry. Follow next_offset until it is null. The shared SKILL.md, a file listing, search results, and another agent\'s profile do not satisfy this requirement. If the entry has no path, use view_skill(id=id) and read any remaining SKILL.md pages. If reading fails, report the limitation and do not delegate to that agent. Use the exact agent_id from the same entry in lite_delegate or delegate_task.'
 
 def skill_catalog_messages(state, model_id, content):
     identifiers = state.setdefault('skill_catalog_ids', {})
@@ -979,10 +1183,11 @@ def skill_is_current(messages, exchange, skill_ids):
     call = messages[exchange.batch]['tool_calls'][exchange.call_index]
     return object_value(call.get('function', {}).get('arguments')).get('id') in skill_ids
 
-def reconstruct(messages, selected, *, images=False, positions=None, assistant_content=None, historical_turns=None):
+def reconstruct(messages, selected, *, images=False, positions=None, assistant_content=None, historical_turns=None, call_arguments=None):
     calls = {(e.batch, e.call_index) for e in selected}
     results = {e.result_index for e in selected}
     historical_turns = historical_turns or {}
+    call_arguments = call_arguments or {}
     output = []
     for i, message in enumerate(messages):
         role = message.get('role')
@@ -996,7 +1201,14 @@ def reconstruct(messages, selected, *, images=False, positions=None, assistant_c
             continue
         if role == 'assistant':
             original_calls = message.get('tool_calls') or []
-            kept = [deepcopy(call) for n, call in enumerate(original_calls) if (i, n) in calls]
+            kept = []
+            for n, call in enumerate(original_calls):
+                if (i, n) in calls:
+                    call = deepcopy(call)
+                    replacement = call_arguments.get((i, n))
+                    if replacement is not None:
+                        call['function']['arguments'] = replacement
+                    kept.append(call)
             content = deepcopy((assistant_content or {}).get(i, message.get('content')) or '')
             if not kept and (not content):
                 continue
@@ -1014,12 +1226,12 @@ def reconstruct(messages, selected, *, images=False, positions=None, assistant_c
             output.append(deepcopy(message))
     return output
 
-def router_projection(state, tool_names, skill_ids, *, window=None):
+def router_projection(state, tool_names, skill_ids, *, window=None, routing_paths=()):
     messages = state['source']
     boundary = state.get('user_boundary', last_user(messages))
     exchanges = analyze(messages, current_boundary=boundary, audit=state.get('audit', []))
     exchanges.sort(key=lambda e: (e.batch, e.call_index))
-    selected, overrides, packets = ([], {}, {})
+    selected, overrides, packets, route_stubs = ([], {}, {}, {})
     handoffs = historical_handoffs(messages, exchanges, boundary)
     by_turn = {e.turn: (e, marker) for e, marker in handoffs}
     for exchange, marker in handoffs:
@@ -1041,13 +1253,31 @@ def router_projection(state, tool_names, skill_ids, *, window=None):
         destination = by_turn.get(exchange.turn)
         belongs = destination is not None and exchange.executor == {'kind': 'agent', 'agent_id': destination[1]['agent_id']}
         if name in READERS:
+            arguments = object_value(call.get('function', {}).get('arguments'))
+            skill_id = arguments.get('id')
+            shared = bool(state.get('routing_skill_id')) and isinstance(skill_id, str) and (skill_id.lower() == state['routing_skill_id'])
+            if shared and exchange.batch > boundary:
+                path = None if name == 'view_skill' else arguments.get('path')
+                if path is None:
+                    allowed = bool(routing_paths) and all((entry.get('path') in routing_paths for entry in state['registry'].values()))
+                else:
+                    allowed = isinstance(path, str) and path in routing_paths
+                if not allowed:
+                    if result_status(content) != 'error':
+                        continue
+                    selected.append(exchange)
+                    route_stubs[exchange.batch, exchange.call_index] = json.dumps({'id': skill_id})
+                    overrides[exchange.result_index] = {'error': 'Routing profile is outside the current scope'}
+                    continue
             if exchange.batch > boundary and exchange.executor.get('kind') == 'router' and (name in tool_names) and skill_is_current(messages, exchange, skill_ids):
                 selected.append(exchange)
                 continue
-            fact = {'tool': name, 'skill_id': object_value(call.get('function', {}).get('arguments')).get('id'), 'status': result_status(content)}
+            fact = {'tool': name, 'skill_id': skill_id, 'status': result_status(content)}
             if belongs:
                 packets[destination[0].result_index].setdefault('skill_reads', []).append(fact)
                 continue
+            if shared:
+                route_stubs[exchange.batch, exchange.call_index] = json.dumps({'id': skill_id})
             overrides[exchange.result_index] = fact
         elif belongs:
             packet_index = destination[0].result_index
@@ -1056,7 +1286,7 @@ def router_projection(state, tool_names, skill_ids, *, window=None):
             continue
         selected.append(exchange)
     positions = {}
-    output = reconstruct(messages, selected, images=True, positions=positions)
+    output = reconstruct(messages, selected, images=True, positions=positions, call_arguments=route_stubs)
     for source_index, value in {**overrides, **packets}.items():
         original = output[positions[source_index]]
         output[positions[source_index]] = {'role': 'tool', 'tool_call_id': original['tool_call_id'], 'content': json.dumps(value, ensure_ascii=False)}
@@ -1713,6 +1943,34 @@ class OWUIAdapter:
             raise ValueError(f'Skill "{skill_id}" is inactive')
         return as_dict(skill)
 
+    async def routing_skill_snapshot(self, skill_id, user, version_id=None):
+        from open_webui.models.skills import get_skill_snapshot
+        from open_webui.routers.skills import authorized_skill
+        skill = await authorized_skill(skill_id, user)
+        if not skill.is_active or not skill.version_id:
+            raise ValueError('Routing Skill is inactive or has no saved version')
+        version_id = version_id or skill.version_id
+        return {**await get_skill_snapshot(skill, version_id), 'version_id': version_id}
+
+    async def render_routing_read(self, name, arguments, skill_name, files):
+        from open_webui.utils.skill_files import file_summaries, grep_skill_content, skill_content_page, skill_overview
+        if name == 'view_skill':
+            overview = await skill_overview(files['SKILL.md']['content'], file_summaries(list(files.values())))
+            result = {'id': arguments['id'], 'name': skill_name, **overview}
+        elif name == 'read_skill_file':
+            path = arguments['path']
+            if path not in files:
+                raise ValueError('Routing profile is unavailable in the prepared version')
+            page = await skill_content_page(files[path]['content'], arguments['offset'], arguments['max_chars'])
+            result = {'path': path, **page}
+        else:
+            path = arguments.get('path')
+            if path is not None and path not in files:
+                raise ValueError('Routing profile is unavailable in the prepared version')
+            selected = [files[path]] if path is not None else list(files.values())
+            return await asyncio.to_thread(grep_skill_content, selected, arguments['pattern'], arguments['case_insensitive'], arguments['max_results'])
+        return json.dumps(result, ensure_ascii=False)
+
     async def owner(self, model):
         identifier = (model.get('info') or {}).get('user_id')
         if not isinstance(identifier, str) or not identifier.strip():
@@ -2073,6 +2331,26 @@ class OWUIAdapter:
         if await self.child(child_id, user):
             await stop_tasks_by_chat_id_endpoint(request, child_id, user=user)
 
+    async def save_routing_trace(self, state, user):
+        chat_id, message_id = (state['chat_id'], state['message_id'])
+        if not chat_id or not message_id:
+            return
+        from open_webui.env import WEBUI_SECRET_KEY
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+        if not is_saved_chat_id(chat_id):
+            return
+        try:
+            chat = await Chats.get_accessible_chat_by_id(chat_id, user, permission='write')
+            if chat is None or chat.user_id != user.id:
+                return
+            async with Chats.edit_message_output(chat_id, message_id) as message:
+                if message and message.get('role') == 'assistant':
+                    snapshot = deepcopy(state['routing_trace'])
+                    message['meta'] = {**(message.get('meta') or {}), ROUTING_TRACE: {'trace': snapshot, 'signature': routing_trace_signature(snapshot, chat_id, message_id, WEBUI_SECRET_KEY)}}
+        except Exception as error:
+            logging.getLogger(__name__).warning('Routing trace could not be saved (%s)', type(error).__name__)
+
     async def save_prompt_usage(self, state, user, model_id, prompt_tokens, *, summary_key, agent_id=None, generation=None):
         from open_webui.models.chats import Chats
         from open_webui.utils.chat_id import is_saved_chat_id
@@ -2264,8 +2542,7 @@ async def validate_batch(adapter, request, user, metadata, state, tasks):
             if not isinstance(files, list) or any((not isinstance(f, str) or f not in available for f in files)):
                 raise ValueError('file_ids must refer to available input attachments')
             await adapter.model(request, agent, user)
-            owner = await routing_owner(adapter, request, user, state['router_id'])
-            await adapter.skill(state['registry'][agent]['skill_id'], owner)
+            await check_routing_skill(adapter, request, user, state['router_id'], state['registry'][agent])
             attachments = [await adapter.file(f, user) for f in dict.fromkeys(files)]
             validated.append({'agent_id': agent, 'task': task.strip(), 'files': attachments})
         except Exception as error:
@@ -2296,12 +2573,11 @@ async def prepare_worker(adapter, request, body, metadata, user):
     metadata.setdefault('chat_context', {}).pop(PARALLEL_TICKET, None)
     request.state.chat_context.pop(PARALLEL_TICKET, None)
     await adapter.model(request, entry['agent_id'], user)
-    owner = await routing_owner(adapter, request, user, entry['router_id'])
-    await adapter.skill(entry['registry_entry']['skill_id'], owner)
+    await check_routing_skill(adapter, request, user, entry['router_id'], entry['registry_entry'])
     body['messages'] = deepcopy(entry['input'])
     body['files'] = deepcopy(entry['files'])
     metadata['files'] = deepcopy(entry['files'])
-    state = begin(request, body, metadata, user.id, {entry['agent_id']: entry['registry_entry']}, [], [], [], max_parallel_tasks=0, context_policy=entry.get('context_policy'))
+    state = begin(request, body, metadata, user.id, {entry['agent_id']: entry['registry_entry']}, [], [], [], max_parallel_tasks=0, context_policy=entry.get('context_policy'), routing_skill_id=entry.get('routing_skill_id', ''))
     state.update(worker=True, active_agent=entry['agent_id'], phase='agent')
     if await finish_cleanup(entry['bound'](entry)):
         raise asyncio.CancelledError
@@ -2401,7 +2677,7 @@ def worker_runtime(adapter, request, user, metadata, state, events):
 
     async def one(index, assignment):
         ticket = uuid4().hex
-        entry = {**deepcopy(assignment), 'task_id': uuid4().hex, 'index': index, 'user_id': user.id, 'parent_chat_id': state['chat_id'], 'parent_message_id': state['message_id'], 'router_id': state['router_id'], 'registry_entry': deepcopy(state['registry'][assignment['agent_id']]), 'bound': bound, 'context_policy': deepcopy(state.get('context_policy', {}))}
+        entry = {**deepcopy(assignment), 'task_id': uuid4().hex, 'index': index, 'user_id': user.id, 'parent_chat_id': state['chat_id'], 'parent_message_id': state['message_id'], 'router_id': state['router_id'], 'registry_entry': deepcopy(state['registry'][assignment['agent_id']]), 'bound': bound, 'context_policy': deepcopy(state.get('context_policy', {})), 'routing_skill_id': state.get('routing_skill_id', '')}
         entry['native_task'] = '[Задание ' + entry['task_id'] + '] ' + entry['task']
         entry['input'] = [{'role': 'user', 'content': entry['native_task']}]
         entries.append(entry)
@@ -2409,8 +2685,7 @@ def worker_runtime(adapter, request, user, metadata, state, events):
         try:
             actor = await adapter.user(user.id)
             await adapter.model(request, entry['agent_id'], actor)
-            owner = await routing_owner(adapter, request, actor, state['router_id'])
-            await adapter.skill(entry['registry_entry']['skill_id'], owner)
+            await check_routing_skill(adapter, request, actor, state['router_id'], entry['registry_entry'])
             entry['files'] = [await adapter.file(f['id'], actor) for f in entry['files']]
             native_metadata = {'model_id': state['router_id'], 'chat_id': state['chat_id'], 'message_id': state['message_id'], 'session_id': metadata.get('session_id'), 'chat_context': {PARALLEL_TICKET: ticket, 'params': deepcopy(metadata.get('params', {}))}, 'files': deepcopy(entry['files'])}
             native_result = await adapter.native_delegate(request, actor, native_metadata, entry['native_task'], [f['id'] for f in entry['files']])
@@ -2485,6 +2760,8 @@ def parallel_tool(adapter, request, user, metadata, state, events):
             arguments['file_ids'] = file_ids
         if require(request, metadata, user.id) is not state:
             raise ValueError('Stale parallel request context')
+        target = agent_id if agent_id in state['registry'] else None
+        await record_routing_event(adapter, state, user, 'parallel_handoff', 'attempted', target)
         calls = group_calls(state)
         group = state['parallel']
         generation = state['generation']
@@ -2556,6 +2833,7 @@ def parallel_tool(adapter, request, user, metadata, state, events):
                 group['results'][index] = deepcopy(entry['result']) if entry and 'result' in entry else {'agent_id': agent_id, 'task': task, 'status': group['status'], 'result': '', 'files': [], 'error': 'Parallel execution did not complete'}
                 if group['status'] == 'timed_out' and group['results'][index]['status'] == 'cancelled':
                     group['results'][index].update(status='timed_out', error='Parallel group deadline exceeded')
+            await record_routing_event(adapter, state, user, 'parallel_execution', group['results'][index]['status'], target)
     return {'spec': {'name': 'delegate_task', 'description': 'Run ONE self-contained assignment in the selected agent. For four assignments issue four delegate_task calls in the SAME generation; OWUI runs them concurrently. Do not mix with other Tools. Workers see only their assignment and selected files. After all results, optionally hand off with a separate lite_delegate call.', 'parameters': {'type': 'object', 'additionalProperties': False, 'properties': {'agent_id': {'type': 'string', 'enum': list(state['registry'])}, 'task': {'type': 'string', 'minLength': 1, 'description': 'Self-contained task with all relevant facts, constraints and expected output.'}, 'file_ids': {'type': 'array', 'items': {'type': 'string'}}}, 'required': ['agent_id', 'task']}}, 'callable': delegate_task}
 
 async def downstream_data(adapter, user, metadata, state):
@@ -2582,6 +2860,7 @@ class Filter:
         priority: int = 0
         base_tool_ids: list[str] = Field(default_factory=list)
         base_skill_ids: list[str] = Field(default_factory=list)
+        routing_skill_id: str = Field(default='', description='Workspace Skill containing agents.json and profiles/.')
         max_parallel_tasks: int = Field(default=4, ge=0, description='Maximum parallel tasks; 0 disables delegate_task and keeps ordinary handoff.')
         parallel_timeout_seconds: int = Field(default=300, gt=0)
 
@@ -2595,6 +2874,11 @@ class Filter:
     def __init__(self):
         self.valves = self.Valves()
 
+    async def inspect_routing_catalog(self, request, user, router_id, valves):
+        source = {}
+        registry, diagnostics = await discover(OWUIAdapter(), request, user, AGENTS, router_id, routing_skill_id=valves.routing_skill_id.strip().lower(), source=source)
+        return (registry, diagnostics, source)
+
     async def inlet(self, body: dict, __request__, __user__: dict, __metadata__: dict=None):
         if __request__.scope.get('lite_handoff_preparing'):
             return body
@@ -2603,7 +2887,9 @@ class Filter:
         metadata = __metadata__ if __metadata__ is not None else body.setdefault('metadata', {})
         if await prepare_worker(adapter, __request__, body, metadata, user):
             return body
-        registry, diagnostics = await discover(adapter, __request__, user, AGENTS, body['model'])
+        registry, diagnostics, source = await self.inspect_routing_catalog(__request__, user, body['model'], self.valves)
         chat_skill_ids = await adapter.chat_skill_ids(body)
-        begin(__request__, body, metadata, user.id, registry, diagnostics, ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids), max_parallel_tasks=self.valves.max_parallel_tasks, parallel_timeout_seconds=self.valves.parallel_timeout_seconds, context_policy=self.valves.model_dump(include=set(ContextPolicy.model_fields)), chat_skill_ids=chat_skill_ids)
+        state = begin(__request__, body, metadata, user.id, registry, diagnostics, ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids), max_parallel_tasks=self.valves.max_parallel_tasks, parallel_timeout_seconds=self.valves.parallel_timeout_seconds, context_policy=self.valves.model_dump(include=set(ContextPolicy.model_fields)), chat_skill_ids=chat_skill_ids, routing_skill_id=source.get('skill_id') or '')
+        state['routing_trace'] = {'router_id': body['model'], 'request_id': state['request_id'], 'source': source, 'candidates': [{key: entry[key] for key in ('agent_id', 'skill_id', 'path', 'skill_version_id') if key in entry} for entry in registry.values()], 'events': []}
+        await record_routing_event(adapter, state, user)
         return body

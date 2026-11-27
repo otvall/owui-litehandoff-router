@@ -46,6 +46,38 @@ class CatalogAdapter(IsolatedAdapter):
 
 
 class SkillCatalogContextTest(unittest.IsolatedAsyncioTestCase):
+    async def test_shared_id_is_never_an_ordinary_skill_even_when_selected_and_attached(self):
+        request, body, metadata, state = self.setup(0)
+        state.update(routing_skill_id="shared", base_skill_ids=["shared"],
+                     chat_skill_ids=["shared", "ordinary"],
+                     registry={"a": {"agent_id": "a", "skill_id": "shared", "name": "Shared",
+                                     "description": "Forecast", "path": "profiles/a.md", "skill_version_id": "v1"}})
+        request.app.state.MODELS["router"]["info"]["meta"]["skillIds"].append("shared")
+        request.app.state.MODELS["a"]["info"]["meta"]["skillIds"].append("SHARED")
+        adapter = CatalogAdapter()
+        builtins = await adapter.builtins(request, {}, {})
+
+        async def view_skill(id, __user__=None):
+            return "Unexpected unguarded read"
+
+        builtins["view_skill"]["callable"] = view_skill
+        adapter.builtins = AsyncMock(return_value=builtins)
+        draft, _ = await prepare_model(adapter, request, body, User(), metadata_draft(metadata), state, "llm", {})
+        catalog = catalog_result(draft["messages"])
+        self.assertEqual(catalog.count("<id>shared</id>"), 1)
+        self.assertIn("<path>profiles/a.md</path>", catalog)
+        self.assertIn("<id>ordinary</id>", catalog)
+        agent, tools = await prepare_model(adapter, request, body, User(), metadata_draft(metadata), state, "llm", {},
+                                           target="a")
+        self.assertNotIn("shared", catalog_result(agent["messages"]).lower())
+        self.assertIn("<id>agent-guide</id>", catalog_result(agent["messages"]))
+        with self.assertRaisesRegex(ValueError, "current model scope"):
+            await tools["view_skill"]["callable"](id="shared")
+        state["registry"] = {}
+        empty, tools = await prepare_model(adapter, request, body, User(), metadata_draft(metadata), state, "llm", {})
+        self.assertNotIn("<id>shared</id>", catalog_result(empty["messages"]))
+        self.assertNotIn("lite_delegate", tools)
+
     def setup(self, limit):
         models = {
             "router": {"id": "router", "info": {"params": {"system": "ROUTER"},
@@ -110,6 +142,23 @@ class SkillCatalogContextTest(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(name, str(draft["messages"]))
                     self.assertNotIn(name, tools)
                 self.assertNotIn("OLD_WIDE_CATALOG", str(draft))
+                self.assertEqual(last_question(draft["messages"])["content"], "Actual question")
+
+    async def test_disabled_builtin_skills_do_not_break_model_preparation(self):
+        for target, worker in ((None, False), ("a", False), ("a", True)):
+            with self.subTest(target=target, worker=worker):
+                request, body, metadata, state = self.setup(0)
+                model = request.app.state.MODELS[target or "router"]
+                model["info"]["meta"].update(capabilities={"builtin_tools": True}, builtinTools={"skills": False})
+                state["worker"] = worker
+                adapter = CatalogAdapter()
+                adapter.builtins = AsyncMock(return_value={})
+                draft, tools = await prepare_model(
+                    adapter, request, body, User(), metadata_draft(metadata), state, "llm", {}, target=target)
+                self.assertEqual(catalog_ids(draft["messages"]), set())
+                self.assertNotIn("view_skill", str(draft["messages"]))
+                self.assertEqual(draft["metadata"]["lite_skill_scope"]["skill_ids"], [])
+                self.assertEqual(set(tools), {"inspect_context"})
                 self.assertEqual(last_question(draft["messages"])["content"], "Actual question")
 
     async def test_inlet_cannot_create_catalog_for_agent_without_skills(self):

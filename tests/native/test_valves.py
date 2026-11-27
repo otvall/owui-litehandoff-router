@@ -42,9 +42,10 @@ class NativeValvesTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(spec["properties"]["max_parallel_tasks"]["minimum"], 0)
             self.assertEqual(set(spec["properties"]), {
                 "priority", "max_parallel_tasks", "parallel_timeout_seconds",
-                "base_tool_ids", "base_skill_ids", "tool_result_history_limit",
+                "base_tool_ids", "base_skill_ids", "routing_skill_id", "tool_result_history_limit",
                 "shared_summary_model_id", "context_window_tokens", "shared_summary_trigger_percent",
             })
+            self.assertEqual(spec["properties"]["routing_skill_id"]["default"], "")
             self.assertEqual(module.Valves().shared_summary_context_percent, 60)
             for bad in (True, "0.5", -1):
                 result = await client.post(url + "/update", json={"max_parallel_tasks": bad})

@@ -112,7 +112,38 @@ UserValves и клиентские списки ресурсов этот наб
 поддерживать native Tools. В карточке агента прикрепите его рабочие Tools/Skills.
 Отдельный preparation Filter агенту не нужен.
 
-Создайте Skill с ID `route-a`, именем `route-profile-a` и описанием
+### Общий Skill с профилями
+
+Упакуйте каталог [routing-profiles](skills/routing-profiles) в ZIP из корня проекта:
+
+```sh
+(cd docs/skills && zip routing-profiles.zip routing-profiles/SKILL.md routing-profiles/agents.json routing-profiles/profiles/forecast.md)
+```
+
+Импортируйте ZIP через **Workspace → Skills**, активируйте Skill и обеспечьте
+read-доступ владельцу Router Workspace Model. В Valves **Router Preparation**
+установите `routing_skill_id` в фактический ID импортированного Skill.
+Папка и её профили подключаются к Router через эту настройку.
+
+`agents.json` связывает точный Workspace Model ID с кратким `description`
+и относительным `path` к непустому текстовому файлу Markdown в `profiles/`.
+У каждой записи свой файл. Используйте точные регистр и путь, без пустых
+сегментов, `.` и `..`. Пример содержит условный `forecast-agent`.
+Перед использованием подставьте свои ID, описания и файлы.
+Профиль и соответствующую запись реестра обновляйте одной версией Skill.
+Право записи на общий Skill давайте администраторам маршрутизации.
+
+При переходе сохраните старый `AGENTS` и отдельные Skills, перенесите их
+описания и тексты в общий Skill и обновите Pipe, Router Preparation и
+[системный промпт Router](templates/router-system-prompt.md). После установки
+`routing_skill_id` начните новое сообщение и проверьте обычную и параллельную
+передачу у пользователей с разными правами. Повреждённый реестр даёт пустой
+каталог и диагностику сервера. Чтобы вернуться к отдельным Skills, очистите
+`routing_skill_id` и начните новый запрос.
+
+### Отдельные Skills и прежний AGENTS
+
+При пустом `routing_skill_id` создайте Skill с ID `route-a`, именем `route-profile-a` и описанием
 «Вопросы по профилю A». Заполните [шаблон routing Skill](templates/routing-skill/SKILL.md):
 условия выбора и исключения, позитивные и негативные примеры, необходимые
 входные данные, самостоятельное поручение, обработку готовых результатов

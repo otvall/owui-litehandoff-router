@@ -1,0 +1,6 @@
+{
+  "forecast-agent": {
+    "path": "profiles/forecast.md",
+    "description": "Прогнозы по временным рядам"
+  }
+}

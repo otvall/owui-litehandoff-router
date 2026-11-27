@@ -5,11 +5,12 @@ from copy import deepcopy
 from .agent_history_block import pack_agent_history
 from .context_budget import check_context_budget, estimate_context_budget, input_budget, shorten_current_tool_results
 from .context_policy import summary_model_id
-from .observation import check_initial_stream, observe_response
+from .observation import check_initial_stream, observe_response, routing_completion_status
 from .prompt_usage import last_prompt_tokens, prompt_token_count, remember_prompt_usage
 from .protocol import last_user
 from .provider_errors import ProviderContextOverflow
 from .shared_summary import SharedSummary, emit_context_status
+from .routing_trace import record_routing_event
 
 
 class CompletionContext:
@@ -129,8 +130,6 @@ class CompletionContext:
                     raise
                 response = await self.send()
         executor = {"kind": "agent", "agent_id": self.target} if self.target else {"kind": "router"}
-        if not (self.target or self.summary):
-            return observe_response(response, self.state, executor)
         generation = self.state.get("generation", 0) + 1
         summary_key = self.summary.applied_summary_key() if self.summary else None
 
@@ -147,7 +146,17 @@ class CompletionContext:
                 await self.summary.status("Провайдер не вернул свежий замер входных токенов.", done=True,
                                           action="lite_prompt_usage")
 
+        async def record_outcome(status):
+            await record_routing_event(self.adapter, self.state, self.user, "execution", status, self.target)
+
+        usage_handler = record_usage if self.target or self.summary else None
+        trace_handler = record_outcome if self.state.get("routing_trace") is not None else None
         if hasattr(response, "body_iterator"):
-            return observe_response(response, self.state, executor, on_usage=record_usage)
-        await record_usage(response.get("usage") if isinstance(response, dict) else None)
-        return observe_response(response, self.state, executor)
+            return observe_response(response, self.state, executor, on_usage=usage_handler, on_finish=trace_handler)
+        if usage_handler:
+            await usage_handler(response.get("usage") if isinstance(response, dict) else None)
+        observed = observe_response(response, self.state, executor)
+        if trace_handler:
+            status = routing_completion_status(response) if isinstance(response, dict) else None
+            await trace_handler(status or "incomplete")
+        return observed

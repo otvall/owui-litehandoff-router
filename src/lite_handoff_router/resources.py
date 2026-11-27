@@ -8,9 +8,17 @@ async def routing_owner(adapter, request, user, router_id):
     return await adapter.owner(await adapter.model(request, router_id, user))
 
 
+async def check_routing_skill(adapter, request, user, router_id, entry):
+    owner = await routing_owner(adapter, request, user, router_id)
+    if "path" in entry:
+        await adapter.routing_skill_snapshot(entry["skill_id"], owner, entry["skill_version_id"])
+    else:
+        await adapter.skill(entry["skill_id"], owner)
+
+
 class ResourceScope:
     def __init__(self, adapter, request, user, model, owner, tool_ids, skill_ids, *, router=False, terminal_id=None,
-                 chat_terminal=False, chat_skill_ids=()):
+                 chat_terminal=False, chat_skill_ids=(), routing_skill_id=""):
         self.adapter, self.request, self.user = adapter, request, user
         self.model_id, self.owner_id = model["id"], owner.id
         self.tool_ids, self.skill_ids = frozenset(tool_ids), frozenset(skill_ids)
@@ -19,7 +27,7 @@ class ResourceScope:
         self.chat_terminal = chat_terminal and router
         self.chat_skill_ids = frozenset(chat_skill_ids) if router else frozenset()
         meta = model.get("info", {}).get("meta") or {}
-        self.card_ids = {"skill": frozenset(ids(meta.get("skillIds") or [])),
+        self.card_ids = {"skill": frozenset(ids(meta.get("skillIds") or [])) - {routing_skill_id},
                          "tool": frozenset(ids(meta.get("toolIds") or []))}
 
     async def authority(self, kind, identifier):

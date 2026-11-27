@@ -1,0 +1,6 @@
+{
+  "forecast-example": {
+    "description": "Пример группы для каталога из документации",
+    "agents": ["forecast-agent"]
+  }
+}

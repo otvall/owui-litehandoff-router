@@ -246,9 +246,15 @@ class ParallelExecutionTest(unittest.IsolatedAsyncioTestCase):
     async def test_overlap_order_same_agent_and_full_output(self):
         request, metadata, state, user = self.setup_request()
         adapter = GroupAdapter()
+        adapter.save_routing_trace = AsyncMock()
+        state["routing_trace"] = {"events": []}
         report = await self.invoke(adapter, request, metadata, state, user,
             [{"agent_id": "a", "task": "slow first", "file_ids": ["input-file"]}, {"agent_id": "a", "task": "second"}])
         self.assertEqual(report["status"], "completed")
+        self.assertEqual([(event["stage"], event["status"], event["agent_id"])
+                          for event in state["routing_trace"]["events"]],
+                         [("parallel_handoff", "attempted", "a")] * 2 + [("parallel_execution", "completed", "a")] * 2)
+        self.assertEqual(adapter.save_routing_trace.await_count, 4)
         self.assertIn("second", adapter.ended[0][0])
         self.assertLess(max(t for _, t in adapter.started), min(t for _, t in adapter.ended))
         self.assertEqual([r["task"] for r in report["results"]], ["slow first", "second"])

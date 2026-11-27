@@ -15,6 +15,7 @@ from .history import context_handoff_key, handoff_evidence
 from .protocol import completed_pairs
 from .prompt_usage import restore_prompt_usage
 from .registry import ids
+from .routing_trace import ROUTING_TRACE, routing_trace_signature
 from .provider_errors import provider_error
 from .summary_response import SummaryGenerationError, summary_response_text
 
@@ -203,6 +204,39 @@ class OWUIAdapter:
         if not skill.is_active:
             raise ValueError(f'Skill "{skill_id}" is inactive')
         return as_dict(skill)
+
+    async def routing_skill_snapshot(self, skill_id, user, version_id=None):
+        from open_webui.models.skills import get_skill_snapshot
+        from open_webui.routers.skills import authorized_skill
+
+        skill = await authorized_skill(skill_id, user)
+        if not skill.is_active or not skill.version_id:
+            raise ValueError("Routing Skill is inactive or has no saved version")
+        version_id = version_id or skill.version_id
+        return {**await get_skill_snapshot(skill, version_id), "version_id": version_id}
+
+    async def render_routing_read(self, name, arguments, skill_name, files):
+        from open_webui.utils.skill_files import (
+            file_summaries, grep_skill_content, skill_content_page, skill_overview,
+        )
+
+        if name == "view_skill":
+            overview = await skill_overview(files["SKILL.md"]["content"], file_summaries(list(files.values())))
+            result = {"id": arguments["id"], "name": skill_name, **overview}
+        elif name == "read_skill_file":
+            path = arguments["path"]
+            if path not in files:
+                raise ValueError("Routing profile is unavailable in the prepared version")
+            page = await skill_content_page(files[path]["content"], arguments["offset"], arguments["max_chars"])
+            result = {"path": path, **page}
+        else:
+            path = arguments.get("path")
+            if path is not None and path not in files:
+                raise ValueError("Routing profile is unavailable in the prepared version")
+            selected = [files[path]] if path is not None else list(files.values())
+            return await asyncio.to_thread(grep_skill_content, selected, arguments["pattern"],
+                                           arguments["case_insensitive"], arguments["max_results"])
+        return json.dumps(result, ensure_ascii=False)
 
     async def owner(self, model):
         identifier = (model.get("info") or {}).get("user_id")
@@ -632,6 +666,29 @@ class OWUIAdapter:
 
         if await self.child(child_id, user):
             await stop_tasks_by_chat_id_endpoint(request, child_id, user=user)
+
+    async def save_routing_trace(self, state, user):
+        chat_id, message_id = state["chat_id"], state["message_id"]
+        if not chat_id or not message_id:
+            return
+        from open_webui.env import WEBUI_SECRET_KEY
+        from open_webui.models.chats import Chats
+        from open_webui.utils.chat_id import is_saved_chat_id
+
+        if not is_saved_chat_id(chat_id):
+            return
+        try:
+            chat = await Chats.get_accessible_chat_by_id(chat_id, user, permission="write")
+            if chat is None or chat.user_id != user.id:
+                return
+            async with Chats.edit_message_output(chat_id, message_id) as message:
+                if message and message.get("role") == "assistant":
+                    snapshot = deepcopy(state["routing_trace"])
+                    message["meta"] = {**(message.get("meta") or {}), ROUTING_TRACE: {
+                        "trace": snapshot, "signature": routing_trace_signature(snapshot, chat_id, message_id, WEBUI_SECRET_KEY),
+                    }}
+        except Exception as error:
+            logging.getLogger(__name__).warning("Routing trace could not be saved (%s)", type(error).__name__)
 
     async def save_prompt_usage(self, state, user, model_id, prompt_tokens, *, summary_key,
                                 agent_id=None, generation=None):

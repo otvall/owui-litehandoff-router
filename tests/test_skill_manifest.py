@@ -4,9 +4,34 @@ import unittest
 from unittest.mock import AsyncMock
 
 from lite_handoff_router.skills import manifest, routing_guidance
+from lite_handoff_router.parallel import parallel_tool
+from lite_handoff_router.protocol import delegate_tool
 
 
 class SkillManifestTest(unittest.IsolatedAsyncioTestCase):
+    async def test_shared_catalog_uses_pinned_descriptions_and_escaped_paths(self):
+        adapter = SimpleNamespace(skill=AsyncMock())
+        registry = {name: {"agent_id": name, "skill_id": "shared", "name": "Shared routes",
+                           "description": "Forecast & review", "path": f"profiles/{name}.md"}
+                    for name in ("a", "b&c")}
+        prompt = await manifest(adapter, ["shared"], None, registry)
+        entries = self.entries(prompt)
+        self.assertEqual([entry["id"] for entry in entries], ["shared", "shared"])
+        self.assertEqual(list(entries[0]), ["id", "agent_id", "agent_name", "name", "description", "path"])
+        self.assertEqual(entries[1]["description"], "Forecast & review")
+        self.assertEqual(entries[1]["path"], "profiles/b&c.md")
+        self.assertIn("profiles/b&amp;c.md", prompt)
+        adapter.skill.assert_not_awaited()
+        state = {"registry": registry}
+        ordinary = delegate_tool(None, None, None, None, state)
+        parallel = parallel_tool(None, None, None, None, state, {})
+        self.assertEqual(ordinary["spec"]["parameters"]["properties"]["agent_id"]["enum"], list(registry))
+        self.assertEqual(parallel["spec"]["parameters"]["properties"]["agent_id"]["enum"], list(registry))
+        guidance = routing_guidance()
+        for phrase in ("read_skill_file(id=id, path=path)", "next_offset", "view_skill(id=id)",
+                       "If reading fails", "lite_delegate or any delegate_task"):
+            self.assertIn(phrase, guidance)
+
     async def test_router_catalogs_are_ordered_and_routing_ids_are_not_duplicated(self):
         adapter = SimpleNamespace(skill=AsyncMock(return_value={"name": "Skill", "description": ""}))
         prompt = await manifest(adapter, ["base", "route", "chat"], None,

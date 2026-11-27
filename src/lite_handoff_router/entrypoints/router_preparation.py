@@ -7,6 +7,7 @@ from ..registry import discover, ids
 from ..runtime import begin
 from ..parallel import prepare_worker
 from ..context_policy import ContextPolicy
+from ..routing_trace import record_routing_event
 
 AGENTS: dict[str, str] = {}
 
@@ -20,6 +21,7 @@ class Filter:
         priority: int = 0
         base_tool_ids: list[str] = Field(default_factory=list)
         base_skill_ids: list[str] = Field(default_factory=list)
+        routing_skill_id: str = Field(default="", description="Workspace Skill containing agents.json and profiles/.")
         max_parallel_tasks: int = Field(default=4, ge=0,
                                         description="Maximum parallel tasks; 0 disables delegate_task and keeps ordinary handoff.")
         parallel_timeout_seconds: int = Field(default=300, gt=0)
@@ -38,6 +40,13 @@ class Filter:
     def __init__(self):
         self.valves = self.Valves()
 
+    async def inspect_routing_catalog(self, request, user, router_id, valves):
+        source = {}
+        registry, diagnostics = await discover(
+            OWUIAdapter(), request, user, AGENTS, router_id,
+            routing_skill_id=valves.routing_skill_id.strip().lower(), source=source)
+        return registry, diagnostics, source
+
     async def inlet(self, body: dict, __request__, __user__: dict, __metadata__: dict = None):
         if __request__.scope.get("lite_handoff_preparing"):
             return body
@@ -46,12 +55,20 @@ class Filter:
         metadata = __metadata__ if __metadata__ is not None else body.setdefault("metadata", {})
         if await prepare_worker(adapter, __request__, body, metadata, user):
             return body
-        registry, diagnostics = await discover(adapter, __request__, user, AGENTS, body["model"])
+        registry, diagnostics, source = await self.inspect_routing_catalog(
+            __request__, user, body["model"], self.valves)
         chat_skill_ids = await adapter.chat_skill_ids(body)
-        begin(__request__, body, metadata, user.id, registry, diagnostics,
+        state = begin(__request__, body, metadata, user.id, registry, diagnostics,
               ids(self.valves.base_tool_ids), ids(self.valves.base_skill_ids),
               max_parallel_tasks=self.valves.max_parallel_tasks,
               parallel_timeout_seconds=self.valves.parallel_timeout_seconds,
               context_policy=self.valves.model_dump(include=set(ContextPolicy.model_fields)),
-              chat_skill_ids=chat_skill_ids)
+              chat_skill_ids=chat_skill_ids, routing_skill_id=source.get("skill_id") or "")
+        state["routing_trace"] = {
+            "router_id": body["model"], "request_id": state["request_id"], "source": source,
+            "candidates": [{key: entry[key] for key in ("agent_id", "skill_id", "path", "skill_version_id")
+                            if key in entry} for entry in registry.values()],
+            "events": [],
+        }
+        await record_routing_event(adapter, state, user)
         return body

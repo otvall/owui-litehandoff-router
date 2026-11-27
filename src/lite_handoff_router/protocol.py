@@ -5,7 +5,8 @@ from uuid import uuid4
 
 from .runtime import require
 from .parallel_state import control_generation, handoff_barrier
-from .resources import routing_owner
+from .resources import check_routing_skill
+from .routing_trace import record_routing_event
 
 AGENT_HISTORY_HEADING = "[Conversation history]"
 SHARED_SUMMARY_PREFIX = "[Shared conversation summary]\n"
@@ -18,8 +19,15 @@ def delegate_tool(adapter, request, user, metadata, state):
         current = require(request, metadata, actor.id)
         if current is not state:
             raise ValueError("Stale delegate request context")
-        control_generation(current, "lite_delegate", {"agent_id": agent_id})
-        return await delegate(adapter, request, actor, current, agent_id)
+        target = agent_id if agent_id in state["registry"] else None
+        try:
+            control_generation(current, "lite_delegate", {"agent_id": agent_id})
+            result = await delegate(adapter, request, actor, current, agent_id)
+        except Exception:
+            await record_routing_event(adapter, state, actor, "handoff", "rejected", target)
+            raise
+        await record_routing_event(adapter, state, actor, "handoff", "accepted", target)
+        return result
 
     return {
         "spec": {
@@ -103,8 +111,7 @@ async def delegate(adapter, request, user, state, agent_id):
     if agent_id not in state["registry"]:
         raise ValueError("agent_id is not in the current permitted registry; use the exact Workspace Model ID")
     await adapter.model(request, agent_id, user)
-    owner = await routing_owner(adapter, request, user, state["router_id"])
-    await adapter.skill(state["registry"][agent_id]["skill_id"], owner)
+    await check_routing_skill(adapter, request, user, state["router_id"], state["registry"][agent_id])
     pending = {"__lite_delegate__": "v2", "agent_id": agent_id, "request_id": state["request_id"], "nonce": uuid4().hex,
                "router_calls": list(state.get("audit") or [])}
     state["pending"].append(pending)
