@@ -1,6 +1,6 @@
 # OWUI Lite Handoff Router
 
-Router для Open WebUI **0.13.3**: самостоятельный ответ или передача
+Router для Open WebUI **0.13.5 и 0.13.3**: самостоятельный ответ или передача
 текущего запроса разрешённому агенту через routing Skill и `lite_delegate`.
 Для составной задачи `delegate_task` собирает независимые результаты A/B,
 после чего Router может передать итоговую работу C.
@@ -38,7 +38,7 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 Реализованный план и критерии приёмки находятся в
 `openspec/changes/archive/2026-10-23-add-parallel-agent-tasks/`.
 
-Разработано и проверено под Open WebUI 0.13.3. Для Router установите Functions
+Основная версия разработки — Open WebUI 0.13.5. Матрица совместимости также включает 0.13.3. Для Router установите Functions
 `dist/router_preparation.py` и `dist/lite_handoff_router.py`.
 Отдельный Tool `dist/routing_skill_authoring.py` устанавливается по инструкции помощника.
 Версия указана информационно в metadata; runtime не ограничивает запуск по номеру версии.

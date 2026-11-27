@@ -37,10 +37,12 @@ PRESENTATION_TOOL = '''class Tools:
         for value in values:
             for artifact in value['files']:
                 source = await get_file_by_id(artifact['id'], user=user, db=None)
-                assert b',42' in Path(Storage.get_file(source.path)).read_bytes()
+                source = source.model_dump() if hasattr(source, 'model_dump') else source
+                assert b',42' in Path(Storage.get_file(source['path'])).read_bytes()
         row = await upload_file_handler(__request__, file=UploadFile(file=BytesIO(document.encode()),filename='presentation.html'),
                                         metadata={}, process=False, process_in_background=False, user=user)
-        file = {'type':'file','id':row.id,'name':'presentation.html','url':'/api/v1/files/'+row.id+'/content'}
+        row = row.model_dump() if hasattr(row, 'model_dump') else row
+        file = {'type':'file','id':row['id'],'name':'presentation.html','url':'/api/v1/files/'+row['id']+'/content'}
         await __event_emitter__({'type':'files','data':{'files':[file]}})
         return json.dumps({'presentation':file,'forecasts':len(values)})
 '''

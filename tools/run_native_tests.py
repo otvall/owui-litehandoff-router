@@ -1,4 +1,4 @@
-"""Isolated contracts for the supported Open WebUI 0.13.3 release."""
+"""Isolated contracts for an installed Open WebUI release."""
 
 import argparse
 from pathlib import Path
@@ -13,6 +13,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=("smoke", "full"), default="full")
     parser.add_argument("--data-root", type=Path)
+    parser.add_argument("--expect-version")
     args = parser.parse_args()
     configure(data_root=args.data_root)
     sys.path.insert(0, str(ROOT))  # Shared test helpers, not runtime dependencies.
@@ -22,6 +23,8 @@ def main():
     from open_webui import config as native_config
 
     print(f"Native installed={VERSION} suite={args.suite}", flush=True)
+    if args.expect_version and VERSION != args.expect_version:
+        parser.error(f"Expected Open WebUI {args.expect_version}, found {VERSION}")
     suite = unittest.TestSuite()
     suite.addTests(unittest.TestLoader().discover(str(ROOT / "tests/native_common")))
     if args.suite == "full":

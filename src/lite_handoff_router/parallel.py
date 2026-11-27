@@ -124,6 +124,9 @@ async def finish_cleanup(awaitable):
 async def find_unbound_child(adapter, request, user, entry):
     if entry.get("child"):
         return
+    if entry.get("created"):
+        entry["child"] = entry["created"]
+        return
     for child_id in await adapter.children(entry["parent_chat_id"], user):
         child = await adapter.child(child_id, user)
         if (child or {}).get("meta", {}).get("parent_message_id") != entry["parent_message_id"]:
@@ -150,6 +153,8 @@ def saved_text(message):
 async def collect_result(adapter, user, entry, native_result):
     result = {"agent_id": entry["agent_id"], "task": entry["task"], "status": "failed",
               "result": "", "files": []}
+    if isinstance(native_result, dict) and native_result.get("status") == "cancelled":
+        return {**result, "status": "cancelled", "error": "Sub-agent cancelled"}
     if not entry.get("child"):
         result["error"] = "Native execution did not create a bound child chat: " + str(native_result)
         return result
@@ -236,6 +241,10 @@ def worker_runtime(adapter, request, user, metadata, state, events):
                 "message_id": state["message_id"], "session_id": metadata.get("session_id"),
                 "chat_context": {PARALLEL_TICKET: ticket, "params": deepcopy(metadata.get("params", {}))},
                 "files": deepcopy(entry["files"])}
+            def child_created(chat_id, message_id):
+                entry["created"] = (chat_id, message_id)
+
+            native_metadata["child_created"] = child_created
             native_result = await adapter.native_delegate(request, actor, native_metadata,
                                                           entry["native_task"], [f["id"] for f in entry["files"]])
             entry["result"] = await collect_result(adapter, actor, entry, native_result)
@@ -255,8 +264,10 @@ def worker_runtime(adapter, request, user, metadata, state, events):
                     await find_unbound_child(adapter, request, user, entry)
                     if entry.get("child"):
                         entry["result"]["chat_url"] = "/c/" + entry["child"][0]
-                        await adapter.stop_child(request, entry["child"][0], user)
-                        await bound(entry)
+                        try:
+                            await adapter.stop_child(request, entry["child"][0], user)
+                        finally:
+                            await bound(entry)
                 finally:
                     await close_mcp_sessions(entry.get("scope", {}).get("lite_handoff_mcp", {}).values())
                 async with event_lock:
@@ -368,7 +379,7 @@ def parallel_tool(adapter, request, user, metadata, state, events):
             group["status"] = ("timed_out" if asyncio.get_running_loop().time() >= group["deadline"]
                                    else "cancelled")
             for other in group["participants"]:
-                if group["status"] == "cancelled" and other is not participant and not other.done():
+                if group["status"] == "cancelled" and other is not participant and not other.done() and not other.cancelling():
                     other.cancel()
             group["preflight"].cancel()
             for missing, observed in enumerate(calls):

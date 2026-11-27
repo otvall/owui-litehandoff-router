@@ -55,7 +55,7 @@ class NativeMcpTransportTest(unittest.IsolatedAsyncioTestCase):
                 if self.server_task.done(): self.server_task.result()
                 await asyncio.sleep(.01)
         self.app=FastAPI(); self.app.state.redis=None
-        self.app.state.oauth_client_manager=SimpleNamespace(get_oauth_token=AsyncMock(side_effect=lambda uid,sid:{'access_token':'oauth-'+uid}))
+        self.app.state.oauth_client_manager=SimpleNamespace(get_oauth_token=AsyncMock(side_effect=lambda uid,sid,**kwargs:{'access_token':'oauth-'+uid}))
         self.sid='native-'+uuid4().hex[:10]
         self.connection={'type':'mcp','info':{'id':self.sid},'url':f'http://127.0.0.1:{self.port}/mcp',
             'auth_type':'session','headers':{'X-Actor':'{{USER_ID}}'},'config':{'enable':True,

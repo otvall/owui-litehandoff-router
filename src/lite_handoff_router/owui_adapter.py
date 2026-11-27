@@ -3,9 +3,12 @@
 import asyncio
 from copy import deepcopy
 import hashlib
+from inspect import signature
 import json
 import logging
-from uuid import UUID
+from time import time
+from urllib.parse import quote
+from uuid import UUID, uuid4
 
 from .binding import bind_tool_context
 from .context_policy import summary_model_id
@@ -64,7 +67,7 @@ class OWUIAdapter:
         selected = ids(body.get("skill_ids") or [])
         mentioned = sorted(extract_skill_ids_from_messages([current] if current else []))
         # Terminal Skills retain their native terminal scope and reader contract.
-        return [sid for sid in ids(selected + mentioned) if not sid.startswith("terminal:")]
+        return [sid for sid in ids(selected + mentioned) if not sid.startswith(("terminal:", "machine:"))]
 
     async def historical_handoff_statuses(self, request, metadata, state, user):
         """Read terminal evidence from this saved branch, never from client metadata."""
@@ -406,7 +409,9 @@ class OWUIAdapter:
     async def terminal_access(self, request, identifier, owner):
         from open_webui.utils import tools
 
-        connections = await tools.Config.get("terminal_server.connections", []) or []
+        connections = await tools.Config.get("machines.connections", []) or []
+        legacy = await tools.Config.get("terminal_server.connections", []) or []
+        connections = [*connections, *legacy]
         connection = next((c for c in connections if c.get("id") == identifier), None)
         groups = await self.member_groups(owner)
         if (not self.servers_enabled() or not connection or not connection.get("enabled", True)
@@ -416,22 +421,48 @@ class OWUIAdapter:
 
     async def terminal_server(self, request, identifier, owner, metadata):
         from open_webui.utils import tools
-        from open_webui.utils.terminals import (
-            terminal_context_available, terminal_context_config, terminal_context_id, get_terminal_server_url)
-
         connection = await self.terminal_access(request, identifier, owner)
-        context_id = terminal_context_id(connection, metadata, "chat")
-        context = terminal_context_config(connection, "chat")
-        if not terminal_context_available(connection, "chat") or (
-                isinstance(context, dict) and context.get("context_id") == "chat_id" and not context_id):
-            raise ValueError("Model terminal requires an available saved chat context: " + identifier)
-        data = next((s for s in await tools.get_terminal_servers(request) if s.get("id") == identifier), None)
+        if hasattr(tools, "get_machines"):
+            from open_webui.utils.chat_id import is_saved_chat_id
+            from open_webui.utils.machines import get_machine_url
+
+            policy = str(connection.get("policy_id") or "").strip()
+            url = get_machine_url(connection)
+            context_id = None
+            if policy or connection.get("server_type") == "orchestrator":
+                if policy:
+                    url += "/p/" + quote(policy, safe="")
+                context = ((connection.get("config") or {}).get("contexts") or {}).get("chat")
+                chat_id = metadata.get("chat_id")
+                scoped = isinstance(context, dict) and context.get("context_id") == "chat_id"
+                if context is False or (scoped and not is_saved_chat_id(chat_id)):
+                    raise ValueError("Model terminal requires an available saved chat context: " + identifier)
+                if scoped:
+                    context_id = "chat:" + chat_id
+            data = next((s for s in await tools.get_machines(request) if s.get("id") == identifier), None)
+            if not data and (policy or connection.get("server_type") == "orchestrator"):
+                from open_webui.utils.headers import bearer_auth_header
+
+                path = str(connection.get("path") or "/openapi.json").lstrip("/")
+                schema = await tools.get_tool_server_data(url + "/" + path, bearer_auth_header(connection.get("key")))
+                data = {"id": identifier, "openapi": schema, "specs": tools.convert_openapi_to_tool_payload(schema)}
+        else:
+            from open_webui.utils.terminals import (
+                terminal_context_available, terminal_context_config, terminal_context_id, get_terminal_server_url)
+
+            url = get_terminal_server_url(connection)
+            context_id = terminal_context_id(connection, metadata, "chat")
+            context = terminal_context_config(connection, "chat")
+            if not terminal_context_available(connection, "chat") or (
+                    isinstance(context, dict) and context.get("context_id") == "chat_id" and not context_id):
+                raise ValueError("Model terminal requires an available saved chat context: " + identifier)
+            data = next((s for s in await tools.get_terminal_servers(request) if s.get("id") == identifier), None)
         if not data or not data.get("specs"):
             raise ValueError("Required model terminal has no available Tools: " + identifier)
-        return connection, {**data, "url": get_terminal_server_url(connection)}, context_id
+        return connection, {**data, "url": url}, context_id
 
     async def terminal_headers(self, request, identifier, connection, actor, metadata, context_id):
-        from open_webui.utils.terminals import TERMINAL_CONTEXT_HEADER
+        context_header = "X-Terminal-Context-Id"
 
         auth = connection.get("auth_type", "bearer")
         if auth not in {"bearer", "session", "system_oauth", "none"}:
@@ -441,13 +472,13 @@ class OWUIAdapter:
         headers.update({"Content-Type": "application/json", "X-User-Id": actor.id})
         # A connection's custom headers cannot override trusted execution routing.
         for name in list(headers):
-            if name.lower() in {"x-user-id", "x-session-id", TERMINAL_CONTEXT_HEADER.lower()}:
+            if name.lower() in {"x-user-id", "x-session-id", context_header.lower()}:
                 headers.pop(name)
         headers["X-User-Id"] = actor.id
         if metadata.get("chat_id"):
             headers["X-Session-Id"] = metadata["chat_id"]
         if context_id:
-            headers[TERMINAL_CONTEXT_HEADER] = context_id
+            headers[context_header] = context_id
         return headers, cookies
 
     async def terminal_tools(self, request, identifier, owner, extra):
@@ -458,8 +489,10 @@ class OWUIAdapter:
         connection, data, context_id = await self.terminal_server(request, identifier, owner, metadata)
         headers, cookies = await self.terminal_headers(request, identifier, connection, actor, metadata, context_id)
         if (connection.get("config") or {}).get("working_directory_context", True):
-            cwd, prompt = await asyncio.gather(tools.get_terminal_cwd(data["url"], headers, cookies),
-                                              tools.get_terminal_system_prompt(data["url"], headers, cookies))
+            get_cwd = getattr(tools, "get_machine_cwd", None) or tools.get_terminal_cwd
+            get_prompt = getattr(tools, "get_machine_system_prompt", None) or tools.get_terminal_system_prompt
+            cwd, prompt = await asyncio.gather(get_cwd(data["url"], headers, cookies),
+                                              get_prompt(data["url"], headers, cookies))
         else:
             cwd, prompt = None, await tools.get_terminal_system_prompt(data["url"], headers, cookies)
 
@@ -600,6 +633,13 @@ class OWUIAdapter:
             return "Parallel tasks require a saved chat"
         if not await Config.get("subagents.enable", False):
             return "Parallel tasks require subagents.enable in OWUI"
+        from open_webui.config import DEFAULT_CONFIG
+        from open_webui.utils.access_control import has_permission
+
+        permissions = DEFAULT_CONFIG.get("user.permissions", {})
+        if ("subagents" in permissions.get("features", {}) and user.role != "admin"
+                and not await has_permission(user.id, "features.subagents", await Config.get("user.permissions"))):
+            return "Parallel tasks require OWUI permission to use sub-agents"
         if metadata.get("params", {}).get("tool_approval_mode", "full") != "full":
             return "Parallel tasks cannot resume tool approval pauses; use a supported approval policy"
         parent = await Chats.get_chat_by_id(metadata["chat_id"])
@@ -618,22 +658,90 @@ class OWUIAdapter:
 
         try:
             UUID(str(file_id))
-            row = await get_file_by_id(file_id, user=user, db=None)
-            path = await asyncio.to_thread(Storage.get_file, row.path) if row.path else None
+            row = as_dict(await get_file_by_id(file_id, user=user, db=None))
+            path = await asyncio.to_thread(Storage.get_file, row["path"]) if row.get("path") else None
             if not path or not Path(path).is_file():
                 raise ValueError("Original upload is missing")
         except Exception as error:
             raise ValueError("OWUI file unavailable or denied: " + str(file_id)) from error
-        return {"type": "file", "id": row.id, "name": (row.meta or {}).get("name") or row.filename,
-                "url": "/api/v1/files/" + row.id + "/content"}
+        return {"type": "file", "id": row["id"], "name": (row.get("meta") or {}).get("name") or row["filename"],
+                "url": "/api/v1/files/" + row["id"] + "/content"}
 
     async def native_delegate(self, request, user, metadata, task, file_ids):
         from open_webui.utils.subagents import delegate
 
-        return await delegate(task, "", False, request=request, user_data=user.model_dump(),
-                              metadata=metadata, file_ids=file_ids,
-                              parent_chat_id=metadata["chat_id"],
-                              parent_message_id=metadata["message_id"])
+        if "background" in signature(delegate).parameters:
+            return await delegate(task, "", False, request=request, user_data=user.model_dump(),
+                                  metadata=metadata, file_ids=file_ids,
+                                  parent_chat_id=metadata["chat_id"],
+                                  parent_message_id=metadata["message_id"])
+        return await self.run_native_child(request, user, metadata, task)
+
+    async def run_native_child(self, request, user, metadata, task):
+        from open_webui.models.chats import ChatForm, Chats
+        from open_webui.models.config import Config
+        from open_webui.socket.main import sio
+        from open_webui.tasks import create_task
+        from open_webui.utils.subagents import _build_request
+
+        config = await Config.get_many("subagents.max_concurrent", "subagents.max_iterations")
+        limit = config.get("subagents.max_concurrent")
+        semaphore = None
+        if limit and limit > 0:
+            state = request.app.state
+            if not hasattr(state, "lite_handoff_worker_slots"):
+                state.lite_handoff_worker_slots = asyncio.Semaphore(limit)
+            semaphore = state.lite_handoff_worker_slots
+            await semaphore.acquire()
+        try:
+            child_request = await _build_request(request, user.id, internal=True)
+            child_request.state.chat_context = deepcopy(metadata["chat_context"])
+            child_request.state.max_tool_call_iterations = config.get("subagents.max_iterations")
+            chat_id, user_id, reply_id, task_id = (str(uuid4()) for _ in range(4))
+            model = metadata["model_id"]
+            files = deepcopy(metadata["files"])
+            timestamp = int(time())
+            prompt = {"id": user_id, "role": "user", "content": task, "parentId": None,
+                      "childrenIds": [reply_id], "models": [model], "timestamp": timestamp,
+                      "files": files}
+            reply = {"id": reply_id, "role": "assistant", "content": "", "parentId": user_id,
+                     "childrenIds": [], "model": model, "timestamp": timestamp, "done": False}
+            chat = await Chats.insert_new_chat(
+                chat_id, user.id, ChatForm(chat={"id": chat_id, "title": " ".join(task.split())[:60],
+                    "models": [model], "files": files,
+                    "history": {"currentId": reply_id, "messages": {user_id: prompt, reply_id: reply}}}),
+                internal_meta={"internal": True, "type": "subagent", "parent_chat_id": metadata["chat_id"],
+                               "parent_message_id": metadata["message_id"], "delegation_id": task_id,
+                               "mode": "foreground"},
+            )
+            if not chat:
+                raise ValueError("Failed to create sub-agent chat")
+            if child_created := metadata.get("child_created"):
+                child_created(chat_id, reply_id)
+            body = {"model": model, "params": deepcopy(metadata["chat_context"].get("params", {})),
+                    "messages": [{"role": "user", "content": task}], "chat_id": chat_id,
+                    "id": reply_id, "parent_id": None, "user_message": prompt, "stream": True,
+                    "session_id": metadata.get("session_id") or "subagent:" + chat_id,
+                    "background_tasks": {}, "files": files}
+
+            async def execute():
+                await sio.emit("events", {"chat_id": metadata["chat_id"], "data": {"type": "chat:children"}},
+                               room="user:" + user.id)
+                await request.app.state.CHAT_COMPLETION_HANDLER(child_request, body, user=user)
+
+            _, child_task = await create_task(request.app.state.redis, execute(), id=chat_id, task_id=task_id)
+            try:
+                await child_task
+            except asyncio.CancelledError:
+                await Chats.upsert_message_to_chat_by_id_and_message_id(
+                    chat_id, reply_id, {"done": True, "error": {"content": "Sub-agent cancelled."}})
+                if asyncio.current_task().cancelling():
+                    raise
+                return {"status": "cancelled"}
+            return {"status": "finished"}
+        finally:
+            if semaphore is not None:
+                semaphore.release()
 
     async def child(self, child_id, user):
         from open_webui.models.chats import Chats

@@ -402,8 +402,24 @@ class Tools:
             await self.run_loop(self.request, body, self.user, metadata)
         state = self.request.scope["lite_handoff_router"]
         self.assertEqual(state["active_agent"], self.agent)
+        from open_webui.models.chats import Chats
+
+        saved = await Chats.get_chat_by_id(metadata["chat_id"])
+        self.assertEqual(saved.chat["history"]["currentId"], metadata["message_id"])
+        self.assertFalse(any(
+            (item.get("meta") or {}).get("type") == "subagent"
+            for item in saved.chat["history"]["messages"].values()
+        ))
         self.assertEqual(state["parallel"]["status"], "completed")
         self.assertEqual(len(state["pending"]), 1)
+        from lite_handoff_router.parallel import PARALLEL_TICKET
+
+        child = self.children[0]
+        self.assertNotIn(PARALLEL_TICKET, child.state.chat_context)
+        child.state.chat_context[PARALLEL_TICKET] = uuid4().hex
+        with self.assertRaisesRegex(ValueError, "Unknown or expired parallel execution ticket"):
+            await self.preparation.inlet({"model": self.router}, child, self.user.model_dump(),
+                                         child.state.metadata)
         self.assertEqual(state["pending"][0]["agent_id"], self.agent)
         final = [p for p in self.seen if p["chat_id"] == metadata["chat_id"] and p["model"] == self.agent]
         self.assertEqual(len(final), 3)
@@ -464,6 +480,10 @@ class Tools:
         message = saved.chat["history"]["messages"][metadata["message_id"]]
         outputs = [item for item in message["output"] if item["type"] == "function_call_output"]
         self.assertEqual([item["call_id"] for item in outputs], ["probe-0", "probe-1"])
+        self.assertFalse(any(
+            (item.get("meta") or {}).get("type") == "subagent"
+            for item in saved.chat["history"]["messages"].values()
+        ))
         self.assertTrue(all("PROBE_RESULT" in str(item["output"]) for item in outputs), outputs)
 
     async def test_four_native_calls_return_four_worker_results(self):

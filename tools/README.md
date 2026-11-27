@@ -367,3 +367,13 @@ export only sanitized evidence. It is not a real LLM or embeddings evaluation.
 комплект на изолированных fixtures; `lifecycle` и `controls` проверяют отмену и ошибки.
 Старый `parallel_gate_pipe.py` — исторический самостоятельный batch-эксперимент,
 он не проверяет текущий product-контракт и не должен использоваться как его приёмка.
+
+## Isolated native release matrix
+
+Run `sh tools/run_native_matrix.sh` from the checkout. Docker uses the official
+0.13.3 and 0.13.5 slim images by digest, including their bundled dependencies.
+Preload these images on the connected machine for an offline run. Each test
+container has networking disabled and uses a fresh SQLite database and a
+temporary copy of the checkout so the suite can rebuild exports. The runner
+prints and checks the installed release before running each full suite. The
+command returns a failure if either suite fails.

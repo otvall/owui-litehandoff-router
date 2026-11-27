@@ -284,7 +284,8 @@ def verify():
 
 
 def children(parent):
-    with sqlite3.connect('file:/app/backend/data/webui.db?mode=ro', uri=True) as db:
+    database = Path(os.environ.get('DATA_DIR', '/app/backend/data')) / 'webui.db'
+    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
         rows = db.execute("SELECT id FROM chat WHERE json_extract(meta, '$.internal')=1 "
                           "AND json_extract(meta, '$.parent_chat_id')=?", (parent,)).fetchall()
     return [row[0] for row in rows]

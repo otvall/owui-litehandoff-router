@@ -314,8 +314,9 @@ async def prepare_model(adapter, request, body, user, metadata, state, llm_id, e
     tools = final_metadata.get("tools")
     if not isinstance(tools, dict):
         raise ValueError("Destination inlet returned an invalid Tool registry")
-    if (final_metadata.get("terminal_id") != terminal_id or draft.get("terminal_id") is not None
-            or final_metadata.get("terminal_skills")
+    if (final_metadata.get("terminal_id") != terminal_id or any(draft.get(key) is not None for key in ("terminal_id", "machine_id"))
+            or final_metadata.get("machine_id") is not None
+            or final_metadata.get("terminal_skills") or final_metadata.get("machine_skills")
             or any(isinstance(s, dict) and s.get("is_terminal") is True
                    for s in final_metadata.get("tool_servers") or [])):
         raise ValueError("Destination inlet changed protected terminal context")

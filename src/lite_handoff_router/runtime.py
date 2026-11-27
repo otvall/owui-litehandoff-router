@@ -17,11 +17,12 @@ RECEIPT = "lite_router"
 def begin(request, body, metadata, user_id, registry, diagnostics, tool_ids, skill_ids,
           *, max_parallel_tasks=4, parallel_timeout_seconds=300, context_policy=None, chat_skill_ids=(),
           routing_skill_id=""):
+    chat_terminal = body.get("machine_id", body.get("terminal_id"))
     state = {
         "request_id": uuid4().hex, "user_id": user_id,
         "chat_id": metadata.get("chat_id"), "message_id": metadata.get("message_id"),
         "router_id": body["model"], "registry": deepcopy(registry),
-        "chat_terminal_id": body.get("terminal_id") if isinstance(body.get("terminal_id"), str) else None,
+        "chat_terminal_id": chat_terminal if isinstance(chat_terminal, str) else None,
         "diagnostics": diagnostics, "base_tool_ids": list(tool_ids),
         "base_skill_ids": list(skill_ids), "source": deepcopy(body.get("messages", [])),
         "chat_skill_ids": list(chat_skill_ids),

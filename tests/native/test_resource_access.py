@@ -313,7 +313,7 @@ class Tools:
             async def list_tool_specs(self): return [{"name":"identity"}]
             async def disconnect(self): pass
 
-        async def token(user_id,server_id):
+        async def token(user_id,server_id,**kwargs):
             return {"access_token":"fixture-"+user_id} if user_id != self.two.id else None
 
         oauth = AsyncMock(side_effect=token)

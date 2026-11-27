@@ -38,6 +38,7 @@ class NativeTerminalAdapterTest(unittest.IsolatedAsyncioTestCase):
         from starlette.requests import Request
         from open_webui.models.config import Config
         from open_webui.models.users import Users
+        from open_webui.utils import tools
 
         suffix=uuid4().hex[:10]
         self.owner,self.one,self.two=[await Users.insert_new_user(n+suffix,n,n+suffix+"@terminal.test",role="user")
@@ -54,21 +55,25 @@ class NativeTerminalAdapterTest(unittest.IsolatedAsyncioTestCase):
         self.data={"id":self.identifier,"url":self.connection["url"],"specs":[
             {"name":n,"description":"Terminal operation","parameters":{"type":"object","properties":{}}}
             for n in ("run_command","read_file","display_file","read_user_terminal","send_user_terminal_input")]}
-        self.previous=await Config.get("terminal_server.connections",[])
-        await Config.upsert({"terminal_server.connections":[self.connection]})
-        self.patches=[patch("open_webui.utils.tools.get_terminal_servers",AsyncMock(side_effect=lambda r:[self.data])),
-                      patch("open_webui.utils.tools.get_terminal_cwd",AsyncMock(return_value="/workspace")),
-                      patch("open_webui.utils.tools.get_terminal_system_prompt",AsyncMock(return_value="TERMINAL_GUIDE"))]
+        modern = hasattr(tools, "get_machines")
+        self.servers_api = "get_machines" if modern else "get_terminal_servers"
+        self.config_key = "machines.connections" if modern else "terminal_server.connections"
+        prefix = "machine" if modern else "terminal"
+        self.previous=await Config.get(self.config_key,[])
+        await Config.upsert({self.config_key:[self.connection]})
+        self.patches=[patch("open_webui.utils.tools." + self.servers_api,AsyncMock(side_effect=lambda r:[self.data])),
+                      patch(f"open_webui.utils.tools.get_{prefix}_cwd",AsyncMock(return_value="/workspace")),
+                      patch(f"open_webui.utils.tools.get_{prefix}_system_prompt",AsyncMock(return_value="TERMINAL_GUIDE"))]
         for p in self.patches: p.start()
 
     async def asyncTearDown(self):
         from open_webui.models.config import Config
         for p in reversed(self.patches): p.stop()
-        await Config.upsert({"terminal_server.connections":self.previous})
+        await Config.upsert({self.config_key:self.previous})
 
     async def save(self):
         from open_webui.models.config import Config
-        await Config.upsert({"terminal_server.connections":[self.connection]})
+        await Config.upsert({self.config_key:[self.connection]})
 
     async def load(self,actor=None,request=None,chat_id=None):
         actor=actor or self.one
@@ -102,11 +107,45 @@ class NativeTerminalAdapterTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError,"unavailable"):
             await self.load()
 
+    async def test_bound_terminal_tool_uses_native_http_transport(self):
+        from aiohttp import web
+
+        received = []
+
+        async def run_command(request):
+            received.append((request.headers["X-User-Id"], request.headers["X-Session-Id"],
+                             await request.json()))
+            return web.json_response({"output": "Fixture marker"})
+
+        app = web.Application()
+        app.router.add_post("/command", run_command)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            host, port = runner.addresses[0]
+            self.connection["url"] = f"http://{host}:{port}"
+            self.data["openapi"] = {"paths": {"/command": {"post": {
+                "operationId": "run_command",
+                "requestBody": {"content": {"application/json": {"schema": {
+                    "type": "object", "properties": {"command": {"type": "string"}},
+                }}}},
+            }}}}
+            await self.save()
+            chat_id = str(uuid4())
+            loaded, _ = await self.load(chat_id=chat_id)
+            result = await loaded["run_command"]["callable"](command="fixture")
+            self.assertEqual(result[0], {"output": "Fixture marker"})
+            self.assertEqual(received, [(self.one.id, chat_id, {"command": "fixture"})])
+        finally:
+            await runner.cleanup()
+
     async def test_missing_specs_context_and_empty_permitted_set_fail(self):
         from open_webui.models.config import Config
         from open_webui.utils import tools
 
-        with patch.object(tools,"get_terminal_servers",AsyncMock(return_value=[])):
+        with patch.object(tools,self.servers_api,AsyncMock(return_value=[])):
             with self.assertRaisesRegex(ValueError,"no available"):
                 await self.load()
         self.data["specs"]=[s for s in self.data["specs"] if s["name"].endswith("user_terminal")]
@@ -121,14 +160,18 @@ class NativeTerminalAdapterTest(unittest.IsolatedAsyncioTestCase):
         await self.save()
         with self.assertRaisesRegex(ValueError,"saved chat"):
             await self.load(chat_id="local:temporary")
-        await Config.upsert({"terminal_server.connections":[]})
+        await Config.upsert({self.config_key:[]})
         with self.assertRaisesRegex(ValueError,"unavailable"):
             await self.load()
 
     async def test_actor_credentials_context_and_native_file_result(self):
         from starlette.requests import Request
         from open_webui.utils import tools
-        from open_webui.utils.middleware import build_terminal_file_tool_result
+        from open_webui.utils import middleware
+
+        modern = hasattr(middleware, "build_machine_file_tool_result")
+        build_file_result = (middleware.build_machine_file_tool_result if modern
+                             else middleware.build_terminal_file_tool_result)
 
         self.connection.update(server_type="orchestrator",policy_id="fixture")
         self.connection["config"]["contexts"]={"chat":{"context_id":"chat_id"}}
@@ -148,8 +191,8 @@ class NativeTerminalAdapterTest(unittest.IsolatedAsyncioTestCase):
                 loaded,_=await self.load(actor,request,chat_id)
                 await loaded["run_command"]["callable"](command="marker")
                 result=await loaded["display_file"]["callable"](path="/workspace/result.txt",page=2)
-                native_file=build_terminal_file_tool_result("display_file",{},result,loaded["display_file"],{"chat_id":chat_id})
-                self.assertEqual(native_file["terminal_id"],self.identifier)
+                native_file=build_file_result("display_file",{},result,loaded["display_file"],{"chat_id":chat_id})
+                self.assertEqual(native_file["machine_id" if modern else "terminal_id"],self.identifier)
                 self.assertEqual(native_file["source"],"open_terminal")
                 calls=[c for c in seen if c["headers"]["X-User-Id"]==actor.id][-2:]
                 for call in calls:
@@ -270,7 +313,7 @@ class NativeTerminalAdapterTest(unittest.IsolatedAsyncioTestCase):
         router,a,b,c=["terminal-"+uuid4().hex[:12] for _ in range(4)]
         other=deepcopy(self.connection)
         other["id"]+="-other"
-        await Config.upsert({"terminal_server.connections":[self.connection,other]})
+        await Config.upsert({self.config_key:[self.connection,other]})
         async def model(identifier,binding=None):
             meta={"lite_handoff":{"terminal_id":binding}} if binding else {}
             row=await Models.insert_new_model(ModelForm(id=identifier,name=identifier,
@@ -317,7 +360,7 @@ class NativeTerminalAdapterTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 run_registry(request).pop(ticket,None)
         servers=AsyncMock(return_value=[self.data,{**self.data,"id":other["id"]}])
-        with patch.object(tools,"get_terminal_servers",servers),patch.object(tools,"execute_tool_server",side_effect=transport):
+        with patch.object(tools,self.servers_api,servers),patch.object(tools,"execute_tool_server",side_effect=transport):
             children=await asyncio.gather(worker(a),worker(b),worker(c),worker(a))
             self.assertEqual({s["headers"]["X-Session-Id"] for s in seen},{children[0],children[1],children[3]})
             self.assertEqual(len(set(children)),4)

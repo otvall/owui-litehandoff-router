@@ -42,7 +42,7 @@ async def completion(request: Request):
     names = {t['function']['name'] for t in body.get('tools', [])}
     assert not {'lite_delegate', 'lite_parallel', 'delegate_task'} & names
     own = 'work-' + letter + '-pgate'
-    assert own in systems and 'work-' + other + '-pgate' not in systems
+    assert own in str(messages) and 'work-' + other + '-pgate' not in str(messages)
     # Denied foreign Skill reads are correctly removed from the agent projection.
     # Advance the scripted provider independently of that filtered history.
     question = str(next(m['content'] for m in reversed(messages) if m['role'] == 'user'))
@@ -138,7 +138,9 @@ def presentation_reply(body):
     assert not {'lite_delegate', 'lite_parallel', 'profile_lookup'} & {
         c['function']['name'] for m in messages for c in m.get('tool_calls', [])}
     assert 'OWN_WORKING_A' not in str(messages) and 'OWN_WORKING_B' not in str(messages)
-    if not any(m['role'] == 'tool' for m in messages):
+    presentation_calls = {call['id'] for message in messages for call in message.get('tool_calls') or []
+                          if call['function']['name'] == 'make_presentation'}
+    if not any(message.get('tool_call_id') in presentation_calls for message in messages):
         return tool_reply(body['model'], 'make_presentation', {})
     return stream_reply(body['model'], {'role': 'assistant', 'content': 'Presentation ready from both complete forecasts.'}, 'stop')
 
